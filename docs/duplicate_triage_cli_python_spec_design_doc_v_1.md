@@ -93,22 +93,25 @@ Single CLI, subcommands. Example name: dupcanon.
 - dupcanon init
   - Validates DB connection, checks pgvector available, prints current schema version.
 
-- dupcanon sync --repo org/name [--type issue|pr|all] [--state open|closed|all] [--since 30d|YYYY-MM-DD]
+- dupcanon sync --repo org/name [--type issue|pr|all] [--state open|closed|all] [--since 30d|YYYY-MM-DD] [--dry-run]
   - Fetches items and upserts into items table.
   - Updates content_hash/content_version.
+  - With --dry-run: computes and prints sync stats without DB writes.
 
-- dupcanon refresh --repo org/name [--known-only]
+- dupcanon refresh --repo org/name [--known-only] [--dry-run]
   - Refreshes state and timestamps from GitHub.
   - With --known-only: only touches items already in DB, does not discover new ones.
+  - With --dry-run: computes and prints refresh stats without DB writes.
 
 - dupcanon embed --repo org/name [--type issue|pr] [--only-changed]
   - Embeds items missing embeddings or with content_version advanced.
 
-- dupcanon candidates --repo org/name --type issue|pr [--k 8] [--min-score 0.75] [--include closed|open|all]
+- dupcanon candidates --repo org/name --type issue|pr [--k 8] [--min-score 0.75] [--include closed|open|all] [--dry-run]
   - Creates candidate_sets and candidate_set_members.
+  - With --dry-run: computes candidate stats without DB writes.
   - v1 default retrieval is k=8 (configurable).
 
-- dupcanon judge --repo org/name --type issue|pr [--provider gemini] [--model gemini-2.5-flash] [--min-edge 0.85] [--allow-stale] [--rejudge]
+- dupcanon judge --repo org/name --type issue|pr [--provider gemini] [--model gemini-2.5-flash] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
   - Reads fresh candidate sets, calls LLM, writes duplicate_edges.
 
 - dupcanon canonicalize --repo org/name --type issue|pr
@@ -140,7 +143,7 @@ The CLI is a thin orchestrator:
 - LLM judging via Gemini API (`gemini-2.5-flash`) using strict JSON responses.
 - Python CLI stack: Typer for command surface + Rich for terminal UX/progress rendering.
 - Data/config modeling and validation: Pydantic.
-- Logging stack: structlog for structured, pretty logs across all commands and internal pipeline steps.
+- Logging stack: Rich logger (`rich.logging.RichHandler`) with consistent key-value fields across all commands and internal pipeline steps.
 - Progress bars: Rich progress only (do not use tqdm in v1).
 
 
@@ -314,11 +317,13 @@ Cluster definition
 
 Canonical selection heuristic (v1)
 1) If the cluster has any open items, canonical must be an open item.
-2) Prefer the most active discussion among eligible items.
+2) If any eligible item is opened by a maintainer, prefer maintainer-opened items.
+   - Maintainer resolution uses collaborators with `admin|maintain|push` permissions.
+3) Prefer the most active discussion among eligible items.
    - issues: higher `comment_count`
    - PRs: higher (`comment_count` + `review_comment_count`)
-3) Then prefer earliest `created_at_gh` (oldest).
-4) Final tie-breaker: lowest item number.
+4) Then prefer earliest `created_at_gh` (oldest).
+5) Final tie-breaker: lowest item number.
 
 Important note about canonical drift
 - If two clusters later merge (new edge connects them), the canonical may change.
@@ -470,7 +475,7 @@ LLM judge
 
 ## Observability and artifacts (v1)
 
-- Use `structlog` everywhere (CLI entrypoints + internal services) with consistent structured fields.
+- Use Rich logger everywhere (CLI entrypoints + internal services) with consistent key-value fields.
 - Minimum log fields: `run_id`, `command`, `repo`, `type`, `stage`, `item_id` (when relevant), `status`, `duration_ms`, `error_class` (when relevant).
 - Persist per-run counters: synced, embedded, candidate sets built, judged, accepted edges, proposed closes, applied closes, skipped, failed.
 - Track skip/failure reason categories for auditability.
@@ -499,7 +504,7 @@ Phase 0: project bootstrap
 - Set up Python project scaffolding (`pyproject.toml`, `uv`, pydantic, ruff, pyright, pytest).
 - Create Typer CLI skeleton with all subcommands stubbed.
 - Use `rich` for CLI output (status panels, tables) and progress bars.
-- Use `structlog` for structured pretty logging from the start; log every command stage and important decision point.
+- Use Rich logger for readable console logging from the start; log every command stage and important decision point.
 - Use Pydantic wherever possible for settings models and boundary validation.
 - Add config loading (`.env` + env vars) and run IDs.
 - Standardize local artifacts path under `.local/artifacts`.
@@ -558,9 +563,10 @@ Phase 6: canonicalization
 - Build duplicate clusters from accepted edges (connected components).
 - Implement canonical scoring in this order:
   1) open if any open exists
-  2) highest discussion activity
-  3) oldest created date
-  4) lowest item number
+  2) maintainer-authored if any eligible maintainer-authored item exists
+  3) highest discussion activity
+  4) oldest created date
+  5) lowest item number
 
 Exit criteria
 - Canonical selection is deterministic across repeated runs.
@@ -626,9 +632,454 @@ Recommended implementation order
 - Retrieval defaults: k=8, min_score=0.75.
 - Thresholds: min_edge=0.85, min_close=0.90.
 - Inputs to model: title + body only (no comments).
-- CLI/tooling: Typer + Rich for terminal UX/progress, structlog for structured logging, and Pydantic for settings/contracts.
+- CLI/tooling: Typer + Rich for terminal UX/progress, Rich logger for logging, and Pydantic for settings/contracts.
 - Edge lifecycle: first accepted edge wins by default; `--rejudge` allows replacement runs.
 - Overrides: no manual override system in v1.
 - Apply gate: explicit approval checkpoint file + `--yes`.
 - Undo/remediation: no reopen automation in v1.
+
+
+## Development journal
+
+### 2026-02-13 — Entry 1 (Phase 0 + Phase 1 foundations)
+
+Today we established the project foundation and database baseline.
+
+What we did
+- Initialized Supabase locally and created the initial migration.
+- Validated migrations locally with `supabase db reset` and `supabase db lint`.
+- Linked hosted Supabase and pushed the migration remotely.
+- Bootstrapped the Python project with `uv`, Typer, Rich logger, and Pydantic settings.
+- Added baseline tests and passed `ruff`, `pyright`, and `pytest`.
+- Added project operating guidance in `AGENTS.md`.
+- Published the initial code to: `https://github.com/sebslight/dupcanon`.
+
+What comes next
+- Begin Phase 2 (`sync` + `refresh --known-only`) with DB + GitHub integration.
+
+### 2026-02-13 — Entry 2 (Phase 2 first pass)
+
+Today we delivered the first working implementation of sync/refresh behavior.
+
+What we did
+- Added a GitHub API client using `gh api` with retry/backoff.
+- Added DB access layer operations for `repos` and `items`.
+- Implemented semantic content hash/version rules (`type`, `title`, `body` only).
+- Implemented `sync` flow (fetch, upsert, content-version behavior, Rich progress + summary).
+- Implemented `refresh` known-item metadata flow (no discovery path yet).
+- Added Pydantic domain models for refs, payloads, enums, and run stats.
+- Added tests for repo parsing, semantic hashing, and `--since` parsing.
+
+What comes next
+- Clarify and document refresh semantics (`default` vs `--known-only`).
+- Add integration tests for content-version and metadata-only updates.
+- Add richer structured timing logs and artifact outputs.
+
+### 2026-02-13 — Entry 3 (dry-run enhancement)
+
+Today we added optional dry-run behavior for Phase 2 commands.
+
+What we did
+- Added `--dry-run` to `sync` and `refresh`.
+- `sync --dry-run` now computes change stats without DB writes.
+- `refresh --dry-run` now computes refresh stats without DB writes.
+- Added DB inspection helper for sync dry-run (`inspect_item_change`).
+- Updated CLI summaries to display `dry_run` mode.
+- Added tests ensuring dry-run flags are exposed in CLI help.
+- Updated command signatures in this spec to reflect dry-run options.
+
+What comes next
+1. Add integration tests against local Supabase for insert/update/content-version behavior.
+2. Add structured timing fields (`duration_ms`) to command/stage logs.
+3. Persist sync/refresh failure artifacts to `.local/artifacts`.
+4. Run real sync/refresh with a valid Postgres DSN and capture baseline metrics.
+
+### 2026-02-13 — Entry 4 (test hardening pass)
+
+Today we hardened the test suite with lightweight, idiomatic coverage for critical behavior.
+
+What we did
+- Expanded `sync_service` tests with focused dry-run behavior checks:
+  - dry-run sync when repo is not yet in DB
+  - dry-run sync when repo exists and inspection path is used
+  - dry-run refresh does not write metadata
+  - DSN validation failure path (`None` and non-Postgres URL)
+- Added targeted unit tests for GitHub client helper behavior:
+  - HTTP status parsing
+  - retry eligibility rules
+  - label extraction
+  - datetime parsing
+- Expanded model tests:
+  - blank `--since` handling
+  - semantic hash changes across item types
+- Added CLI guardrail test:
+  - `sync` fails fast with clear message when `SUPABASE_DB_URL` is not a Postgres DSN
+- Re-ran and passed all quality gates (`ruff`, `pyright`, `pytest`).
+
+What comes next
+1. Add DB integration tests against local Supabase for `content_version` transitions.
+2. Add structured `duration_ms` timing fields at command/stage boundaries.
+3. Persist sync/refresh error artifacts under `.local/artifacts`.
+4. Run and snapshot one real sync/refresh baseline using a valid Postgres DSN.
+
+### 2026-02-13 — Entry 5 (pagination resilience + fetch progress UX)
+
+Today we improved sync behavior for large repositories and made fetch progress more transparent.
+
+What we did
+- Reworked GitHub list retrieval to use `gh api --paginate` stream parsing instead of page-number looping.
+  - This avoids the REST `page` parameter failure on large datasets (`HTTP 422`).
+- Implemented incremental paginated JSON parsing for concatenated page payloads.
+- Added fetch-stage progress updates and page-style aggregation logs during sync.
+  - Progress now reports ongoing fetched increments (issues/PRs) and aggregate totals.
+- Added a friendlier network error hint for `No route to host` to guide users toward reachable DSNs.
+- Expanded tests for:
+  - paginated stream parsing
+  - DSN validation (including IPv6 DSN format acceptance)
+  - CLI error hint behavior
+
+What comes next
+1. Add DB integration tests against local Supabase for versioning transitions.
+2. Add `duration_ms` timing fields to command/stage logs.
+3. Persist sync/refresh failure artifacts for easier debugging.
+4. Run a full baseline sync/refresh and capture metrics artifacts.
+
+### 2026-02-13 — Entry 6 (server-side `--since` + incremental fetch progress)
+
+Today we aligned `--since` semantics with created-at filtering and improved fetch progress visibility.
+
+What we did
+- Updated `--since` behavior to use **server-side created-at filtering** for both issues and PRs.
+  - When `--since` is provided, sync now queries GitHub search with qualifiers like:
+    - `is:issue created:>=YYYY-MM-DD`
+    - `is:pr created:>=YYYY-MM-DD`
+- Removed the large-dataset `page=` pagination path that caused `HTTP 422` failures.
+- Switched paginated streaming to object-by-object (`--jq '.[]'` / `--jq '.items[]'`) processing.
+- Improved fetch progress UX:
+  - live aggregated counts for issues/PRs/total
+  - incremental fetched counter updates while pages are streamed
+- Added tests for:
+  - server-side created filter query wiring
+  - paginated batch flush behavior
+
+What comes next
+1. Add DB integration tests for `content_version` transitions.
+2. Add structured `duration_ms` timings per command stage.
+3. Persist sync/refresh failure artifacts under `.local/artifacts`.
+4. Run full real-repo baselines and capture metrics snapshots.
+
+### 2026-02-13 — Entry 7 (progress UX follow-up + `--since` confirmation)
+
+Today we followed up on sync UX behavior on large repositories and confirmed filtering semantics.
+
+What we did
+- Verified and documented that `--since` is now applied server-side using created-date qualifiers in GitHub search mode.
+- Investigated progress behavior during long fetch runs and updated fetch progress updates to:
+  - increment task completion as batches are processed
+  - show aggregate fetched counters while fetching is in progress
+- Ran real dry-run sync checks against a large repo to validate behavior and catch regressions.
+
+What comes next
+1. Fine-tune fetch progress rendering to ensure increments are clearly visible in all terminal environments.
+2. Add optional periodic progress log checkpoints (non-TUI fallback) for very long runs.
+3. Add DB integration tests for versioning and metadata-only update behavior.
+4. Add timing + artifact outputs to improve long-run observability and debugging.
+
+### 2026-02-13 — Entry 8 (server-side type/state filtering without `--since`)
+
+Today we enforced server-side type/state filtering even when `--since` is not provided.
+
+What we did
+- Updated sync fetch logic so non-`--since` paths also use server-side filtering:
+  - issues fetched via GraphQL `repository.issues(states: ...)`
+  - PRs fetched via GraphQL `repository.pullRequests(states: ...)`
+- Kept `--since` behavior server-side via created-date search qualifiers.
+- Added GraphQL paginated streaming collector using `gh api graphql --paginate` and object streaming.
+- Added tests to verify routing/queries for:
+  - issues without since -> GraphQL issues path
+  - PRs without since -> GraphQL pullRequests path
+  - existing created-date search path with since remains intact
+
+What comes next
+1. Validate large-repo sync runtime and progress readability in real terminal sessions.
+2. Add DB integration tests for content versioning and metadata-only updates.
+3. Add timing and artifact outputs to improve observability on long runs.
+
+### 2026-02-13 — Entry 9 (Supabase pooler compatibility)
+
+Today we fixed DB connection compatibility for the Supabase IPv4 pooler.
+
+What we did
+- Updated DB connection creation to disable psycopg auto-prepared statements:
+  - `connect(..., prepare_threshold=None)`
+- Added a focused unit test to ensure `prepare_threshold=None` is always passed.
+- Re-ran and passed quality gates (`ruff`, `pyright`, `pytest`).
+
+What comes next
+1. Verify sync/refresh end-to-end using the IPv4 pooler DSN.
+2. Add a short troubleshooting note in CLI output/docs for pooler connection mode and DSN expectations.
+3. Continue progress UX refinement for long-running fetch stages.
+
+### 2026-02-13 — Entry 10 (Phase 2 cleanup: DSN guidance + progress checkpoints)
+
+Today we completed the planned Phase 2 cleanup follow-ups.
+
+What we did
+- Added explicit DSN troubleshooting guidance in CLI output (`init`) and error paths.
+- Updated `.env.example` comments to clarify DSN expectations and pooler guidance.
+- Refined sync fetch progress UX for long runs:
+  - richer live counters (issues/PRs/total)
+  - periodic structured checkpoint logs every 500 fetched items
+- Added command/stage timing (`duration_ms`) to sync/refresh structured logs.
+- Expanded test coverage for new CLI/help/config/database behavior.
+
+What comes next
+1. Run end-to-end sync/refresh verification against a reachable IPv4 pooler DSN and capture baseline metrics.
+2. Persist sync/refresh failure artifacts under `.local/artifacts`.
+3. Start Phase 3 embedding pipeline implementation.
+
+### 2026-02-13 — Entry 11 (Phase 3 first pass: embedding command + service)
+
+Today we implemented the first working pass of the embedding pipeline.
+
+What we did
+- Implemented `embed` command wiring in CLI (`--type`, `--only-changed`).
+- Added deterministic embedding text construction with v1 truncation limits:
+  - title max 300
+  - body max 7,700
+  - combined max 8,000
+- Added Gemini embeddings client for `gemini-embedding-001` with retry/backoff and strict dimension validation.
+- Added DB methods for listing embedding candidates and upserting embeddings.
+- Implemented embedding service flow with:
+  - repo/type candidate selection
+  - unchanged-skip mode (`--only-changed`)
+  - batch embedding with per-item fallback on batch failures
+  - Rich progress and Rich logging
+- Added embedding-related config defaults/validation (model, dim=768, batch size, concurrency).
+- Added tests for embedding text limits, embedding flow behavior, batch fallback behavior, and Gemini response parsing.
+
+What comes next
+1. Verify embedding end-to-end on a real repo with Supabase + Gemini credentials.
+2. Add embedding failure artifact persistence under `.local/artifacts`.
+3. Begin Phase 4 candidate retrieval implementation.
+
+### 2026-02-13 — Entry 12 (live verification: Phase 2 cleanup + Phase 3 embed)
+
+Today we executed real end-to-end verification runs against the configured Supabase pooler DSN.
+
+What we did
+- Confirmed configured DSN host resolves to a Supabase pooler endpoint.
+- Ran `dupcanon init` and verified runtime checks passed.
+- Ran `sync` on `psf/requests` (issues, open):
+  - dry-run: fetched 185, failed 0
+  - write run: fetched 185, inserted 185, failed 0
+- Ran `refresh --known-only` on the same repo:
+  - dry-run: known 185, refreshed 185, failed 0
+  - write run: known 185, refreshed 185, failed 0
+- Ran `embed --only-changed` (issues):
+  - first run: discovered 185, queued 185, embedded 185, failed 0
+  - second run: discovered 185, queued 0, skipped_unchanged 185, failed 0
+
+What comes next
+1. Persist sync/refresh/embed failure artifacts under `.local/artifacts` for easier post-mortems.
+2. Start Phase 4 candidate retrieval implementation (`candidates` command + DB persistence).
+
+### 2026-02-13 — Entry 13 (Phase 4 first pass: candidate retrieval)
+
+Today we implemented the first working candidate retrieval pipeline.
+
+What we did
+- Implemented `candidates` command wiring with spec-aligned options:
+  - `--type issue|pr`
+  - `--k` (default 8)
+  - `--min-score` (default 0.75)
+  - `--include open|closed|all`
+- Added candidate retrieval service using pgvector cosine similarity, constrained to same repo + same type.
+- Added DB operations for:
+  - candidate source item discovery
+  - stale marking for prior fresh candidate sets
+  - candidate set creation
+  - candidate member persistence with rank + score
+- Added sync-time staleness propagation:
+  - when an item’s semantic content changes, existing fresh candidate sets for that item are marked stale.
+- Added candidate service and CLI tests.
+
+Live verification
+- Local run against `openclaw/openclaw` after sync + embed:
+  - issues: 1000 source items processed, 1000 candidate sets created
+  - PRs: 1000 source items processed, 1000 candidate sets created
+  - rerun confirmed stale rotation behavior (`stale_marked` increments and new fresh sets are created)
+
+What comes next
+1. Add failure artifact persistence for candidates/sync/refresh/embed under `.local/artifacts`.
+2. Implement Phase 5 judge (`judge` command + strict JSON contract + edge policy).
+
+### 2026-02-13 — Entry 14 (artifact persistence hardening, pre-Phase 5)
+
+Today we added consistent failure artifact persistence across implemented commands.
+
+What we did
+- Added shared artifact writer utility for JSON debug artifacts under `.local/artifacts`.
+- Wired command-level failure artifacts in CLI for:
+  - `sync`
+  - `refresh`
+  - `embed`
+  - `candidates`
+- Wired per-item/per-batch failure artifacts in services where runs continue on partial failure:
+  - sync item write failures
+  - refresh item fetch/update failures
+  - embed batch fallback failures and item failures
+  - candidates item failures
+- Added artifact utility tests and re-ran quality gates.
+
+Validation
+- Verified normal candidates run still succeeds locally.
+- Verified invalid candidates input (`--min-score 1.5`) produces a command-failure artifact and prints its path.
+
+What comes next
+1. Continue Phase 4 refinement if needed (sampling/inspection UX, optional dry-run semantics discussion).
+2. Stop before Phase 5 until explicitly requested.
+
+### 2026-02-13 — Entry 15 (Phase 4 refinement: candidates dry-run)
+
+Today we added `candidates --dry-run` semantics.
+
+What we did
+- Added `--dry-run` option to `dupcanon candidates`.
+- Implemented dry-run behavior in candidate retrieval service:
+  - computes retrieval stats and neighbor counts
+  - does not mutate DB (`candidate_sets` / `candidate_set_members`)
+  - reports would-be stale rotations via fresh-set counting
+- Added DB helper to count fresh candidate sets per item for accurate dry-run stale estimates.
+- Added tests covering dry-run non-mutation behavior and CLI help surface.
+
+What comes next
+1. Keep Phase 4 stable and gather operator feedback on summary outputs.
+2. Wait for explicit go-ahead before starting Phase 5.
+
+### 2026-02-13 — Entry 16 (logging field normalization + Rich logger cleanup)
+
+Today we standardized logging field naming and completed the Rich logger migration cleanup.
+
+What we did
+- Standardized naming conventions across logs/artifacts:
+  - `type` for command/run-level type context
+  - `item_type` for per-item failure events
+  - `item_id` for item identifier in per-item logs
+- Filled a gap in candidates per-item error logs by adding `item_type` consistently.
+- Verified all remaining logging callsites now use the Rich logger wrapper and consistent key-value output.
+
+Validation
+- Re-ran quality gates: `ruff`, `pyright`, `pytest` all pass.
+- Spot-checked failure output formatting and artifact linkage in CLI error paths.
+
+What comes next
+1. Keep Phase 4 stable (sync/embed/candidates) and continue operator usability polish if needed.
+2. Hold before Phase 5 until explicitly requested.
+
+### 2026-02-13 — Entry 17 (Phase 5 implementation: judge + edge recording)
+
+Today we implemented Phase 5 (`judge`) end to end.
+
+What we did
+- Added `judge` command implementation and CLI options:
+  - `--repo`
+  - `--type issue|pr`
+  - `--provider` (v1: gemini)
+  - `--model`
+  - `--min-edge` (default 0.85)
+  - `--allow-stale`
+  - `--rejudge`
+- Implemented judge service pipeline:
+  - reads latest candidate sets per source item (fresh by default; stale optionally)
+  - builds strict duplicate-judge prompt from title/body + candidate context
+  - parses strict JSON decision contract
+  - validates candidate-bounded `duplicate_of` targets
+- Implemented edge writing policy in DB:
+  - first accepted edge wins by default
+  - below-threshold decisions are recorded as `rejected`
+  - `--rejudge` replaces prior accepted edges (old accepted -> rejected, new accepted inserted)
+- Added DB methods for judge work retrieval and duplicate edge persistence.
+- Added failure/invalid-response artifact persistence for judge under `.local/artifacts`.
+
+Gemini integration
+- Added a dedicated judge client using the official `google-genai` SDK.
+- Configured JSON-mode responses (`response_mime_type=application/json`) and retry/backoff for transient/API failures.
+
+Validation
+- Added unit tests for:
+  - judge service edge policy paths
+  - invalid response handling
+  - judge client retry/response parsing helpers
+  - JudgeDecision schema validation rules
+  - judge CLI help/options surface
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (63 passed)
+
+What comes next
+1. Phase 6 canonicalization (cluster + canonical selection rules).
+2. Then Phase 7 plan-close guardrails.
+
+### 2026-02-13 — Entry 18 (Phase 6 implementation: canonicalize + maintainer preference)
+
+Today we implemented Phase 6 (`canonicalize`) and introduced maintainer-aware canonical preference.
+
+What we did
+- Implemented `dupcanon canonicalize --repo ... --type issue|pr`.
+- Added canonicalization service:
+  - reads accepted duplicate edges
+  - builds connected components (undirected clustering)
+  - selects one canonical per cluster deterministically
+- Implemented canonical selection order as:
+  1) open if any open exists
+  2) maintainer-authored if any eligible maintainer-authored item exists
+  3) highest discussion activity
+  4) oldest `created_at_gh`
+  5) lowest item number
+- Added maintainer resolution from GitHub collaborators (`admin|maintain|push`).
+- Added DB methods for accepted-edge and canonical-node reads.
+- Added service/CLI/GitHub client tests for canonicalization and maintainer filtering.
+
+Validation
+- Ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (68 passed)
+- Ran `canonicalize` locally against `openclaw/openclaw` to verify command execution and summaries.
+
+What comes next
+1. Phase 7 `plan-close` with guardrails and approval workflow.
+2. Phase 8 `apply-close` (after planning/guardrail gates are in place).
+
+### 2026-02-13 — Entry 19 (judge hardening: response validity + concurrency safety)
+
+Today we hardened judge behavior based on live runs against `openclaw/openclaw`.
+
+What we did
+- Reduced invalid judge responses by tightening prompt constraints:
+  - explicitly includes `ALLOWED_CANDIDATE_NUMBERS`
+  - numbered candidate formatting
+- Softened strict reasoning handling:
+  - long `reasoning` strings are truncated to 240 chars instead of rejecting the full decision.
+- Added judge concurrency override:
+  - `dupcanon judge ... --workers N`
+  - default remains `DUPCANON_JUDGE_WORKER_CONCURRENCY`.
+- Implemented concurrent judging with race-safe behavior:
+  - progress bar updates only on main thread
+  - per-item work runs in worker threads
+  - accepted-edge uniqueness conflicts are handled as skip (`judge.edge_conflict`) rather than hard failure.
+- Removed unsupported Gemini response schema payload that produced `400 INVALID_ARGUMENT` errors in live runs.
+
+Validation
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (70 passed)
+- Verified local DB writes continue during judge runs and inspected live accepted edges/canonical clusters.
+
+What comes next
+1. Continue iterative judge tuning (invalid-rate and throughput tradeoffs) while collecting more edges.
+2. Start Phase 7 planning/guardrail implementation once enough judged coverage is available.
 

@@ -20,6 +20,7 @@ When implementing behavior, schema, or defaults, follow the spec above first.
 - Thresholds: `min_edge=0.85`, `min_close=0.90`
 - Input content for modeling: title + body only (no comments)
 - Edge policy: first accepted edge wins unless explicit `--rejudge`
+- Canonical preference: if an eligible maintainer-authored item exists in a cluster, prefer it
 - No manual override system in v1
 - Apply gate: requires reviewed plan + approval file + `--yes`
 - Precision gate before production apply: `>= 0.90` on at least 100 labeled proposed closes
@@ -29,7 +30,7 @@ When implementing behavior, schema, or defaults, follow the spec above first.
 - Package/env management: **uv**
 - CLI framework: **Typer**
 - Terminal UX and progress bars: **Rich**
-- Structured pretty logging: **structlog**
+- Logging: **Rich logging** (`rich.logging.RichHandler`) with consistent key-value fields
 - Data/config models and validation: **Pydantic**
 - Lint/format: **ruff**
 - Type checking: **pyright**
@@ -40,7 +41,7 @@ When implementing behavior, schema, or defaults, follow the spec above first.
 - Do **not** use system `python`/`python3`; use `uv run ...`
 - Do **not** use `tqdm` in v1; use Rich progress APIs
 - Use **Pydantic whenever possible** for settings, request/response contracts, and validation at boundaries
-- Use structured logging throughout command entrypoints and internal services
+- Use Rich-based logging throughout command entrypoints and internal services
 
 ## 4) Database and migrations
 
@@ -57,9 +58,17 @@ Migration workflow:
 Current initial schema migration:
 - `supabase/migrations/20260213152733_init_duplicate_canonicalization_schema.sql`
 
+### Supabase connectivity guidance
+
+- Prefer the **Supabase Transaction Pooler (Shared Pooler)** for CLI/runtime DB access.
+- This is ideal for stateless, short-lived interactions and is IPv4 compatible.
+- Transaction pooler mode does **not** support server-side prepared statements.
+- For psycopg, keep prepare disabled (use `prepare_threshold=None`).
+- Do not hardcode connection strings in repo files; read DSNs from env/config only.
+
 ## 5) Logging and observability requirements
 
-Use `structlog` everywhere with consistent fields.
+Use Rich logger everywhere with consistent key-value fields.
 
 Minimum fields where applicable:
 - `run_id`, `command`, `repo`, `type`, `stage`, `item_id`, `status`, `duration_ms`, `error_class`
