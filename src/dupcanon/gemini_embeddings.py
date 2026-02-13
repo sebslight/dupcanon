@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+import json
+import random
+import time
+from urllib import error, request
+
+
+class GeminiEmbeddingError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _should_retry(status_code: int | None) -> bool:
+    if status_code is None:
+        return True
+    if status_code == 429:
+        return True
+    return 500 <= status_code <= 599
+
+
+class GeminiEmbeddingsClient:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = "gemini-embedding-001",
+        output_dimensionality: int = 768,
+        max_attempts: int = 5,
+        timeout_seconds: float = 60.0,
+    ) -> None:
+        self.api_key = api_key
+        self.model = model.removeprefix("models/")
+        self.output_dimensionality = output_dimensionality
+        self.max_attempts = max_attempts
+        self.timeout_seconds = timeout_seconds
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+
+        request_body = {
+            "requests": [
+                {
+                    "model": f"models/{self.model}",
+                    "content": {"parts": [{"text": text}]},
+                    "taskType": "RETRIEVAL_DOCUMENT",
+                    "outputDimensionality": self.output_dimensionality,
+                }
+                for text in texts
+            ]
+        }
+
+        payload = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            f"models/{self.model}:batchEmbedContents?key={self.api_key}"
+        )
+
+        last_error: GeminiEmbeddingError | None = None
+
+        for attempt in range(1, self.max_attempts + 1):
+            req = request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            try:
+                with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                    raw = response.read()
+                return self._parse_embeddings(raw=raw, expected_count=len(texts))
+            except error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                err = GeminiEmbeddingError(body or str(exc), status_code=exc.code)
+                last_error = err
+                if attempt >= self.max_attempts or not _should_retry(exc.code):
+                    raise err from exc
+            except (error.URLError, TimeoutError) as exc:
+                err = GeminiEmbeddingError(str(exc))
+                last_error = err
+                if attempt >= self.max_attempts:
+                    raise err from exc
+
+            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
+            time.sleep(delay)
+
+        if last_error is not None:
+            raise last_error
+        raise GeminiEmbeddingError("unreachable embedding retry state")
+
+    def _parse_embeddings(self, *, raw: bytes, expected_count: int) -> list[list[float]]:
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise GeminiEmbeddingError("invalid JSON in embedding response") from exc
+
+        embeddings_raw = data.get("embeddings")
+        if not isinstance(embeddings_raw, list) or len(embeddings_raw) != expected_count:
+            got_count = len(embeddings_raw) if isinstance(embeddings_raw, list) else "n/a"
+            msg = f"embedding response size mismatch: expected {expected_count}, got {got_count}"
+            raise GeminiEmbeddingError(msg)
+
+        vectors: list[list[float]] = []
+        for embedding in embeddings_raw:
+            if not isinstance(embedding, dict):
+                raise GeminiEmbeddingError("embedding entry is not an object")
+
+            values = embedding.get("values")
+            if not isinstance(values, list):
+                raise GeminiEmbeddingError("embedding values missing")
+
+            vector = [float(value) for value in values]
+            if len(vector) != self.output_dimensionality:
+                msg = (
+                    "embedding dimension mismatch: "
+                    f"expected {self.output_dimensionality}, got {len(vector)}"
+                )
+                raise GeminiEmbeddingError(msg)
+
+            vectors.append(vector)
+
+        return vectors
