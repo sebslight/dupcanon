@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
 
@@ -10,8 +12,25 @@ from dupcanon.artifacts import write_artifact
 from dupcanon.config import Settings
 from dupcanon.database import Database, utc_now
 from dupcanon.logging_config import BoundLogger
-from dupcanon.models import CandidateStats, ItemType, RepoRef, StateFilter, TypeFilter
+from dupcanon.models import (
+    CandidateSourceItem,
+    CandidateStats,
+    ItemType,
+    RepoRef,
+    StateFilter,
+    TypeFilter,
+)
 from dupcanon.sync_service import require_postgres_dsn
+
+
+@dataclass(frozen=True)
+class _CandidateItemResult:
+    processed: int = 0
+    candidate_sets_created: int = 0
+    candidate_members_written: int = 0
+    skipped_missing_embedding: int = 0
+    stale_marked: int = 0
+    failed: int = 0
 
 
 def _include_states(include_filter: StateFilter) -> list[str]:
@@ -55,6 +74,103 @@ def _persist_failure_artifact(
     return str(artifact_path)
 
 
+def _process_source_item(
+    *,
+    settings: Settings,
+    logger: BoundLogger,
+    db: Database,
+    repo_full_name: str,
+    source: CandidateSourceItem,
+    repo_id: int,
+    item_type: ItemType,
+    model: str,
+    include_states: list[str],
+    k: int,
+    min_score: float,
+    dry_run: bool,
+) -> _CandidateItemResult:
+    try:
+        if not source.has_embedding:
+            return _CandidateItemResult(skipped_missing_embedding=1)
+
+        if dry_run:
+            stale_marked = db.count_fresh_candidate_sets_for_item(item_id=source.item_id)
+        else:
+            stale_marked = db.mark_candidate_sets_stale_for_item(item_id=source.item_id)
+
+        neighbors = db.find_candidate_neighbors(
+            repo_id=repo_id,
+            item_id=source.item_id,
+            item_type=item_type,
+            model=model,
+            include_states=include_states,
+            k=k,
+            min_score=min_score,
+        )
+
+        if not dry_run:
+            created_at = utc_now()
+            candidate_set_id = db.create_candidate_set(
+                repo_id=repo_id,
+                item_id=source.item_id,
+                item_type=item_type,
+                embedding_model=model,
+                k=k,
+                min_score=min_score,
+                include_states=include_states,
+                item_content_version=source.content_version,
+                created_at=created_at,
+            )
+            db.create_candidate_set_members(
+                candidate_set_id=candidate_set_id,
+                neighbors=neighbors,
+                created_at=created_at,
+            )
+
+        return _CandidateItemResult(
+            processed=1,
+            candidate_sets_created=1,
+            candidate_members_written=len(neighbors),
+            stale_marked=stale_marked,
+        )
+    except Exception as exc:  # noqa: BLE001
+        artifact_path = _persist_failure_artifact(
+            settings=settings,
+            logger=logger,
+            payload={
+                "command": "candidates",
+                "stage": "candidates",
+                "repo": repo_full_name,
+                "item_id": source.number,
+                "item_type": item_type.value,
+                "k": k,
+                "min_score": min_score,
+                "include_states": include_states,
+                "dry_run": dry_run,
+                "error_class": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        logger.error(
+            "candidates.item_failed",
+            status="error",
+            item_id=source.number,
+            item_type=item_type.value,
+            error_class=type(exc).__name__,
+            artifact_path=artifact_path,
+        )
+        return _CandidateItemResult(failed=1)
+
+
+def _accumulate(*, totals: dict[str, int], result: _CandidateItemResult) -> None:
+    totals["processed"] += result.processed
+    totals["candidate_sets_created"] += result.candidate_sets_created
+    totals["candidate_members_written"] += result.candidate_members_written
+    totals["skipped_missing_embedding"] += result.skipped_missing_embedding
+    totals["stale_marked"] += result.stale_marked
+    totals["failed"] += result.failed
+
+
 def run_candidates(
     *,
     settings: Settings,
@@ -64,6 +180,7 @@ def run_candidates(
     min_score: float,
     include_filter: StateFilter,
     dry_run: bool,
+    worker_concurrency: int | None,
     console: Console,
     logger: BoundLogger,
 ) -> CandidateStats:
@@ -74,6 +191,15 @@ def run_candidates(
         raise ValueError(msg)
     if min_score < 0.0 or min_score > 1.0:
         msg = "--min-score must be between 0 and 1"
+        raise ValueError(msg)
+
+    effective_worker_concurrency = (
+        worker_concurrency
+        if worker_concurrency is not None
+        else settings.candidate_worker_concurrency
+    )
+    if effective_worker_concurrency <= 0:
+        msg = "candidate worker concurrency must be > 0"
         raise ValueError(msg)
 
     db_url = require_postgres_dsn(settings.supabase_db_url)
@@ -96,6 +222,7 @@ def run_candidates(
         min_score=min_score,
         include_states=include_states,
         dry_run=dry_run,
+        worker_concurrency=effective_worker_concurrency,
     )
 
     db = Database(db_url)
@@ -111,12 +238,14 @@ def run_candidates(
         model=model,
     )
 
-    processed = 0
-    candidate_sets_created = 0
-    candidate_members_written = 0
-    skipped_missing_embedding = 0
-    stale_marked = 0
-    failed = 0
+    totals: dict[str, int] = {
+        "processed": 0,
+        "candidate_sets_created": 0,
+        "candidate_members_written": 0,
+        "skipped_missing_embedding": 0,
+        "stale_marked": 0,
+        "failed": 0,
+    }
 
     stage_started = perf_counter()
     progress = Progress(
@@ -131,93 +260,95 @@ def run_candidates(
     with progress:
         task = progress.add_task("Building candidate sets", total=len(source_items))
 
-        for source in source_items:
-            try:
-                if not source.has_embedding:
-                    skipped_missing_embedding += 1
-                    continue
-
-                if dry_run:
-                    stale_marked += db.count_fresh_candidate_sets_for_item(item_id=source.item_id)
-                else:
-                    stale_marked += db.mark_candidate_sets_stale_for_item(item_id=source.item_id)
-
-                neighbors = db.find_candidate_neighbors(
+        if effective_worker_concurrency == 1:
+            for source in source_items:
+                result = _process_source_item(
+                    settings=settings,
+                    logger=logger,
+                    db=db,
+                    repo_full_name=repo.full_name(),
+                    source=source,
                     repo_id=repo_id,
-                    item_id=source.item_id,
                     item_type=item_type,
                     model=model,
                     include_states=include_states,
                     k=k,
                     min_score=min_score,
+                    dry_run=dry_run,
                 )
-
-                if not dry_run:
-                    created_at = utc_now()
-                    candidate_set_id = db.create_candidate_set(
+                _accumulate(totals=totals, result=result)
+                progress.advance(task)
+        else:
+            with ThreadPoolExecutor(max_workers=effective_worker_concurrency) as executor:
+                futures: dict[Future[_CandidateItemResult], CandidateSourceItem] = {
+                    executor.submit(
+                        _process_source_item,
+                        settings=settings,
+                        logger=logger,
+                        db=db,
+                        repo_full_name=repo.full_name(),
+                        source=source,
                         repo_id=repo_id,
-                        item_id=source.item_id,
                         item_type=item_type,
-                        embedding_model=model,
+                        model=model,
+                        include_states=include_states,
                         k=k,
                         min_score=min_score,
-                        include_states=include_states,
-                        item_content_version=source.content_version,
-                        created_at=created_at,
-                    )
-                    db.create_candidate_set_members(
-                        candidate_set_id=candidate_set_id,
-                        neighbors=neighbors,
-                        created_at=created_at,
-                    )
+                        dry_run=dry_run,
+                    ): source
+                    for source in source_items
+                }
 
-                processed += 1
-                candidate_sets_created += 1
-                candidate_members_written += len(neighbors)
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                artifact_path = _persist_failure_artifact(
-                    settings=settings,
-                    logger=logger,
-                    payload={
-                        "command": "candidates",
-                        "stage": "candidates",
-                        "repo": repo.full_name(),
-                        "item_id": source.number,
-                        "item_type": item_type.value,
-                        "k": k,
-                        "min_score": min_score,
-                        "include_states": include_states,
-                        "dry_run": dry_run,
-                        "error_class": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                )
-                logger.error(
-                    "candidates.item_failed",
-                    status="error",
-                    item_id=source.number,
-                    item_type=item_type.value,
-                    error_class=type(exc).__name__,
-                    artifact_path=artifact_path,
-                )
-            finally:
-                progress.advance(task)
+                for future in as_completed(futures):
+                    source = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        artifact_path = _persist_failure_artifact(
+                            settings=settings,
+                            logger=logger,
+                            payload={
+                                "command": "candidates",
+                                "stage": "candidates",
+                                "repo": repo.full_name(),
+                                "item_id": source.number,
+                                "item_type": item_type.value,
+                                "k": k,
+                                "min_score": min_score,
+                                "include_states": include_states,
+                                "dry_run": dry_run,
+                                "error_class": type(exc).__name__,
+                                "error": str(exc),
+                            },
+                        )
+                        logger.error(
+                            "candidates.item_failed",
+                            status="error",
+                            item_id=source.number,
+                            item_type=item_type.value,
+                            error_class=type(exc).__name__,
+                            artifact_path=artifact_path,
+                        )
+                        result = _CandidateItemResult(failed=1)
+
+                    _accumulate(totals=totals, result=result)
+                    progress.advance(task)
 
     stats = CandidateStats(
         discovered=len(source_items),
-        processed=processed,
-        candidate_sets_created=candidate_sets_created,
-        candidate_members_written=candidate_members_written,
-        skipped_missing_embedding=skipped_missing_embedding,
-        stale_marked=stale_marked,
-        failed=failed,
+        processed=totals["processed"],
+        candidate_sets_created=totals["candidate_sets_created"],
+        candidate_members_written=totals["candidate_members_written"],
+        skipped_missing_embedding=totals["skipped_missing_embedding"],
+        stale_marked=totals["stale_marked"],
+        failed=totals["failed"],
     )
 
     logger.info(
         "candidates.stage.complete",
         status="ok",
         dry_run=dry_run,
+        worker_concurrency=effective_worker_concurrency,
         duration_ms=int((perf_counter() - stage_started) * 1000),
         **stats.model_dump(),
     )
@@ -228,6 +359,7 @@ def run_candidates(
         min_score=min_score,
         include_states=include_states,
         dry_run=dry_run,
+        worker_concurrency=effective_worker_concurrency,
         duration_ms=int((perf_counter() - command_started) * 1000),
         **stats.model_dump(),
     )

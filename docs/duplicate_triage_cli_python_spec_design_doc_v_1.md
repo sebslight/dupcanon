@@ -98,6 +98,9 @@ Single CLI, subcommands. Example name: dupcanon.
   - Updates content_hash/content_version.
   - With --dry-run: computes and prints sync stats without DB writes.
 
+- dupcanon maintainers --repo org/name
+  - Lists collaborator-derived maintainer logins (`admin|maintain|push`).
+
 - dupcanon refresh --repo org/name [--known-only] [--dry-run]
   - Refreshes state and timestamps from GitHub.
   - With --known-only: only touches items already in DB, does not discover new ones.
@@ -106,19 +109,24 @@ Single CLI, subcommands. Example name: dupcanon.
 - dupcanon embed --repo org/name [--type issue|pr] [--only-changed]
   - Embeds items missing embeddings or with content_version advanced.
 
-- dupcanon candidates --repo org/name --type issue|pr [--k 8] [--min-score 0.75] [--include closed|open|all] [--dry-run]
+- dupcanon candidates --repo org/name --type issue|pr [--k 8] [--min-score 0.75] [--include closed|open|all] [--dry-run] [--workers N]
   - Creates candidate_sets and candidate_set_members.
   - With --dry-run: computes candidate stats without DB writes.
   - v1 default retrieval is k=8 (configurable).
 
-- dupcanon judge --repo org/name --type issue|pr [--provider gemini] [--model gemini-2.5-flash] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
+- dupcanon judge --repo org/name --type issue|pr [--provider gemini|openai] [--model ...] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
   - Reads fresh candidate sets, calls LLM, writes duplicate_edges.
+  - Default provider/model remains Gemini; OpenAI (`gpt-5-mini`) is available for evaluation runs.
 
 - dupcanon canonicalize --repo org/name --type issue|pr
   - Computes canonicals (on the fly or materializes clusters table).
 
-- dupcanon plan-close --repo org/name --type issue|pr [--min-close 0.90] [--maintainers-source collaborators] [--dry-run]
+- dupcanon plan-close --repo org/name --type issue|pr [--min-close 0.90] [--maintainers-source collaborators] [--dry-run] [--approval-file-out <path>]
   - Produces a close_run and close_run_items.
+  - Writes an approval checkpoint file for reviewed apply gating when not dry-run.
+
+- dupcanon approve-plan --approval-file <path> --approved-by <identity> [--approved-at <ISO8601>] [--force]
+  - Populates approval checkpoint metadata for reviewed plans.
 
 - dupcanon apply-close --close-run <id> --approval-file <path> [--yes]
   - Executes GitHub close operations after verifying an explicit approval checkpoint.
@@ -127,7 +135,8 @@ Single CLI, subcommands. Example name: dupcanon.
 ## Locked model/provider choices (v1)
 
 - Embeddings: Gemini API `gemini-embedding-001` with output dimensionality locked to 768.
-- Duplicate judge: Gemini API `gemini-2.5-flash`.
+- Duplicate judge default: Gemini API `gemini-3-flash-preview`.
+- Optional evaluation override: OpenAI `gpt-5-mini`.
 - Credentials: `.env` or environment variables for local/operator runs.
 
 
@@ -140,7 +149,7 @@ Everything is DB-first. Supabase hosts Postgres and pgvector.
 The CLI is a thin orchestrator:
 - GitHub fetch via GitHub API (gh CLI, REST, or GraphQL) depending on implementation choice.
 - Embeddings via Gemini API (`gemini-embedding-001`).
-- LLM judging via Gemini API (`gemini-2.5-flash`) using strict JSON responses.
+- LLM judging via Gemini API (`gemini-3-flash-preview`) or optional OpenAI (`gpt-5-mini`) using strict JSON responses.
 - Python CLI stack: Typer for command surface + Rich for terminal UX/progress rendering.
 - Data/config modeling and validation: Pydantic.
 - Logging stack: Rich logger (`rich.logging.RichHandler`) with consistent key-value fields across all commands and internal pipeline steps.
@@ -332,6 +341,9 @@ Important note about canonical drift
 Closing rule
 - When closing an item, always close it in favor of the current computed canonical for its cluster.
 - Never close in favor of a non-canonical intermediate.
+- Safety hardening: only plan/apply a close when there is a **direct accepted edge**
+  `from_item -> canonical_item` with confidence `>= min_close`.
+  - A transitive path through intermediate nodes is not sufficient for close eligibility.
 
 
 ## Similarity retrieval
@@ -387,7 +399,8 @@ Output contract (strict JSON)
 - reasoning: short string
 
 Rules
-- v1 judge model is Gemini `gemini-2.5-flash`.
+- v1 default judge model is Gemini `gemini-3-flash-preview`.
+- Optional judge provider/model override for evaluation: OpenAI `gpt-5-mini`.
 - Only accept an edge if confidence >= min_edge (default 0.85).
 - Only allow duplicate_of that is in the candidate set.
 - If the candidate target is closed, we still may record the edge, but closing policy will prefer an open canonical.
@@ -420,6 +433,9 @@ Maintainer resolution (v1)
 - `apply-close` must only run after an explicit reviewed `plan-close` output.
 - `plan-close` writes an approval checkpoint file containing at least:
   - close_run_id
+  - repo
+  - type
+  - min_close
   - deterministic plan hash
   - approved_by
   - approved_at
@@ -450,6 +466,7 @@ Staleness propagation
 
 - Embed batch size: 32 (configurable)
 - Embed worker concurrency: 2 (configurable)
+- Candidates concurrency: 4 (configurable)
 - Judge concurrency: 4 (configurable)
 
 
@@ -550,7 +567,7 @@ Exit criteria
 - No cross-type leakage.
 
 Phase 5: LLM judge + edge recording
-- Implement judge prompt/response contract using Gemini `gemini-2.5-flash`.
+- Implement judge prompt/response contract using default Gemini `gemini-3-flash-preview` (with optional OpenAI `gpt-5-mini` override for evaluation).
 - Enforce strict JSON parsing, candidate-bounded target validation, and `min_edge` threshold.
 - Persist artifacts for invalid model responses under `.local/artifacts`.
 - Implement edge policy: first accepted edge wins; allow explicit `--rejudge` flow.
@@ -628,7 +645,7 @@ Recommended implementation order
 ## Locked v1 decisions summary
 
 - Embeddings: Gemini API `gemini-embedding-001`, dimension 768.
-- Judge: Gemini API `gemini-2.5-flash`.
+- Judge default: Gemini API `gemini-3-flash-preview` (optional OpenAI `gpt-5-mini` override for evaluation).
 - Retrieval defaults: k=8, min_score=0.75.
 - Thresholds: min_edge=0.85, min_close=0.90.
 - Inputs to model: title + body only (no comments).
@@ -1082,4 +1099,255 @@ Validation
 What comes next
 1. Continue iterative judge tuning (invalid-rate and throughput tradeoffs) while collecting more edges.
 2. Start Phase 7 planning/guardrail implementation once enough judged coverage is available.
+
+### 2026-02-13 — Entry 20 (Phase 7 implementation: plan-close + maintainer listing command)
+
+Today we implemented the first full Phase 7 close-planning pass and added a dedicated maintainer listing command.
+
+What we did
+- Implemented `dupcanon plan-close` with spec-aligned options:
+  - `--repo`
+  - `--type issue|pr`
+  - `--min-close` (default 0.90)
+  - `--maintainers-source collaborators`
+  - `--dry-run`
+- Added close-planning service with guardrails:
+  - clusters are formed from accepted duplicate edges
+  - canonical is selected using Phase 6 rules
+  - plan only targets non-canonical items
+  - skip rules include:
+    - `not_open`
+    - `maintainer_author`
+    - `maintainer_assignee`
+    - `uncertain_maintainer_identity`
+    - `low_confidence`
+    - `missing_accepted_edge`
+- Added close plan persistence in DB:
+  - create `close_runs` (mode=`plan`)
+  - create `close_run_items` with `action=close|skip` and `skip_reason`
+- Implemented `dupcanon maintainers --repo org/name`:
+  - outputs collaborator-derived maintainer logins (`admin|maintain|push`), sorted and counted.
+
+Validation
+- Added tests for:
+  - plan-close guardrail behavior and persistence wiring
+  - maintainers service sorting/output behavior
+  - CLI help surface for `plan-close` and `maintainers`
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (76 passed)
+- Ran local command verification against `openclaw/openclaw`:
+  - `maintainers` command output looked correct
+  - `plan-close --dry-run` produced expected close/skip mix
+  - `plan-close` persisted a `close_run` and `close_run_items` in local DB.
+
+What comes next
+1. Implement approval checkpoint file generation/verification for reviewed plans.
+2. Implement Phase 8 `apply-close` gating (`--approval-file` + `--yes`) before any GitHub mutation.
+
+### 2026-02-13 — Entry 21 (candidates concurrency controls)
+
+Today we added worker-concurrency support to `candidates` for throughput scaling.
+
+What we did
+- Added candidates runtime setting:
+  - `DUPCANON_CANDIDATE_WORKER_CONCURRENCY` (default `4`)
+- Added CLI override:
+  - `dupcanon candidates ... --workers N`
+- Implemented concurrent candidate processing with safety constraints:
+  - progress bar updates only on main thread
+  - worker threads process source items independently
+  - per-item failures remain isolated and artifacted
+- Kept dry-run semantics unchanged (no candidate table writes).
+
+Validation
+- Updated config/CLI/service tests and re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (76 passed)
+
+What comes next
+1. Keep tuning worker defaults against API/DB behavior on larger repos.
+2. Continue approval checkpoint + apply-close gating implementation.
+
+### 2026-02-13 — Entry 22 (approval checkpoint + apply-close gating and execution)
+
+Today we completed the review gate path from `plan-close` into `apply-close`.
+
+What we did
+- Added approval checkpoint generation to `plan-close` (non-dry-run):
+  - deterministic `plan_hash`
+  - `close_run_id`, `repo`, `type`, `min_close`
+  - `approved_by`, `approved_at` fields (initially null placeholders for human review)
+  - default output under `.local/artifacts/` or explicit `--approval-file-out <path>`.
+- Added deterministic plan hash utilities and checkpoint read/write helpers.
+- Implemented `apply-close` service and CLI wiring:
+  - requires `--close-run`, `--approval-file`, and `--yes`
+  - validates checkpoint metadata against `close_runs`
+  - recomputes current plan hash from persisted plan items and blocks on mismatch
+  - refuses apply when approval metadata is incomplete (`approved_by` / `approved_at`)
+- Added apply execution persistence:
+  - creates a new `close_runs` row with `mode=apply`
+  - copies planned rows into `close_run_items` for apply audit trail
+  - executes GitHub close+comment operations only for `action=close`
+  - stores per-item `gh_result` and `applied_at`.
+
+Validation
+- Added tests for:
+  - approval hash/checkpoint roundtrip
+  - apply-close gate + success path
+  - plan-close checkpoint output
+  - CLI help/options for `plan-close` and `apply-close`
+  - GitHub close command wiring.
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (83 passed)
+
+What comes next
+1. Add an explicit reviewed-approval authoring flow (e.g. helper command or template guidance) to reduce manual JSON edits.
+2. Run controlled dry-run/limited apply rehearsals before broader usage.
+
+### 2026-02-13 — Entry 23 (approve-plan helper command)
+
+Today we added a dedicated CLI helper so operators no longer need to hand-edit approval JSON.
+
+What we did
+- Added `dupcanon approve-plan`:
+  - `--approval-file <path>` (required)
+  - `--approved-by <identity>` (required)
+  - `--approved-at <ISO8601>` (optional, defaults to now UTC)
+  - `--force` (optional overwrite of existing approval metadata)
+- Implemented approval update service with validation:
+  - rejects blank approver identities
+  - validates timestamp format
+  - refuses accidental overwrite unless `--force`
+- Added CLI summary output for approved checkpoint metadata.
+
+Validation
+- Added service + CLI tests for approve flow and help surface.
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (88 passed)
+
+What comes next
+1. Use `approve-plan` in operator workflow before `apply-close`.
+2. Add optional helper docs/example for staged rollouts (small first apply sets).
+
+### 2026-02-13 — Entry 24 (plan-close safety fix: require direct edge to canonical)
+
+Today we addressed an overly permissive close-planning behavior discovered in live validation.
+
+Problem
+- `plan-close` previously allowed close actions when an item had *any* accepted outgoing edge
+  above threshold, even if the selected canonical was only connected transitively.
+- This could produce "close as duplicate of" pairs without direct evidence between source and canonical.
+
+Fix
+- `plan-close` now requires a **direct accepted edge** `(from_item_id -> canonical_item_id)`
+  with confidence `>= min_close` before a close action is planned.
+- If no direct edge exists, the item is skipped with `missing_accepted_edge`.
+
+Validation
+- Added regression test covering transitive-only chain behavior.
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (89 passed)
+- Re-verified the previously problematic pair now plans as skip (missing direct edge).
+
+What comes next
+1. Consider an additional apply-time safety recheck for direct-edge eligibility.
+2. Continue precision-focused evaluation before larger apply batches.
+
+### 2026-02-13 — Entry 25 (judge prompt hardening: stricter duplicate rubric)
+
+Today we tightened the LLM judging rubric to reduce false positives.
+
+What we changed
+- Rewrote the judge system prompt with explicit conservative criteria:
+  - duplicate requires at least two concrete matching facts
+  - broad topical similarity is explicitly insufficient
+  - vague/generic source reports default to non-duplicate
+  - conflicting root-cause/subsystem details force non-duplicate
+- Added a stricter confidence rubric in prompt guidance:
+  - high confidence reserved for strong/near-exact evidence
+  - avoid high confidence for weak or generic matches
+- Kept output schema unchanged (`is_duplicate`, `duplicate_of`, `confidence`, `reasoning`) for compatibility.
+
+Validation
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (89 passed)
+
+What comes next
+1. Evaluate acceptance precision after prompt hardening.
+2. If needed, add second-pass/consensus gating for accepted edges.
+
+### 2026-02-13 — Entry 26 (judge hardening: skip vague source reports)
+
+Today we added a source-quality guard to reduce low-information false positives.
+
+What we changed
+- Added a pre-judge heuristic that skips LLM judging when SOURCE content is too vague.
+- Vague criteria include very short/low-wording reports and generic low-signal phrasing.
+- On vague-source skip:
+  - no LLM call is made
+  - no duplicate edge is written
+  - run stats increment skip counters (`skipped_not_duplicate`).
+
+Validation
+- Added regression test ensuring vague SOURCE items are skipped without invoking the judge model.
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (90 passed)
+
+Operational note
+- For local re-baselining after this hardening pass, derived tables were cleared while preserving
+  `repos` and `items`:
+  - cleared: `embeddings`, `candidate_sets`, `candidate_set_members`, `duplicate_edges`,
+    `close_runs`, `close_run_items`
+  - preserved: `repos`, `items`.
+
+### 2026-02-13 — Entry 27 (judge runtime defaults update)
+
+Today we updated judge runtime defaults for further experimentation.
+
+What we changed
+- Changed default judge model to `gemini-3-flash-preview`.
+- Changed judge generation temperature from `0` to `1`.
+- Updated config and env defaults accordingly (`DUPCANON_JUDGE_MODEL`).
+
+Validation
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (90 passed)
+
+### 2026-02-14 — Entry 28 (OpenAI judge provider support)
+
+Today we added optional OpenAI support for judging duplicate candidates.
+
+What we changed
+- Added `openai` as a supported `dupcanon judge --provider` value.
+- Added OpenAI judge client implementation with retries/backoff.
+- Added `OPENAI_API_KEY` settings support.
+- Added provider-specific default model behavior:
+  - `--provider openai` defaults to `gpt-5-mini` when `--model` is omitted.
+- Kept Gemini as the default provider/model path.
+
+Validation
+- Added tests for:
+  - OpenAI judge client behavior
+  - openai provider path in judge service
+  - missing `OPENAI_API_KEY` guardrails
+  - settings/env loading for OpenAI key
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (96 passed)
 

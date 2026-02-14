@@ -76,6 +76,7 @@ def test_run_candidates_builds_sets_and_members(monkeypatch) -> None:
         min_score=0.75,
         include_filter=StateFilter.ALL,
         dry_run=False,
+        worker_concurrency=None,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -151,6 +152,7 @@ def test_run_candidates_dry_run_does_not_write(monkeypatch) -> None:
         min_score=0.75,
         include_filter=StateFilter.ALL,
         dry_run=True,
+        worker_concurrency=None,
         console=Console(),
         logger=get_logger("test"),
     )
