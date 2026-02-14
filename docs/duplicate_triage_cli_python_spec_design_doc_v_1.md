@@ -2,6 +2,12 @@
 
 Status: Draft design doc for internal discussion
 
+Implementation status snapshot (2026-02-14)
+- Implemented commands: `init`, `sync`, `refresh`, `embed`, `candidates`, `judge`, `judge-audit`, `canonicalize`, `maintainers`, `plan-close`, `apply-close`.
+- Current apply gate: reviewed persisted `close_run` + explicit `--yes` (no approval-file workflow).
+- Current canonical preference: open-first, then English-language preference, then maintainer preference.
+- Known remaining gaps: no first-class Phase 9 evaluation command yet.
+
 This doc proposes a human-operated CLI that detects duplicate GitHub issues and PRs, canonicalizes duplicates into a single “canonical” item, and optionally closes duplicates. Storage is Supabase (Postgres + pgvector). The key design choice is graph-based canonicalization so we never create “closed in favor of” chains.
 
 
@@ -91,7 +97,8 @@ Canonical
 Single CLI, subcommands. Example name: dupcanon.
 
 - dupcanon init
-  - Validates DB connection, checks pgvector available, prints current schema version.
+  - Validates local runtime configuration and required environment variables.
+  - Prints run id, artifacts directory, and DSN guidance.
 
 - dupcanon sync --repo org/name [--type issue|pr|all] [--state open|closed|all] [--since 30d|YYYY-MM-DD] [--dry-run]
   - Fetches items and upserts into items table.
@@ -109,34 +116,35 @@ Single CLI, subcommands. Example name: dupcanon.
 - dupcanon embed --repo org/name [--type issue|pr] [--only-changed]
   - Embeds items missing embeddings or with content_version advanced.
 
-- dupcanon candidates --repo org/name --type issue|pr [--k 8] [--min-score 0.75] [--include closed|open|all] [--dry-run] [--workers N]
+- dupcanon candidates --repo org/name --type issue|pr [--k 8] [--min-score 0.75] [--include open|closed|all] [--dry-run] [--workers N]
   - Creates candidate_sets and candidate_set_members.
   - With --dry-run: computes candidate stats without DB writes.
-  - v1 default retrieval is k=8 (configurable).
+  - v1 default retrieval is k=8 with `--include open` (configurable).
 
-- dupcanon judge --repo org/name --type issue|pr [--provider gemini|openai] [--model ...] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
-  - Reads fresh candidate sets, calls LLM, writes duplicate_edges.
-  - Default provider/model remains Gemini; OpenAI (`gpt-5-mini`) is available for evaluation runs.
+- dupcanon judge --repo org/name --type issue|pr [--provider gemini|openai|openrouter|openai-codex] [--model ...] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
+  - Reads fresh candidate sets, calls LLM, writes judge_decisions.
+  - Default provider/model remains Gemini; OpenAI (`gpt-5-mini`), OpenRouter (`minimax/minimax-m2.5` by default), and OpenAI Codex via `pi` RPC (`openai-codex`) are available for evaluation runs.
+
+- dupcanon judge-audit --repo org/name --type issue|pr [--sample-size 100] [--seed 42] [--min-edge 0.85] [--cheap-provider ...] [--cheap-model ...] [--strong-provider ...] [--strong-model ...] [--workers N] [--verbose] [--debug-rpc]
+  - Samples latest fresh candidate sets (open source items only), runs cheap and strong judges on the same sample, and records audit outcomes into `judge_audit_runs` + `judge_audit_run_items`.
+  - Produces immediate confusion-matrix style counts (`tp`, `fp`, `fn`, `tn`) plus `conflict` (both accepted, different target).
+  - `--debug-rpc` prints raw `pi --mode rpc` stdout/stderr event lines for `openai-codex` troubleshooting.
 
 - dupcanon canonicalize --repo org/name --type issue|pr
-  - Computes canonicals (on the fly or materializes clusters table).
+  - Computes canonical statistics on the fly from accepted edges (no canonical table materialization in v1).
 
-- dupcanon plan-close --repo org/name --type issue|pr [--min-close 0.90] [--maintainers-source collaborators] [--dry-run] [--approval-file-out <path>]
-  - Produces a close_run and close_run_items.
-  - Writes an approval checkpoint file for reviewed apply gating when not dry-run.
+- dupcanon plan-close --repo org/name --type issue|pr [--min-close 0.90] [--maintainers-source collaborators] [--dry-run]
+  - Produces a close_run and close_run_items for explicit human review.
 
-- dupcanon approve-plan --approval-file <path> --approved-by <identity> [--approved-at <ISO8601>] [--force]
-  - Populates approval checkpoint metadata for reviewed plans.
-
-- dupcanon apply-close --close-run <id> --approval-file <path> [--yes]
-  - Executes GitHub close operations after verifying an explicit approval checkpoint.
+- dupcanon apply-close --close-run <id> [--yes]
+  - Executes GitHub close operations for a reviewed plan run.
 
 
 ## Locked model/provider choices (v1)
 
 - Embeddings: Gemini API `gemini-embedding-001` with output dimensionality locked to 768.
 - Duplicate judge default: Gemini API `gemini-3-flash-preview`.
-- Optional evaluation override: OpenAI `gpt-5-mini`.
+- Optional evaluation overrides: OpenAI `gpt-5-mini` or OpenRouter `minimax/minimax-m2.5`.
 - Credentials: `.env` or environment variables for local/operator runs.
 
 
@@ -149,7 +157,7 @@ Everything is DB-first. Supabase hosts Postgres and pgvector.
 The CLI is a thin orchestrator:
 - GitHub fetch via GitHub API (gh CLI, REST, or GraphQL) depending on implementation choice.
 - Embeddings via Gemini API (`gemini-embedding-001`).
-- LLM judging via Gemini API (`gemini-3-flash-preview`) or optional OpenAI (`gpt-5-mini`) using strict JSON responses.
+- LLM judging via Gemini API (`gemini-3-flash-preview`) or optional OpenAI (`gpt-5-mini`) / OpenRouter (`minimax/minimax-m2.5`) using strict JSON responses.
 - Python CLI stack: Typer for command surface + Rich for terminal UX/progress rendering.
 - Data/config modeling and validation: Pydantic.
 - Logging stack: Rich logger (`rich.logging.RichHandler`) with consistent key-value fields across all commands and internal pipeline steps.
@@ -260,42 +268,81 @@ Constraints
 - unique (candidate_set_id, candidate_item_id)
 - unique (candidate_set_id, rank)
 
-### duplicate_edges
+### judge_decisions
 
-What is a duplicate edge?
-- An accepted directed link from one item to another: “from is a duplicate of to”.
+What is a judge decision?
+- A persisted LLM judgment row for one SOURCE item against its candidate set.
+- Accepted duplicate edges are represented by rows where `final_status='accepted'`.
 
-Why store edges?
-- A pile of pairwise decisions is hard to reason about. Edges let us:
-  - form clusters (connected components)
-  - compute a single canonical per cluster
-  - always close to canonical, eliminating chains
+Why store decisions?
+- Keep a full audit log (accepted, rejected, skipped) for confidence matrices.
+- Preserve model metadata and veto reasons.
+- Derive operational accepted-edge graph for canonicalization/close planning from the same table.
 
 - id (bigint pk)
 - repo_id (fk repos.id)
-- type (text not null)  -- must match both items.type
+- type (text not null)  -- must match involved items.type
 - from_item_id (fk items.id)
-- to_item_id (fk items.id)
+- candidate_set_id (fk candidate_sets.id, nullable)
+- to_item_id (fk items.id, nullable)
+- model_is_duplicate (boolean not null)
+- final_status (text not null) -- 'accepted' | 'rejected' | 'skipped'
 - confidence (real not null)
 - reasoning (text null)
+- relation, root_cause_match, scope_relation, path_match, certainty (text null)
+- veto_reason (text null)
+- min_edge (real not null)
 - llm_provider (text not null)
 - llm_model (text not null)
 - created_by (text not null)
 - created_at (timestamptz)
-- status (text not null) -- 'accepted' | 'rejected'
 
 Constraints
-- from_item_id != to_item_id
-- Enforce type consistency: from_item.type == to_item.type == duplicate_edges.type
+- Enforce repo/type consistency between decision and referenced items.
+- If `model_is_duplicate=true`, `to_item_id` must be non-null.
 
 Cardinality rule (chain-killer)
 - Allow at most one accepted outgoing edge per item:
-  unique (repo_id, type, from_item_id) where status='accepted'
+  unique (repo_id, type, from_item_id) where final_status='accepted'
 
-Upsert policy (stability)
+Rejudge policy (stability)
 - Default: first accepted edge wins.
-- If a later run suggests a different to_item, it is recorded as rejected (or ignored) unless an explicit --rejudge flag is used.
-- Rationale: avoids cluster flip-flopping.
+- With explicit `--rejudge`, prior accepted row for that source is demoted and the new accepted row is inserted.
+- Rationale: avoids cluster flip-flopping while preserving audit history.
+
+### judge_audit_runs and judge_audit_run_items
+Sampled judge audit telemetry.
+
+judge_audit_runs
+- id
+- repo_id
+- type
+- sample_policy (`random_uniform` in v1)
+- sample_seed
+- sample_size_requested
+- sample_size_actual
+- candidate_set_status (`fresh` in v1)
+- source_state_filter (`open` in v1)
+- min_edge
+- cheap_llm_provider, cheap_llm_model
+- strong_llm_provider, strong_llm_model
+- status (`running`|`completed`|`failed`)
+- compared_count, tp, fp, fn, tn, conflict, incomplete
+- created_by, created_at, completed_at
+
+judge_audit_run_items
+- audit_run_id
+- source_item_id, source_number, source_state
+- candidate_set_id
+- cheap_* decision fields (`model_is_duplicate`, `final_status`, `to_item_id`, `confidence`, `veto_reason`, `reasoning`)
+- strong_* decision fields (same shape)
+- outcome_class (`tp`|`fp`|`fn`|`tn`|`conflict`|`incomplete`)
+- created_at
+
+Matrix semantics
+- Positive = `final_status='accepted'`.
+- `conflict` = both accepted but `cheap_to_item_id != strong_to_item_id`.
+- `conflict` rows are excluded from TP.
 
 ### close_runs and close_run_items
 Close auditing.
@@ -358,13 +405,14 @@ Retrieval query
 - Filter by:
   - same repo
   - same type
-  - optional state include (open-only is safer for close decisions)
+  - state include (default: open-only for operational judging)
 
 Store candidates in candidate_sets + candidate_set_members.
 
 Default retrieval params (v1)
 - k = 8
 - min_score = 0.75
+- include = open
 
 
 ## PR handling policy (v1)
@@ -390,21 +438,29 @@ Default retrieval params (v1)
 
 Input
 - Current item (title + body excerpt)
-- Candidate set (top K titles + excerpts + similarity scores)
+- Candidate set (top K titles + excerpts + retrieval rank)
+- Similarity score is retrieval metadata, not duplicate evidence by itself.
 
 Output contract (strict JSON)
 - is_duplicate: boolean
 - duplicate_of: integer (candidate number) or 0/null
 - confidence: float 0..1
 - reasoning: short string
+- relation: `same_instance` | `related_followup` | `partial_overlap` | `different` (optional)
+- root_cause_match: `same` | `adjacent` | `different` (optional)
+- scope_relation: `same_scope` | `source_subset` | `source_superset` | `partial_overlap` | `different_scope` (optional)
+- path_match: `same` | `different` | `unknown` (optional)
+- certainty: `sure` | `unsure` (optional)
 
 Rules
 - v1 default judge model is Gemini `gemini-3-flash-preview`.
-- Optional judge provider/model override for evaluation: OpenAI `gpt-5-mini`.
+- Optional judge provider/model overrides for evaluation: OpenAI `gpt-5-mini` or OpenRouter `minimax/minimax-m2.5`.
 - Only accept an edge if confidence >= min_edge (default 0.85).
 - Only allow duplicate_of that is in the candidate set.
-- If the candidate target is closed, we still may record the edge, but closing policy will prefer an open canonical.
-- If model output is invalid JSON, treat as non-duplicate and persist the response artifact under `.local/artifacts`.
+- If model returns `certainty="unsure"` for a duplicate claim, reject via veto.
+- Follow-up/partial-overlap/subset-superset and bug-vs-feature mismatches are vetoed from acceptance.
+- If the candidate target is not open, reject via veto (`target_not_open`).
+- If model output is invalid JSON, persist an artifact and a `judge_decisions` skipped row (`veto_reason=invalid_response:*`).
 
 
 ## Safety and guardrails (closing)
@@ -416,9 +472,9 @@ Guardrails
 - Assignee protection: do not close items assigned to maintainers.
 - Canonical must be open if any open exists in the cluster.
 - If maintainer identity for a specific item cannot be resolved with confidence, skip that item as uncertain.
-- If maintainer list lookup fails completely, refuse to apply closes.
+- If maintainer list lookup fails during planning/canonicalization, fail the command rather than planning unsafe closes.
 - Require a higher threshold to close than to merely record edges (record >=0.85, close >=0.90).
-- Close comment template is fixed in v1: `Closing as duplicate of {}. If this is incorrect, please contact us.`
+- Close comment template is fixed in v1: `Closing as duplicate of #{}. If this is incorrect, please contact us.`
 
 Maintainer resolution (v1)
 - Use GitHub collaborators API (`gh api repos/<repo>/collaborators?affiliation=all`).
@@ -431,16 +487,9 @@ Maintainer resolution (v1)
 ## Human review and apply gate (v1)
 
 - `apply-close` must only run after an explicit reviewed `plan-close` output.
-- `plan-close` writes an approval checkpoint file containing at least:
-  - close_run_id
-  - repo
-  - type
-  - min_close
-  - deterministic plan hash
-  - approved_by
-  - approved_at
-- `apply-close` requires `--approval-file` and verifies hash equality before any GitHub mutation.
-- `--yes` is still required to skip interactive confirmation.
+- Review is anchored to the persisted `close_run` plan in Postgres.
+- `apply-close` requires `--close-run` and enforces that the referenced run is a `plan` run.
+- `--yes` is still required to execute mutations.
 
 
 ## Refresh and incremental operation
@@ -472,7 +521,7 @@ Staleness propagation
 
 ## Error handling and retries
 
-Retry policy (GitHub + Gemini API)
+Retry policy (GitHub + model providers)
 - Retry on 429, 5xx, and transient network failures.
 - Retry up to 5 attempts with exponential backoff and jitter.
 - Base schedule: 1s, 2s, 4s, 8s, 16s (cap ~30s).
@@ -502,7 +551,11 @@ LLM judge
 ## Supabase operational notes
 
 - Use Supabase CLI for local dev with pgvector enabled.
-- Migrations: Alembic (Python) recommended.
+- Migrations are SQL files under `supabase/migrations/` and are the source of truth.
+- Recommended migration workflow:
+  - `supabase db reset`
+  - `supabase db lint`
+  - `supabase db push` (after local validation)
 - Access:
   - For local runs: use a dedicated DB user.
   - For CI or shared ops: service role key (carefully) or a privileged DB role.
@@ -531,7 +584,7 @@ Exit criteria
 - CLI help and command help surfaces are stable.
 
 Phase 1: schema and migrations
-- Implement Alembic migrations for all v1 tables and constraints.
+- Implement Supabase SQL migrations for all v1 tables and constraints.
 - Enable pgvector and create `vector(768)` embedding column.
 - Add indexes (including vector index) and edge cardinality constraints.
 
@@ -567,7 +620,7 @@ Exit criteria
 - No cross-type leakage.
 
 Phase 5: LLM judge + edge recording
-- Implement judge prompt/response contract using default Gemini `gemini-3-flash-preview` (with optional OpenAI `gpt-5-mini` override for evaluation).
+- Implement judge prompt/response contract using default Gemini `gemini-3-flash-preview` (with optional OpenAI `gpt-5-mini` or OpenRouter `minimax/minimax-m2.5` override for evaluation).
 - Enforce strict JSON parsing, candidate-bounded target validation, and `min_edge` threshold.
 - Persist artifacts for invalid model responses under `.local/artifacts`.
 - Implement edge policy: first accepted edge wins; allow explicit `--rejudge` flow.
@@ -580,10 +633,11 @@ Phase 6: canonicalization
 - Build duplicate clusters from accepted edges (connected components).
 - Implement canonical scoring in this order:
   1) open if any open exists
-  2) maintainer-authored if any eligible maintainer-authored item exists
-  3) highest discussion activity
-  4) oldest created date
-  5) lowest item number
+  2) English-language item if any eligible English item exists
+  3) maintainer-authored if any eligible maintainer-authored item exists
+  4) highest discussion activity
+  5) oldest created date
+  6) lowest item number
 
 Exit criteria
 - Canonical selection is deterministic across repeated runs.
@@ -592,19 +646,19 @@ Phase 7: close planning + guardrails
 - Implement `plan-close` generation and persistence (`close_runs`, `close_run_items`).
 - Apply guardrails (maintainer author/assignee protections, uncertainty skips, canonical-open rule, confidence threshold).
 - Resolve maintainers via GitHub collaborators permissions (`admin|maintain|push`).
-- Generate approval checkpoint file with deterministic plan hash.
 
 Exit criteria
 - Plan output is reproducible and human-reviewable.
 - Guardrail skip reasons are fully auditable.
 
 Phase 8: apply close (mutation path)
-- Implement `apply-close` with required `--approval-file` + `--yes`.
-- Verify checkpoint hash equals current computed plan hash before mutation.
+- Implement `apply-close` with required `--close-run` + `--yes`.
+- Require `close_run.mode = plan` before mutation.
+- Copy planned rows into apply audit rows efficiently (bulk copy) before mutation.
 - Execute GitHub close calls and persist per-item API results.
 
 Exit criteria
-- Hash mismatch blocks all mutations.
+- Invalid run references block all mutations.
 - Partial failures are captured without corrupting run state.
 
 Phase 9: evaluation gate
@@ -616,7 +670,7 @@ Exit criteria
 
 Phase 10: hardening and operator readiness
 - Improve operator UX (Rich progress bars and summaries, categorized failures; no tqdm).
-- Finalize runbooks and troubleshooting docs.
+- Finalize runbooks and troubleshooting docs (`docs/operator_runbook_v1.md` is the current baseline).
 - Validate end-to-end operation from clean setup.
 
 Exit criteria
@@ -645,18 +699,24 @@ Recommended implementation order
 ## Locked v1 decisions summary
 
 - Embeddings: Gemini API `gemini-embedding-001`, dimension 768.
-- Judge default: Gemini API `gemini-3-flash-preview` (optional OpenAI `gpt-5-mini` override for evaluation).
-- Retrieval defaults: k=8, min_score=0.75.
+- Judge default: Gemini API `gemini-3-flash-preview` (optional OpenAI `gpt-5-mini` or OpenRouter `minimax/minimax-m2.5` override for evaluation).
+- Retrieval defaults: k=8, min_score=0.75, include=open.
 - Thresholds: min_edge=0.85, min_close=0.90.
+- Judge guardrail: duplicate targets must be open (`target_not_open` veto otherwise).
 - Inputs to model: title + body only (no comments).
 - CLI/tooling: Typer + Rich for terminal UX/progress, Rich logger for logging, and Pydantic for settings/contracts.
 - Edge lifecycle: first accepted edge wins by default; `--rejudge` allows replacement runs.
 - Overrides: no manual override system in v1.
-- Apply gate: explicit approval checkpoint file + `--yes`.
+- Apply gate: explicit reviewed plan close_run + `--yes`.
 - Undo/remediation: no reopen automation in v1.
 
 
 ## Development journal
+
+Note
+- Entries are chronological snapshots and may describe workflows that were later superseded.
+- Current behavior is defined by the sections above (CLI interface, safety/apply gate, runtime defaults, and locked v1 decisions).
+
 
 ### 2026-02-13 — Entry 1 (Phase 0 + Phase 1 foundations)
 
@@ -1039,9 +1099,9 @@ What comes next
 1. Phase 6 canonicalization (cluster + canonical selection rules).
 2. Then Phase 7 plan-close guardrails.
 
-### 2026-02-13 — Entry 18 (Phase 6 implementation: canonicalize + maintainer preference)
+### 2026-02-13 — Entry 18 (Phase 6 implementation: canonicalize + canonical preference)
 
-Today we implemented Phase 6 (`canonicalize`) and introduced maintainer-aware canonical preference.
+Today we implemented Phase 6 (`canonicalize`) and introduced deterministic canonical preference rules.
 
 What we did
 - Implemented `dupcanon canonicalize --repo ... --type issue|pr`.
@@ -1051,10 +1111,11 @@ What we did
   - selects one canonical per cluster deterministically
 - Implemented canonical selection order as:
   1) open if any open exists
-  2) maintainer-authored if any eligible maintainer-authored item exists
-  3) highest discussion activity
-  4) oldest `created_at_gh`
-  5) lowest item number
+  2) English-language item if any eligible English item exists
+  3) maintainer-authored if any eligible maintainer-authored item exists
+  4) highest discussion activity
+  5) oldest `created_at_gh`
+  6) lowest item number
 - Added maintainer resolution from GitHub collaborators (`admin|maintain|push`).
 - Added DB methods for accepted-edge and canonical-node reads.
 - Added service/CLI/GitHub client tests for canonicalization and maintainer filtering.
@@ -1171,7 +1232,7 @@ What comes next
 1. Keep tuning worker defaults against API/DB behavior on larger repos.
 2. Continue approval checkpoint + apply-close gating implementation.
 
-### 2026-02-13 — Entry 22 (approval checkpoint + apply-close gating and execution)
+### 2026-02-13 — Entry 22 (approval checkpoint + apply-close gating and execution) [historical, superseded]
 
 Today we completed the review gate path from `plan-close` into `apply-close`.
 
@@ -1209,7 +1270,7 @@ What comes next
 1. Add an explicit reviewed-approval authoring flow (e.g. helper command or template guidance) to reduce manual JSON edits.
 2. Run controlled dry-run/limited apply rehearsals before broader usage.
 
-### 2026-02-13 — Entry 23 (approve-plan helper command)
+### 2026-02-13 — Entry 23 (approve-plan helper command) [historical, superseded]
 
 Today we added a dedicated CLI helper so operators no longer need to hand-edit approval JSON.
 
@@ -1309,7 +1370,7 @@ Validation
 Operational note
 - For local re-baselining after this hardening pass, derived tables were cleared while preserving
   `repos` and `items`:
-  - cleared: `embeddings`, `candidate_sets`, `candidate_set_members`, `duplicate_edges`,
+  - cleared: `embeddings`, `candidate_sets`, `candidate_set_members`, `judge_decisions`,
     `close_runs`, `close_run_items`
   - preserved: `repos`, `items`.
 
@@ -1350,4 +1411,147 @@ Validation
   - `uv run ruff check`
   - `uv run pyright`
   - `uv run pytest` (96 passed)
+
+### 2026-02-14 — Entry 29 (approval workflow removal + apply-close initialization speedups)
+
+Today we simplified the apply path by removing approval-file requirements and reducing apply startup latency.
+
+What we changed
+- Removed file-based approval workflow end-to-end:
+  - removed `approval.py` and `approve_plan_service.py`
+  - removed `approve-plan` command
+  - removed `plan-close --approval-file-out`
+  - removed `apply-close --approval-file`
+- Updated apply gate semantics:
+  - `apply-close` now requires reviewed `--close-run` + `--yes`
+  - still enforces `close_run.mode = plan` before mutation
+- Reduced apply initialization overhead:
+  - removed unnecessary maintainer fetch in `apply-close`
+  - replaced row-by-row apply-run copy with bulk `INSERT ... SELECT`
+  - added explicit initialization progress stage so startup work is visible
+- Added DB helper `copy_close_run_items(...)` for efficient apply-run audit copying.
+
+Validation
+- Updated apply/plan/CLI tests for the new workflow.
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (89 passed at this step)
+
+### 2026-02-14 — Entry 30 (canonical preference update: prefer English canonical when available)
+
+Today we updated canonical selection policy so representative issues are more operator-friendly for English-speaking triage flows.
+
+What we changed
+- Updated canonical selection order to:
+  1) open if any open exists
+  2) English-language item if any eligible English item exists
+  3) maintainer-authored if any eligible maintainer-authored item exists
+  4) highest discussion activity
+  5) oldest created date
+  6) lowest item number
+- Added title/body into canonicalization planning models and DB reads so language preference has the required content context.
+- Added a lightweight English heuristic in canonicalization and tracked usage via `english_preferred_clusters` in stats.
+- Updated docs and tests to reflect the new canonical policy.
+
+Validation
+- Added canonicalization regression coverage for English preference behavior.
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (90 passed)
+
+### 2026-02-14 — Entry 31 (documentation realignment + operator runbook baseline)
+
+Today we aligned docs with current code behavior and added a dedicated operator runbook.
+
+What we changed
+- Updated command documentation to match current CLI:
+  - `apply-close` uses `--close-run` + `--yes`
+  - no approval-file/approve-plan flow
+  - `init` now documented as runtime/env validation (not DB schema probing)
+- Updated architecture/operations notes:
+  - canonicalize is on-the-fly (no canonical table materialization in v1)
+  - migration guidance now reflects Supabase SQL workflow (`supabase/migrations`, `db reset/lint/push`)
+  - close comment template documented as `Closing as duplicate of #{}...`
+- Marked superseded approval-flow journal entries as historical and added a journal note clarifying that current behavior is defined by top-level sections.
+- Added `README.md` for quickstart and current command surface.
+- Added `docs/operator_runbook_v1.md` as the baseline end-to-end operator procedure.
+
+Validation
+- Verified docs against current command/service behavior.
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (90 passed)
+
+### 2026-02-14 — Entry 32 (OpenRouter judge provider + default model update)
+
+Today we added OpenRouter as a supported judge provider and set its default model.
+
+What we changed
+- Added `openrouter` as a supported `dupcanon judge --provider` value.
+- Added OpenRouter judge client implementation using the OpenRouter Python SDK (`openrouter`).
+- Added `OPENROUTER_API_KEY` settings support and init checks.
+- Added provider-specific OpenRouter default model behavior:
+  - `--provider openrouter` defaults to `minimax/minimax-m2.5` when `--model` is omitted.
+- Updated README, `.env.example`, and operator/spec docs for OpenRouter usage.
+
+Validation
+- Added tests for:
+  - OpenRouter judge client behavior
+  - openrouter provider path and API-key guardrail in judge service
+  - openrouter default-model behavior in CLI and judge service
+  - settings/env loading for `OPENROUTER_API_KEY`
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest` (97 passed)
+
+### 2026-02-14 — Entry 33 (judge hardening: structured overlap/uncertainty vetoes + counters)
+
+Today we hardened judge acceptance behavior to reduce false-positive accepted edges.
+
+What we changed
+- Updated judge prompt contract to request additional structured fields:
+  - `relation`, `root_cause_match`, `scope_relation`, `path_match`, `certainty`.
+- Added acceptance vetoes for high-risk mismatch classes:
+  - `certainty="unsure"`
+  - `relation` in `related_followup|partial_overlap|different`
+  - root-cause mismatch (`adjacent|different`) for duplicate claims
+  - bug-vs-feature mismatches
+- Removed similarity-score anchoring in prompt context (kept retrieval rank for context ordering).
+- Added run-level decision counters to judge logs:
+  - relation/scope/path/certainty distributions
+  - final status counts (accepted/rejected/skipped)
+  - veto-reason counts.
+
+Validation
+- Added/updated judge service tests for overlap vetoes and uncertainty handling.
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest`
+
+### 2026-02-14 — Entry 34 (schema simplification: `judge_decisions` as single source of truth)
+
+Today we simplified persistence by removing `duplicate_edges` and using `judge_decisions` for both audit and accepted-edge graph derivation.
+
+What we changed
+- Added migration to backfill legacy `duplicate_edges` into `judge_decisions`.
+- Added accepted-edge uniqueness enforcement on `judge_decisions`:
+  - unique `(repo_id, type, from_item_id)` where `final_status='accepted'`.
+- Added `judge_decisions` consistency trigger for item repo/type correctness.
+- Dropped `duplicate_edges` table and its trigger/function.
+- Updated DB read paths for canonicalization and close-planning to read accepted edges from `judge_decisions`.
+- Added persistence for invalid judge responses as `judge_decisions` rows with `final_status='skipped'` and `veto_reason='invalid_response:*'`.
+
+Validation
+- Ran local migration lifecycle checks:
+  - `supabase db reset`
+  - `supabase db lint`
+- Re-ran quality gates:
+  - `uv run ruff check`
+  - `uv run pyright`
+  - `uv run pytest`
 

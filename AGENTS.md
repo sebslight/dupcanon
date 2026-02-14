@@ -21,9 +21,9 @@ When implementing behavior, schema, or defaults, follow the spec above first.
 - Thresholds: `min_edge=0.85`, `min_close=0.90`
 - Input content for modeling: title + body only (no comments)
 - Edge policy: first accepted edge wins unless explicit `--rejudge`
-- Canonical preference: if an eligible maintainer-authored item exists in a cluster, prefer it
+- Canonical preference: if an eligible English item exists in a cluster, prefer it; then prefer maintainer-authored among remaining eligible items
 - No manual override system in v1
-- Apply gate: requires reviewed plan + approval file + `--yes`
+- Apply gate: requires reviewed plan close_run + explicit `--yes`
 - Precision gate before production apply: `>= 0.90` on at least 100 labeled proposed closes
 
 ## 3) Required Python/tooling stack
@@ -91,7 +91,7 @@ Implement in this order unless explicitly reprioritized:
 9. apply-close
 10. evaluation/hardening
 
-Never implement `apply-close` before guardrails, planning, and approval-file verification exist.
+Never implement `apply-close` before guardrails and planning exist.
 
 ## 7) Safety/guardrails to preserve
 
@@ -100,7 +100,7 @@ Never implement `apply-close` before guardrails, planning, and approval-file ver
 - Skip uncertain maintainer identity cases
 - Require open canonical if any open item exists in cluster
 - Close comment template (v1):
-  - `Closing as duplicate of {}. If this is incorrect, please contact us.`
+  - `Closing as duplicate of #{}. If this is incorrect, please contact us.`
 
 ## 8) Definition of done for code changes
 
