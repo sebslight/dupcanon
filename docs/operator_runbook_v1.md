@@ -267,6 +267,9 @@ rg "validation_alias=\"DUPCANON_" src/dupcanon/config.py
 # provider/model/thinking resolution logic
 rg "def default_judge_model|validate_thinking_for_provider|require_judge_api_key" src/dupcanon/judge_providers.py
 
+# shared judge runtime path used by judge/audit/detect-new
+rg "SYSTEM_PROMPT|def get_thread_local_judge_client|def build_user_prompt|def parse_judge_decision" src/dupcanon/judge_runtime.py
+
 # retry/backoff defaults and validation helpers
 rg "def should_retry_http_status|def retry_delay_seconds|def validate_max_attempts" src/dupcanon/llm_retry.py
 

@@ -97,6 +97,7 @@ Purpose: classify a *single new* issue/PR as duplicate/maybe/not.
 - ✅ Current CLI architecture is the right base (DB-first + reusable services).
 - ✅ Existing batch commands already support corpus maintenance.
 - ✅ `detect-new` command/service is implemented for one-item online inference.
+- ✅ Shared judge runtime (`src/dupcanon/judge_runtime.py`) now provides prompt/client/parse/veto helpers used by online detection and batch judge paths.
 - ✅ PR diff context (file paths + bounded patch excerpts) is implemented for PR online inference.
 - ✅ GitHub Actions shadow workflow is implemented (`.github/workflows/detect-new-shadow.yml`).
 - ⚠️ Hosted DB access remains required for workflow execution (local DB alone is insufficient).

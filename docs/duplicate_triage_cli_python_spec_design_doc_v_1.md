@@ -6,6 +6,8 @@ Implementation status snapshot (2026-02-14)
 - Implemented commands: `init`, `sync`, `refresh`, `embed`, `candidates`, `judge`, `judge-audit`, `detect-new`, `canonicalize`, `maintainers`, `plan-close`, `apply-close`.
 - Current apply gate: reviewed persisted `close_run` + explicit `--yes` (no approval-file workflow).
 - Current canonical preference: open-first, then English-language preference, then maintainer preference.
+- Judge runtime path is centralized in `src/dupcanon/judge_runtime.py` and reused by judge/audit/online detect.
+- Shared retry/backoff/attempt validation primitives are centralized in `src/dupcanon/llm_retry.py`.
 - Known remaining gaps: no first-class Phase 9 evaluation command yet.
 
 This doc proposes a human-operated CLI that detects duplicate GitHub issues and PRs, canonicalizes duplicates into a single “canonical” item, and optionally closes duplicates. Storage is Supabase (Postgres + pgvector). The key design choice is graph-based canonicalization so we never create “closed in favor of” chains.

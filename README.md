@@ -39,6 +39,7 @@ Use commands as `uv run dupcanon ...` (or `dupcanon ...` if your venv is activat
 - Operational candidate retrieval defaults to open items (`candidates --include open`).
 - Judge rejects duplicate targets that are not open (`veto_reason=target_not_open`).
 - `detect-new` uses extra precision guardrails and may downgrade high-confidence model duplicates to `maybe_duplicate` when structural/retrieval support is weak.
+- Judge prompt/parse/veto/runtime logic is centralized in `src/dupcanon/judge_runtime.py` and reused by `judge`, `judge-audit`, and `detect-new`.
 - Canonical selection priority is:
   1. open if any open item exists
   2. English-language preference (title/body heuristic)
@@ -162,6 +163,9 @@ rg "validation_alias=\"DUPCANON_" src/dupcanon/config.py
 
 # provider/model/thinking resolution + guardrails
 rg "def default_judge_model|validate_thinking_for_provider|require_judge_api_key" src/dupcanon/judge_providers.py
+
+# shared judge runtime used by judge + judge-audit + detect-new
+rg "SYSTEM_PROMPT|def get_thread_local_judge_client|def build_user_prompt|def parse_judge_decision" src/dupcanon/judge_runtime.py
 
 # retry + validation primitives shared across clients
 rg "def should_retry_http_status|def retry_delay_seconds|def validate_max_attempts" src/dupcanon/llm_retry.py
