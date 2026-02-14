@@ -156,6 +156,12 @@ Write workflow-friendly JSON output file:
 uv run dupcanon detect-new --repo <org/repo> --type issue --number <n> --json-out .local/artifacts/detect-new.json
 ```
 
+Online decision notes (current behavior)
+- `duplicate` is intentionally strict.
+- High-confidence model duplicate outputs can still be downgraded to `maybe_duplicate` when:
+  - strict duplicate guardrails are not met (`reason=online_strict_guardrail:*`), or
+  - retrieval support is below the duplicate floor (`reason=duplicate_low_retrieval_support`).
+
 GitHub Actions shadow workflow
 - File: `.github/workflows/detect-new-shadow.yml`
 - Triggers on:

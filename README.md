@@ -37,6 +37,7 @@ Use commands as `uv run dupcanon ...` (or `dupcanon ...` if your venv is activat
 - There is **no approval-file / approve-plan flow**.
 - Operational candidate retrieval defaults to open items (`candidates --include open`).
 - Judge rejects duplicate targets that are not open (`veto_reason=target_not_open`).
+- `detect-new` uses extra precision guardrails and may downgrade high-confidence model duplicates to `maybe_duplicate` when structural/retrieval support is weak.
 - Canonical selection priority is:
   1. open if any open item exists
   2. English-language preference (title/body heuristic)

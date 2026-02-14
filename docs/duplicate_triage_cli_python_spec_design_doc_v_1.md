@@ -3,7 +3,7 @@
 Status: Draft design doc for internal discussion
 
 Implementation status snapshot (2026-02-14)
-- Implemented commands: `init`, `sync`, `refresh`, `embed`, `candidates`, `judge`, `judge-audit`, `canonicalize`, `maintainers`, `plan-close`, `apply-close`.
+- Implemented commands: `init`, `sync`, `refresh`, `embed`, `candidates`, `judge`, `judge-audit`, `detect-new`, `canonicalize`, `maintainers`, `plan-close`, `apply-close`.
 - Current apply gate: reviewed persisted `close_run` + explicit `--yes` (no approval-file workflow).
 - Current canonical preference: open-first, then English-language preference, then maintainer preference.
 - Known remaining gaps: no first-class Phase 9 evaluation command yet.
