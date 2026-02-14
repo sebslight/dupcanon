@@ -244,6 +244,36 @@ def test_judge_defaults_openai_codex_model_when_provider_openai_codex(
     assert captured.get("model") == "gpt-5.1-codex-mini"
 
 
+def test_judge_passes_thinking_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_judge(**kwargs):
+        captured.update(kwargs)
+        return JudgeStats()
+
+    monkeypatch.setattr("dupcanon.cli.run_judge", fake_run_judge)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "judge",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--provider",
+            "openai",
+            "--thinking",
+            "high",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("thinking_level") == "high"
+
+
 def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -268,8 +298,12 @@ def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
             "7",
             "--cheap-provider",
             "gemini",
+            "--cheap-thinking",
+            "low",
             "--strong-provider",
             "openai",
+            "--strong-thinking",
+            "high",
             "--workers",
             "3",
             "--verbose",
@@ -281,10 +315,42 @@ def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured.get("sample_size") == 25
     assert captured.get("sample_seed") == 7
     assert captured.get("cheap_provider") == "gemini"
+    assert captured.get("cheap_thinking_level") == "low"
     assert captured.get("strong_provider") == "openai"
+    assert captured.get("strong_thinking_level") == "high"
     assert captured.get("worker_concurrency") == 3
     assert captured.get("verbose") is True
     assert captured.get("debug_rpc") is True
+
+
+def test_judge_audit_uses_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_judge_audit(**kwargs):
+        captured.update(kwargs)
+        return JudgeAuditStats(audit_run_id=12, sample_size_requested=25, sample_size_actual=20)
+
+    monkeypatch.setattr("dupcanon.cli.run_judge_audit", fake_run_judge_audit)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER", "openrouter")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_CHEAP_MODEL", "minimax/minimax-m2.5")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_CHEAP_THINKING", "minimal")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER", "openai-codex")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_STRONG_MODEL", "gpt-5.1-codex-mini")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_STRONG_THINKING", "low")
+
+    result = runner.invoke(
+        app,
+        ["judge-audit", "--repo", "org/repo", "--type", "issue"],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("cheap_provider") == "openrouter"
+    assert captured.get("cheap_model") == "minimax/minimax-m2.5"
+    assert captured.get("cheap_thinking_level") == "minimal"
+    assert captured.get("strong_provider") == "openai-codex"
+    assert captured.get("strong_model") == "gpt-5.1-codex-mini"
+    assert captured.get("strong_thinking_level") == "low"
 
 
 def test_detect_new_defaults_openrouter_model_when_provider_openrouter(
@@ -332,6 +398,52 @@ def test_detect_new_defaults_openrouter_model_when_provider_openrouter(
     assert result.exit_code == 0
     assert captured.get("provider") == "openrouter"
     assert captured.get("model") == "minimax/minimax-m2.5"
+
+
+def test_detect_new_passes_thinking_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_detect_new(**kwargs):
+        captured.update(kwargs)
+        return DetectNewResult(
+            repo="org/repo",
+            type=ItemType.ISSUE,
+            source=DetectSource(number=1, title="Issue 1"),
+            verdict=DetectVerdict.NOT_DUPLICATE,
+            is_duplicate=False,
+            confidence=0.12,
+            duplicate_of=None,
+            reasoning="No match",
+            top_matches=[],
+            provider="openai",
+            model="gpt-5-mini",
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+        )
+
+    monkeypatch.setattr("dupcanon.cli.run_detect_new", fake_run_detect_new)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "detect-new",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--number",
+            "1",
+            "--provider",
+            "openai",
+            "--thinking",
+            "medium",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("thinking_level") == "medium"
 
 
 def test_detect_new_defaults_openai_codex_model_when_provider_openai_codex(

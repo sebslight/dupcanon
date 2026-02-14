@@ -23,6 +23,13 @@ def test_load_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setenv("DUPCANON_EMBED_WORKER_CONCURRENCY", "3")
     monkeypatch.setenv("DUPCANON_JUDGE_PROVIDER", "GEMINI")
     monkeypatch.setenv("DUPCANON_JUDGE_MODEL", "gemini-3-flash-preview")
+    monkeypatch.setenv("DUPCANON_JUDGE_THINKING", "low")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER", "openrouter")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_CHEAP_MODEL", "minimax/minimax-m2.5")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_CHEAP_THINKING", "minimal")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER", "openai")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_STRONG_MODEL", "gpt-5-mini")
+    monkeypatch.setenv("DUPCANON_JUDGE_AUDIT_STRONG_THINKING", "high")
     monkeypatch.setenv("DUPCANON_JUDGE_WORKER_CONCURRENCY", "5")
     monkeypatch.setenv("DUPCANON_CANDIDATE_WORKER_CONCURRENCY", "6")
 
@@ -42,6 +49,13 @@ def test_load_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert settings.embed_worker_concurrency == 3
     assert settings.judge_provider == "gemini"
     assert settings.judge_model == "gemini-3-flash-preview"
+    assert settings.judge_thinking == "low"
+    assert settings.judge_audit_cheap_provider == "openrouter"
+    assert settings.judge_audit_cheap_model == "minimax/minimax-m2.5"
+    assert settings.judge_audit_cheap_thinking == "minimal"
+    assert settings.judge_audit_strong_provider == "openai"
+    assert settings.judge_audit_strong_model == "gpt-5-mini"
+    assert settings.judge_audit_strong_thinking == "high"
     assert settings.judge_worker_concurrency == 5
     assert settings.candidate_worker_concurrency == 6
 
@@ -61,6 +75,13 @@ def test_load_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.delenv("DUPCANON_EMBED_WORKER_CONCURRENCY", raising=False)
     monkeypatch.delenv("DUPCANON_JUDGE_PROVIDER", raising=False)
     monkeypatch.delenv("DUPCANON_JUDGE_MODEL", raising=False)
+    monkeypatch.delenv("DUPCANON_JUDGE_THINKING", raising=False)
+    monkeypatch.delenv("DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER", raising=False)
+    monkeypatch.delenv("DUPCANON_JUDGE_AUDIT_CHEAP_MODEL", raising=False)
+    monkeypatch.delenv("DUPCANON_JUDGE_AUDIT_CHEAP_THINKING", raising=False)
+    monkeypatch.delenv("DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER", raising=False)
+    monkeypatch.delenv("DUPCANON_JUDGE_AUDIT_STRONG_MODEL", raising=False)
+    monkeypatch.delenv("DUPCANON_JUDGE_AUDIT_STRONG_THINKING", raising=False)
     monkeypatch.delenv("DUPCANON_JUDGE_WORKER_CONCURRENCY", raising=False)
     monkeypatch.delenv("DUPCANON_CANDIDATE_WORKER_CONCURRENCY", raising=False)
 
@@ -80,6 +101,13 @@ def test_load_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert settings.embed_worker_concurrency == 2
     assert settings.judge_provider == "openai-codex"
     assert settings.judge_model == "gpt-5.1-codex-mini"
+    assert settings.judge_thinking is None
+    assert settings.judge_audit_cheap_provider == "gemini"
+    assert settings.judge_audit_cheap_model is None
+    assert settings.judge_audit_cheap_thinking is None
+    assert settings.judge_audit_strong_provider == "openai"
+    assert settings.judge_audit_strong_model is None
+    assert settings.judge_audit_strong_thinking is None
     assert settings.judge_worker_concurrency == 4
     assert settings.candidate_worker_concurrency == 4
 
@@ -108,6 +136,13 @@ def test_embedding_provider_validation(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_openai_embedding_provider_requires_openai_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DUPCANON_EMBEDDING_PROVIDER", "openai")
     monkeypatch.setenv("DUPCANON_EMBEDDING_MODEL", "gemini-embedding-001")
+
+    with pytest.raises(ValueError):
+        load_settings()
+
+
+def test_judge_thinking_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DUPCANON_JUDGE_THINKING", "turbo")
 
     with pytest.raises(ValueError):
         load_settings()

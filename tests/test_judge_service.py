@@ -1016,6 +1016,83 @@ def test_run_judge_openai_provider_works(monkeypatch) -> None:
     assert inserted[0]["to_item_id"] == 2001
 
 
+def test_run_judge_passes_thinking_to_openai_client(monkeypatch) -> None:
+    captured: dict[str, object] = {"reasoning_effort": None}
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_candidate_sets_for_judging(
+            self, *, repo_id: int, item_type: ItemType, allow_stale: bool
+        ):
+            return [_work_item(source_item_id=3001)]
+
+        def has_accepted_duplicate_edge(
+            self, *, repo_id: int, item_type: ItemType, from_item_id: int
+        ) -> bool:
+            return False
+
+        def insert_duplicate_edge(self, **kwargs) -> None:
+            return None
+
+        def replace_accepted_duplicate_edge(self, **kwargs) -> None:
+            msg = "replace should not be called"
+            raise AssertionError(msg)
+
+    class FakeOpenAIJudgeClient:
+        def __init__(self, **kwargs) -> None:
+            captured["reasoning_effort"] = kwargs.get("reasoning_effort")
+
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            return (
+                '{"is_duplicate": true, "duplicate_of": 9001, '
+                '"confidence": 0.96, "reasoning": "Same root cause details."}'
+            )
+
+    monkeypatch.setattr(judge_service, "Database", FakeDatabase)
+    monkeypatch.setattr(judge_service, "OpenAIJudgeClient", FakeOpenAIJudgeClient)
+
+    stats = judge_service.run_judge(
+        settings=Settings(supabase_db_url="postgresql://localhost/db", openai_api_key="key"),
+        repo_value="org/repo",
+        item_type=ItemType.ISSUE,
+        provider="openai",
+        model="gpt-5-mini",
+        min_edge=0.85,
+        allow_stale=False,
+        rejudge=False,
+        worker_concurrency=None,
+        console=Console(),
+        logger=get_logger("test"),
+        thinking_level="off",
+    )
+
+    assert stats.judged == 1
+    assert captured["reasoning_effort"] == "none"
+
+
+def test_run_judge_rejects_xhigh_for_gemini(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="xhigh thinking"):
+        judge_service.run_judge(
+            settings=Settings(supabase_db_url="postgresql://localhost/db", gemini_api_key="key"),
+            repo_value="org/repo",
+            item_type=ItemType.ISSUE,
+            provider="gemini",
+            model="gemini-3-flash-preview",
+            min_edge=0.85,
+            allow_stale=False,
+            rejudge=False,
+            worker_concurrency=None,
+            console=Console(),
+            logger=get_logger("test"),
+            thinking_level="xhigh",
+        )
+
+
 def test_run_judge_openai_requires_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -1184,7 +1261,7 @@ def test_run_judge_openrouter_requires_api_key(
 
 
 def test_run_judge_openai_codex_provider_works_without_api_key(monkeypatch) -> None:
-    captured: dict[str, object] = {"inserted": [], "model": None}
+    captured: dict[str, object] = {"inserted": [], "model": None, "thinking": None}
 
     class FakeDatabase:
         def __init__(self, db_url: str) -> None:
@@ -1215,6 +1292,7 @@ def test_run_judge_openai_codex_provider_works_without_api_key(monkeypatch) -> N
     class FakeOpenAICodexJudgeClient:
         def __init__(self, **kwargs) -> None:
             captured["model"] = kwargs.get("model")
+            captured["thinking"] = kwargs.get("thinking_level")
 
         def judge(self, *, system_prompt: str, user_prompt: str) -> str:
             return (
@@ -1237,8 +1315,146 @@ def test_run_judge_openai_codex_provider_works_without_api_key(monkeypatch) -> N
         worker_concurrency=None,
         console=Console(),
         logger=get_logger("test"),
+        thinking_level="high",
     )
 
     assert stats.judged == 1
     assert stats.accepted_edges == 1
     assert captured["model"] == "gpt-5.1-codex-mini"
+    assert captured["thinking"] == "high"
+
+
+@pytest.mark.parametrize(
+    ("thinking_level", "expected_effort"),
+    [
+        ("off", "none"),
+        ("minimal", "minimal"),
+        ("low", "low"),
+        ("medium", "medium"),
+        ("high", "high"),
+        ("xhigh", "xhigh"),
+    ],
+)
+def test_get_thread_local_judge_client_openai_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    thinking_level: str,
+    expected_effort: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeOpenAIJudgeClient:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            return "{}"
+
+    monkeypatch.setattr(judge_service, "OpenAIJudgeClient", FakeOpenAIJudgeClient)
+    judge_service._THREAD_LOCAL.__dict__.clear()
+
+    judge_service._get_thread_local_judge_client(
+        provider="openai",
+        api_key="key",
+        model="gpt-5-mini",
+        thinking_level=thinking_level,
+    )
+
+    assert captured.get("reasoning_effort") == expected_effort
+
+
+@pytest.mark.parametrize(
+    ("thinking_level", "expected_effort"),
+    [
+        ("off", "none"),
+        ("minimal", "minimal"),
+        ("low", "low"),
+        ("medium", "medium"),
+        ("high", "high"),
+        ("xhigh", "xhigh"),
+    ],
+)
+def test_get_thread_local_judge_client_openrouter_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    thinking_level: str,
+    expected_effort: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeOpenRouterJudgeClient:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            return "{}"
+
+    monkeypatch.setattr(judge_service, "OpenRouterJudgeClient", FakeOpenRouterJudgeClient)
+    judge_service._THREAD_LOCAL.__dict__.clear()
+
+    judge_service._get_thread_local_judge_client(
+        provider="openrouter",
+        api_key="key",
+        model="minimax/minimax-m2.5",
+        thinking_level=thinking_level,
+    )
+
+    assert captured.get("reasoning_effort") == expected_effort
+
+
+@pytest.mark.parametrize(
+    "thinking_level",
+    [None, "off", "minimal", "low", "medium", "high", "xhigh"],
+)
+def test_get_thread_local_judge_client_gemini_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    thinking_level: str | None,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeGeminiJudgeClient:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            return "{}"
+
+    monkeypatch.setattr(judge_service, "GeminiJudgeClient", FakeGeminiJudgeClient)
+    judge_service._THREAD_LOCAL.__dict__.clear()
+
+    judge_service._get_thread_local_judge_client(
+        provider="gemini",
+        api_key="key",
+        model="gemini-3-flash-preview",
+        thinking_level=thinking_level,
+    )
+
+    assert captured.get("thinking_level") == thinking_level
+
+
+@pytest.mark.parametrize(
+    "thinking_level",
+    [None, "off", "minimal", "low", "medium", "high", "xhigh"],
+)
+def test_get_thread_local_judge_client_openai_codex_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    thinking_level: str | None,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeOpenAICodexJudgeClient:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            return "{}"
+
+    monkeypatch.setattr(judge_service, "OpenAICodexJudgeClient", FakeOpenAICodexJudgeClient)
+    judge_service._THREAD_LOCAL.__dict__.clear()
+
+    judge_service._get_thread_local_judge_client(
+        provider="openai-codex",
+        api_key="",
+        model="gpt-5.1-codex-mini",
+        thinking_level=thinking_level,
+    )
+
+    assert captured.get("thinking_level") == thinking_level

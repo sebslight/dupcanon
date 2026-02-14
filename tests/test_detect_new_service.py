@@ -833,6 +833,7 @@ def test_run_detect_new_openai_codex_uses_passed_model_without_api_key(
         captured["provider"] = kwargs.get("provider")
         captured["model"] = kwargs.get("model")
         captured["api_key"] = kwargs.get("api_key")
+        captured["thinking_level"] = kwargs.get("thinking_level")
         return FakeJudgeClient()
 
     monkeypatch.setattr(detect_new_service, "GitHubClient", FakeGitHubClient)
@@ -850,6 +851,7 @@ def test_run_detect_new_openai_codex_uses_passed_model_without_api_key(
         number=77,
         provider="openai-codex",
         model="gpt-5.1-mini-codex",
+        thinking_level="low",
         k=8,
         min_score=0.75,
         maybe_threshold=0.85,
@@ -862,3 +864,23 @@ def test_run_detect_new_openai_codex_uses_passed_model_without_api_key(
     assert captured["provider"] == "openai-codex"
     assert captured["model"] == "gpt-5.1-mini-codex"
     assert captured["api_key"] == ""
+    assert captured["thinking_level"] == "low"
+
+
+def test_run_detect_new_rejects_xhigh_for_gemini() -> None:
+    with pytest.raises(ValueError, match="xhigh thinking"):
+        detect_new_service.run_detect_new(
+            settings=Settings(supabase_db_url="postgresql://localhost/db", gemini_api_key="key"),
+            repo_value="org/repo",
+            item_type=ItemType.ISSUE,
+            number=77,
+            provider="gemini",
+            model="gemini-3-flash-preview",
+            k=8,
+            min_score=0.75,
+            maybe_threshold=0.85,
+            duplicate_threshold=0.92,
+            run_id="run123",
+            logger=get_logger("test"),
+            thinking_level="xhigh",
+        )
