@@ -43,6 +43,7 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       DUPCANON_ONLINE_PROVIDER: ${{ vars.DUPCANON_ONLINE_PROVIDER || 'gemini' }}
       DUPCANON_ONLINE_MODEL: ${{ vars.DUPCANON_ONLINE_MODEL || '' }}
+      DUPCANON_ONLINE_THINKING: ${{ vars.DUPCANON_ONLINE_THINKING || '' }}
       DUPCANON_ONLINE_K: ${{ vars.DUPCANON_ONLINE_K || '8' }}
       DUPCANON_ONLINE_MIN_SCORE: ${{ vars.DUPCANON_ONLINE_MIN_SCORE || '0.75' }}
       DUPCANON_ONLINE_MAYBE_THRESHOLD: ${{ vars.DUPCANON_ONLINE_MAYBE_THRESHOLD || '0.85' }}
@@ -126,6 +127,16 @@ jobs:
               ;;
           esac
 
+          if [[ -n "${DUPCANON_ONLINE_THINKING:-}" ]]; then
+            case "${DUPCANON_ONLINE_THINKING}" in
+              off|minimal|low|medium|high|xhigh) ;;
+              *)
+                echo "Unsupported thinking level: ${DUPCANON_ONLINE_THINKING}"
+                exit 1
+                ;;
+            esac
+          fi
+
       - name: Run detect-new (shadow mode)
         id: run
         shell: bash
@@ -154,6 +165,10 @@ jobs:
 
           if [[ -n "${DUPCANON_ONLINE_MODEL}" ]]; then
             cmd+=(--model "${DUPCANON_ONLINE_MODEL}")
+          fi
+
+          if [[ -n "${DUPCANON_ONLINE_THINKING}" ]]; then
+            cmd+=(--thinking "${DUPCANON_ONLINE_THINKING}")
           fi
 
           "${cmd[@]}"

@@ -125,7 +125,11 @@ Single CLI, subcommands. Example name: dupcanon.
 
 - dupcanon judge --repo org/name --type issue|pr [--provider gemini|openai|openrouter|openai-codex] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
   - Reads fresh candidate sets, calls LLM, writes judge_decisions.
-  - Default provider/model is OpenAI Codex via `pi` RPC (`openai-codex`, `gpt-5.1-codex-mini`). Gemini/OpenAI/OpenRouter are available as overrides.
+  - Default configured provider/model is OpenAI Codex via `pi` RPC (`openai-codex`, `gpt-5.1-codex-mini`). Gemini/OpenAI/OpenRouter are available as overrides.
+  - Model resolution:
+    - `--model` overrides everything.
+    - If selected provider matches configured provider, use configured model.
+    - Otherwise use provider defaults (`gemini-3-flash-preview`, `gpt-5-mini`, `minimax/minimax-m2.5`, `gpt-5.1-codex-mini`).
   - Thinking defaults can be set globally via `DUPCANON_JUDGE_THINKING`.
 
 - dupcanon judge-audit --repo org/name --type issue|pr [--sample-size 100] [--seed 42] [--min-edge 0.85] [--cheap-provider ...] [--cheap-model ...] [--cheap-thinking ...] [--strong-provider ...] [--strong-model ...] [--strong-thinking ...] [--workers N] [--verbose] [--debug-rpc]
@@ -383,13 +387,14 @@ Cluster definition
 
 Canonical selection heuristic (v1)
 1) If the cluster has any open items, canonical must be an open item.
-2) If any eligible item is opened by a maintainer, prefer maintainer-opened items.
+2) If any eligible item appears English (lightweight title/body heuristic), prefer eligible English items.
+3) If any eligible item is opened by a maintainer, prefer maintainer-opened items.
    - Maintainer resolution uses collaborators with `admin|maintain|push` permissions.
-3) Prefer the most active discussion among eligible items.
+4) Prefer the most active discussion among eligible items.
    - issues: higher `comment_count`
    - PRs: higher (`comment_count` + `review_comment_count`)
-4) Then prefer earliest `created_at_gh` (oldest).
-5) Final tie-breaker: lowest item number.
+5) Then prefer earliest `created_at_gh` (oldest).
+6) Final tie-breaker: lowest item number.
 
 Important note about canonical drift
 - If two clusters later merge (new edge connects them), the canonical may change.

@@ -291,11 +291,17 @@ Online detect-new inherits judge defaults when flags are omitted:
 - `DUPCANON_JUDGE_MODEL`
 - `DUPCANON_JUDGE_THINKING`
 
-Potential online-specific env vars (optional):
-- `DUPCANON_ONLINE_K`
-- `DUPCANON_ONLINE_MIN_SCORE`
-- `DUPCANON_ONLINE_MAYBE_THRESHOLD`
-- `DUPCANON_ONLINE_DUPLICATE_THRESHOLD`
+GitHub workflow-specific tuning vars (optional, consumed by `.github/workflows/detect-new-shadow.yml`):
+- `DUPCANON_ONLINE_PROVIDER` (default in workflow: `gemini`)
+- `DUPCANON_ONLINE_MODEL` (default: empty -> command/provider default resolution)
+- `DUPCANON_ONLINE_THINKING` (default: empty -> no explicit `--thinking` flag)
+- `DUPCANON_ONLINE_K` (default: `8`)
+- `DUPCANON_ONLINE_MIN_SCORE` (default: `0.75`)
+- `DUPCANON_ONLINE_MAYBE_THRESHOLD` (default: `0.85`)
+- `DUPCANON_ONLINE_DUPLICATE_THRESHOLD` (default: `0.92`)
+
+For `DUPCANON_ONLINE_THINKING`, allowed values are `off|minimal|low|medium|high|xhigh`.
+Gemini provider paths reject `xhigh`.
 
 Current hardcoded precision guardrail (non-configurable in v1 code):
 - duplicate verdict additionally requires top retrieval score >= `0.90`

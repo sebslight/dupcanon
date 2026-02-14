@@ -35,6 +35,7 @@ Use commands as `uv run dupcanon ...` (or `dupcanon ...` if your venv is activat
 
 - Apply gate is: reviewed persisted `close_run` + `--yes`.
 - There is **no approval-file / approve-plan flow**.
+- `refresh` defaults to discovering new items only; use `refresh --refresh-known` to also update known-item metadata.
 - Operational candidate retrieval defaults to open items (`candidates --include open`).
 - Judge rejects duplicate targets that are not open (`veto_reason=target_not_open`).
 - `detect-new` uses extra precision guardrails and may downgrade high-confidence model duplicates to `maybe_duplicate` when structural/retrieval support is weak.
@@ -69,6 +70,15 @@ Default model stack:
 - `DUPCANON_JUDGE_PROVIDER=openai-codex`
 - `DUPCANON_JUDGE_MODEL=gpt-5.1-codex-mini`
 - optional thinking default: `DUPCANON_JUDGE_THINKING` (`off|minimal|low|medium|high|xhigh`)
+
+Judge model resolution (verifiable in `src/dupcanon/judge_providers.py`):
+- if `--model` is set, it wins
+- else if selected provider matches configured provider (`DUPCANON_JUDGE_PROVIDER`), use `DUPCANON_JUDGE_MODEL`
+- else use provider defaults:
+  - gemini -> `gemini-3-flash-preview`
+  - openai -> `gpt-5-mini`
+  - openrouter -> `minimax/minimax-m2.5`
+  - openai-codex -> `gpt-5.1-codex-mini`
 - judge-audit env defaults (optional):
   - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
   - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
@@ -98,12 +108,49 @@ uv run dupcanon plan-close --repo openclaw/openclaw --type issue --dry-run
 uv run dupcanon apply-close --close-run <id> --yes
 ```
 
+## LLM controls matrix (CLI flags + env defaults)
+
+All LLM-using commands support explicit CLI flags and env-backed defaults.
+
+- `judge`
+  - flags: `--provider`, `--model`, `--thinking`
+  - env defaults: `DUPCANON_JUDGE_PROVIDER`, `DUPCANON_JUDGE_MODEL`, `DUPCANON_JUDGE_THINKING`
+- `detect-new`
+  - flags: `--provider`, `--model`, `--thinking`
+  - env defaults: `DUPCANON_JUDGE_PROVIDER`, `DUPCANON_JUDGE_MODEL`, `DUPCANON_JUDGE_THINKING`
+- `judge-audit`
+  - flags: `--cheap-provider`, `--cheap-model`, `--cheap-thinking`, `--strong-provider`, `--strong-model`, `--strong-thinking`
+  - env defaults:
+    - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
+    - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
+
+Thinking values: `off|minimal|low|medium|high|xhigh`.
+Gemini paths reject `xhigh`.
+
 ## Quality gates
 
 ```bash
 uv run ruff check
 uv run pyright
 uv run pytest
+```
+
+## Quick verification against code
+
+```bash
+# command flags
+uv run dupcanon judge --help
+uv run dupcanon judge-audit --help
+uv run dupcanon detect-new --help
+
+# env-backed settings
+rg "validation_alias=\"DUPCANON_" src/dupcanon/config.py
+
+# provider/model/thinking resolution + guardrails
+rg "def default_judge_model|validate_thinking_for_provider|require_judge_api_key" src/dupcanon/judge_providers.py
+
+# workflow online vars (shadow mode)
+rg "DUPCANON_ONLINE_" .github/workflows/detect-new-shadow.yml
 ```
 
 ## Docs

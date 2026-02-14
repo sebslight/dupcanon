@@ -11,11 +11,29 @@ This runbook describes the current end-to-end workflow for running `dupcanon` sa
   - Default embeddings use OpenAI (`DUPCANON_EMBEDDING_PROVIDER=openai`) -> requires `OPENAI_API_KEY`
   - Default judge uses OpenAI Codex via `pi` RPC (`DUPCANON_JUDGE_PROVIDER=openai-codex`)
   - Optional global judge thinking default: `DUPCANON_JUDGE_THINKING` (`off|minimal|low|medium|high|xhigh`)
+  - Provider/model fallback behavior:
+    - If command `--model` is set, it wins.
+    - Else if selected provider matches configured provider, `DUPCANON_JUDGE_MODEL` is used.
+    - Else provider defaults are used (`gemini-3-flash-preview`, `gpt-5-mini`, `minimax/minimax-m2.5`, `gpt-5.1-codex-mini`).
   - Optional judge-audit defaults:
     - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
     - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
   - `GEMINI_API_KEY` only when embedding/judge provider is `gemini`
   - `OPENROUTER_API_KEY` only when judge provider is `openrouter`
+
+## LLM control mapping (verifiable)
+
+- `judge`
+  - flags: `--provider`, `--model`, `--thinking`
+  - env defaults: `DUPCANON_JUDGE_PROVIDER`, `DUPCANON_JUDGE_MODEL`, `DUPCANON_JUDGE_THINKING`
+- `detect-new`
+  - flags: `--provider`, `--model`, `--thinking`
+  - env defaults: `DUPCANON_JUDGE_PROVIDER`, `DUPCANON_JUDGE_MODEL`, `DUPCANON_JUDGE_THINKING`
+- `judge-audit`
+  - flags: `--cheap-provider`, `--cheap-model`, `--cheap-thinking`, `--strong-provider`, `--strong-model`, `--strong-thinking`
+  - env defaults:
+    - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
+    - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
 
 ## Setup
 
@@ -202,9 +220,13 @@ GitHub Actions shadow workflow
   - provider key matching configured provider (`GEMINI_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY`)
   - for `openai-codex`, ensure `pi` CLI is available in the runner environment
 - Uses repository variables for tuning (optional):
-  - `DUPCANON_ONLINE_PROVIDER`, `DUPCANON_ONLINE_MODEL`
+  - `DUPCANON_ONLINE_PROVIDER` (workflow default: `gemini`)
+  - `DUPCANON_ONLINE_MODEL` (default: empty)
+  - `DUPCANON_ONLINE_THINKING` (default: empty)
   - `DUPCANON_ONLINE_K`, `DUPCANON_ONLINE_MIN_SCORE`
   - `DUPCANON_ONLINE_MAYBE_THRESHOLD`, `DUPCANON_ONLINE_DUPLICATE_THRESHOLD`
+- `DUPCANON_ONLINE_THINKING` accepts: `off|minimal|low|medium|high|xhigh`
+  - For provider=`gemini`, `xhigh` is rejected by the app.
 
 ## Guardrails to remember
 
@@ -216,6 +238,25 @@ GitHub Actions shadow workflow
 - Judge uncertainty handling:
   - If model returns `certainty="unsure"` for a duplicate claim, the decision is rejected (veto).
   - Follow-up/partial-overlap/scope-mismatch decisions are vetoed from acceptance.
+
+## Verification checklist (docs vs code)
+
+```bash
+# command surface / flags
+uv run dupcanon --help
+uv run dupcanon judge --help
+uv run dupcanon judge-audit --help
+uv run dupcanon detect-new --help
+
+# env settings source of truth
+rg "validation_alias=\"DUPCANON_" src/dupcanon/config.py
+
+# provider/model/thinking resolution logic
+rg "def default_judge_model|validate_thinking_for_provider|require_judge_api_key" src/dupcanon/judge_providers.py
+
+# online workflow tuning vars
+rg "DUPCANON_ONLINE_" .github/workflows/detect-new-shadow.yml
+```
 
 ## Artifacts and troubleshooting
 
