@@ -96,9 +96,10 @@ Purpose: classify a *single new* issue/PR as duplicate/maybe/not.
 
 - ✅ Current CLI architecture is the right base (DB-first + reusable services).
 - ✅ Existing batch commands already support corpus maintenance.
-- ⚠️ Missing online-specific command path (`detect-new`) for one-item inference.
-- ⚠️ PR diff context (file paths + bounded patch excerpts) still needs implementation.
-- ⚠️ GitHub Actions requires hosted DB access; local DB alone is insufficient for workflow execution.
+- ✅ `detect-new` command/service is implemented for one-item online inference.
+- ✅ PR diff context (file paths + bounded patch excerpts) is implemented for PR online inference.
+- ✅ GitHub Actions shadow workflow is implemented (`.github/workflows/detect-new-shadow.yml`).
+- ⚠️ Hosted DB access remains required for workflow execution (local DB alone is insufficient).
 
 ---
 
@@ -149,10 +150,14 @@ The LLM judge still returns duplicate decision + confidence for one target candi
 Pipeline maps to 3-way verdict:
 
 - `duplicate`
-  - accepted duplicate decision
+  - model returns duplicate target
   - confidence >= `duplicate_threshold`
+  - strict duplicate guardrails pass (`same_instance`, `root_cause_match=same`, `scope_relation=same_scope`, `certainty=sure`)
+  - strongest retrieval support is also high (current code floor: `top_matches[0].score >= 0.90`)
 - `maybe_duplicate`
   - duplicate decision with confidence in [`maybe_threshold`, `duplicate_threshold`)
+  - OR duplicate decision fails strict guardrails (`reason=online_strict_guardrail:*`)
+  - OR duplicate decision has high confidence but weak retrieval support (`reason=duplicate_low_retrieval_support`)
   - OR invalid/ambiguous response with strong retrieval clues
 - `not_duplicate`
   - no duplicate selected
@@ -208,17 +213,18 @@ Rules:
 
 ## 9) Persistence and reuse of existing tables
 
-Use existing core tables and persist online judge outcomes into the same decision log used by batch judging.
+Online detection reuses existing core tables for source/corpus state, but v1 `detect-new` is intentionally non-persistent for judge outcomes.
 
-Expected reuse:
-- `items`: source and corpus items
-- `embeddings`: source/corpus vectors
-- `candidate_sets`, `candidate_set_members`: retrieval evidence
-- `judge_decisions`: required persisted judged outcomes (accepted/rejected/skipped with confidence + metadata)
+Current v1 reuse:
+- `items`: source and corpus items (source is fetched and upserted)
+- `embeddings`: source/corpus vectors (source embedding is upserted on change)
+- retrieval is executed directly via vector search (no persisted candidate_set snapshot in v1 detect-new)
 
-Implementation note:
-- For ad-hoc source payloads (CLI text not yet in GitHub), we can run ephemeral inference and skip DB insertion, or insert with a dedicated marker strategy.
-- Accepted-edge consumers should read from `judge_decisions.final_status='accepted'`.
+Current v1 non-goal:
+- `detect-new` does **not** persist online judge outcomes into `judge_decisions`.
+- `detect-new` remains a shadow-mode JSON output path.
+
+Batch accepted-edge consumers continue to read from `judge_decisions.final_status='accepted'`.
 
 ---
 
@@ -226,19 +232,13 @@ Implementation note:
 
 ### 10.1 CLI
 
-Proposed new command:
+Implemented command:
 
 ```bash
 uv run dupcanon detect-new --repo org/name --type issue --number 123
 ```
 
-Optional ad-hoc mode:
-
-```bash
-uv run dupcanon detect-new --repo org/name --type pr --title "..." --body "..." --pr-files-json path.json
-```
-
-Suggested options:
+Current supported options:
 - `--provider`
 - `--model`
 - `--k`
@@ -247,8 +247,11 @@ Suggested options:
 - `--duplicate-threshold`
 - `--json-out <path>`
 
+Note:
+- Ad-hoc text-only source mode (`--title` / `--body` / `--pr-files-json`) is not implemented in v1.
+
 Implementation note:
-- Keep core logic in a service module; CLI is a thin wrapper so GitHub workflow and local CLI share the same inference path.
+- Core logic lives in a service module; CLI is a thin wrapper so GitHub workflow and local CLI share the same inference path.
 
 ### 10.2 GitHub
 
@@ -289,6 +292,9 @@ Potential online-specific env vars (optional):
 - `DUPCANON_ONLINE_MAYBE_THRESHOLD`
 - `DUPCANON_ONLINE_DUPLICATE_THRESHOLD`
 
+Current hardcoded precision guardrail (non-configurable in v1 code):
+- duplicate verdict additionally requires top retrieval score >= `0.90`
+
 Future (Stage 3) auto-close controls:
 - `DUPCANON_ONLINE_AUTO_CLOSE_ENABLED`
 - `DUPCANON_ONLINE_AUTO_CLOSE_THRESHOLD`
@@ -301,9 +307,17 @@ Future (Stage 3) auto-close controls:
 
 - No mutation on GitHub (shadow mode): no close, no label, no comment.
 - Keep strict same-type + single-repo scoping.
-- Precision-first thresholds.
+- Precision-first thresholds plus extra duplicate guardrails.
 - Persist failure artifacts under `.local/artifacts/`.
 - Return structured `error_class` and `reason` fields when inference is inconclusive.
+- Operational `reason` examples:
+  - `judge_duplicate`
+  - `low_confidence_duplicate`
+  - `duplicate_low_retrieval_support`
+  - `online_strict_guardrail:*`
+  - `model_not_duplicate`
+  - `no_candidates`
+  - `invalid_judge_response`
 
 ### 12.2 Approval model split (important)
 
@@ -392,6 +406,10 @@ This v1 online pipeline is a precision-first, async-friendly, JSON-first duplica
 ---
 
 ## 18) Implementation journal (ongoing)
+
+Note
+- Entries are chronological snapshots and may describe intermediate states that were later completed.
+- Current behavior is defined by Sections 1–17 above.
 
 ### 2026-02-14 — Step 1: Online inference service foundation
 
