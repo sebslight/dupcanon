@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import random
 import time
 from typing import Any
 
 from openrouter import OpenRouter
 from openrouter.errors import NoResponseError, OpenRouterError
+
+from dupcanon.llm_retry import retry_delay_seconds
 
 
 class OpenRouterJudgeError(RuntimeError):
@@ -22,6 +23,9 @@ def _should_retry(status_code: int | None) -> bool:
     return 500 <= status_code <= 599
 
 
+_ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+
 class OpenRouterJudgeClient:
     def __init__(
         self,
@@ -31,9 +35,20 @@ class OpenRouterJudgeClient:
         reasoning_effort: str | None = None,
         max_attempts: int = 5,
     ) -> None:
+        normalized_reasoning = reasoning_effort.strip().lower() if reasoning_effort else None
+        if (
+            normalized_reasoning is not None
+            and normalized_reasoning not in _ALLOWED_REASONING_EFFORTS
+        ):
+            msg = "reasoning_effort must be one of: none, minimal, low, medium, high, xhigh"
+            raise ValueError(msg)
+        if max_attempts <= 0:
+            msg = "max_attempts must be > 0"
+            raise ValueError(msg)
+
         self.client = OpenRouter(api_key=api_key)
         self.model = model
-        self.reasoning_effort = reasoning_effort
+        self.reasoning_effort = normalized_reasoning
         self.max_attempts = max_attempts
 
     def judge(self, *, system_prompt: str, user_prompt: str) -> str:
@@ -77,8 +92,7 @@ class OpenRouterJudgeClient:
                 if attempt >= self.max_attempts:
                     raise err from exc
 
-            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
-            time.sleep(delay)
+            time.sleep(retry_delay_seconds(attempt))
 
         if last_error is not None:
             raise last_error

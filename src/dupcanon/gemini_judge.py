@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import random
 import time
 from typing import cast
 
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
+
+from dupcanon.llm_retry import retry_delay_seconds
+from dupcanon.thinking import normalize_thinking_level
 
 
 class GeminiJudgeError(RuntimeError):
@@ -32,9 +34,17 @@ class GeminiJudgeClient:
         thinking_level: str | None = None,
         max_attempts: int = 5,
     ) -> None:
+        normalized_thinking = normalize_thinking_level(thinking_level)
+        if normalized_thinking == "xhigh":
+            msg = "xhigh thinking is not supported for Gemini judge"
+            raise ValueError(msg)
+        if max_attempts <= 0:
+            msg = "max_attempts must be > 0"
+            raise ValueError(msg)
+
         self.client = genai.Client(api_key=api_key)
         self.model = model.removeprefix("models/")
-        self.thinking_level = thinking_level
+        self.thinking_level = normalized_thinking
         self.max_attempts = max_attempts
 
     def judge(self, *, system_prompt: str, user_prompt: str) -> str:
@@ -42,9 +52,6 @@ class GeminiJudgeClient:
         if self.thinking_level == "off":
             thinking_config = types.ThinkingConfig(thinking_budget=0)
         elif self.thinking_level is not None:
-            if self.thinking_level == "xhigh":
-                msg = "xhigh thinking is not supported for Gemini judge"
-                raise ValueError(msg)
             thinking_config = types.ThinkingConfig(
                 thinking_level=cast(types.ThinkingLevel, self.thinking_level.upper())
             )
@@ -82,8 +89,7 @@ class GeminiJudgeClient:
                 if attempt >= self.max_attempts:
                     raise err from exc
 
-            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
-            time.sleep(delay)
+            time.sleep(retry_delay_seconds(attempt))
 
         if last_error is not None:
             raise last_error

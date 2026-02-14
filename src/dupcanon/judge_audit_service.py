@@ -11,6 +11,13 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from dupcanon.artifacts import write_artifact
 from dupcanon.config import Settings
 from dupcanon.database import Database, utc_now
+from dupcanon.judge_providers import (
+    default_judge_model,
+    normalize_judge_client_model,
+    normalize_judge_provider,
+    require_judge_api_key,
+    validate_thinking_for_provider,
+)
 from dupcanon.judge_service import (
     _SYSTEM_PROMPT,
     _bug_feature_veto_reason,
@@ -46,48 +53,6 @@ class _AuditItemResult:
     outcome_class: Literal["tp", "fp", "fn", "tn", "conflict", "incomplete"] | None = None
     error_class: str | None = None
     error_message: str | None = None
-
-
-def _normalize_provider(value: str) -> str:
-    normalized = value.strip().lower()
-    if normalized not in {"gemini", "openai", "openrouter", "openai-codex"}:
-        msg = "provider must be one of: gemini, openai, openrouter, openai-codex"
-        raise ValueError(msg)
-    return normalized
-
-
-def _default_model_for_provider(*, provider: str, settings: Settings, model: str | None) -> str:
-    if model is not None:
-        return model
-    if provider == "openai":
-        return "gpt-5-mini"
-    if provider == "openrouter":
-        return "minimax/minimax-m2.5"
-    if provider == "openai-codex":
-        return "gpt-5.1-codex-mini"
-    return settings.judge_model
-
-
-def _provider_api_key(*, settings: Settings, provider: str) -> str:
-    if provider == "gemini":
-        if settings.gemini_api_key:
-            return settings.gemini_api_key
-        msg = "GEMINI_API_KEY is required when provider=gemini"
-        raise ValueError(msg)
-
-    if provider == "openai":
-        if settings.openai_api_key:
-            return settings.openai_api_key
-        msg = "OPENAI_API_KEY is required when provider=openai"
-        raise ValueError(msg)
-
-    if provider == "openrouter":
-        if settings.openrouter_api_key:
-            return settings.openrouter_api_key
-        msg = "OPENROUTER_API_KEY is required when provider=openrouter"
-        raise ValueError(msg)
-
-    return ""
 
 
 def _classify_outcome(
@@ -165,7 +130,7 @@ def _judge_once(
         candidates=candidate_rows,
     )
 
-    client_model = "" if provider == "openai-codex" and model == "pi-default" else model
+    client_model = normalize_judge_client_model(provider=provider, model=model)
     client = _get_thread_local_judge_client(
         provider=provider,
         api_key=api_key,
@@ -385,31 +350,49 @@ def run_judge_audit(
         msg = "judge-audit worker concurrency must be > 0"
         raise ValueError(msg)
 
-    normalized_cheap_provider = _normalize_provider(cheap_provider)
-    normalized_strong_provider = _normalize_provider(strong_provider)
+    normalized_cheap_provider = normalize_judge_provider(cheap_provider, label="cheap-provider")
+    normalized_strong_provider = normalize_judge_provider(strong_provider, label="strong-provider")
     normalized_cheap_thinking = normalize_thinking_level(cheap_thinking_level)
     normalized_strong_thinking = normalize_thinking_level(strong_thinking_level)
 
-    if normalized_cheap_provider == "gemini" and normalized_cheap_thinking == "xhigh":
-        msg = "xhigh thinking is not supported when cheap-provider=gemini"
-        raise ValueError(msg)
-    if normalized_strong_provider == "gemini" and normalized_strong_thinking == "xhigh":
-        msg = "xhigh thinking is not supported when strong-provider=gemini"
-        raise ValueError(msg)
-
-    cheap_model_name = _default_model_for_provider(
+    validate_thinking_for_provider(
         provider=normalized_cheap_provider,
-        settings=settings,
-        model=cheap_model,
+        thinking_level=normalized_cheap_thinking,
+        provider_label="cheap-provider",
     )
-    strong_model_name = _default_model_for_provider(
+    validate_thinking_for_provider(
         provider=normalized_strong_provider,
-        settings=settings,
-        model=strong_model,
+        thinking_level=normalized_strong_thinking,
+        provider_label="strong-provider",
     )
 
-    cheap_api_key = _provider_api_key(settings=settings, provider=normalized_cheap_provider)
-    strong_api_key = _provider_api_key(settings=settings, provider=normalized_strong_provider)
+    cheap_model_name = default_judge_model(
+        provider=normalized_cheap_provider,
+        configured_provider=settings.judge_audit_cheap_provider,
+        configured_model=settings.judge_audit_cheap_model,
+        override=cheap_model,
+    )
+    strong_model_name = default_judge_model(
+        provider=normalized_strong_provider,
+        configured_provider=settings.judge_audit_strong_provider,
+        configured_model=settings.judge_audit_strong_model,
+        override=strong_model,
+    )
+
+    cheap_api_key = require_judge_api_key(
+        provider=normalized_cheap_provider,
+        gemini_api_key=settings.gemini_api_key,
+        openai_api_key=settings.openai_api_key,
+        openrouter_api_key=settings.openrouter_api_key,
+        provider_label="cheap-provider",
+    )
+    strong_api_key = require_judge_api_key(
+        provider=normalized_strong_provider,
+        gemini_api_key=settings.gemini_api_key,
+        openai_api_key=settings.openai_api_key,
+        openrouter_api_key=settings.openrouter_api_key,
+        provider_label="strong-provider",
+    )
 
     db_url = require_postgres_dsn(settings.supabase_db_url)
     repo = RepoRef.parse(repo_value)

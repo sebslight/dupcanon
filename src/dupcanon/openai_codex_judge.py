@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import random
 import re
 import selectors
 import subprocess
@@ -9,6 +8,8 @@ import time
 import uuid
 from collections.abc import Callable
 from typing import Any, cast
+
+from dupcanon.llm_retry import retry_delay_seconds
 
 
 class OpenAICodexJudgeError(RuntimeError):
@@ -48,6 +49,13 @@ class OpenAICodexJudgeClient:
         }:
             msg = "thinking_level must be one of: off, minimal, low, medium, high, xhigh"
             raise ValueError(msg)
+        if max_attempts <= 0:
+            msg = "max_attempts must be > 0"
+            raise ValueError(msg)
+        if timeout_seconds <= 0:
+            msg = "timeout_seconds must be > 0"
+            raise ValueError(msg)
+
         self.max_attempts = max_attempts
         self.timeout_seconds = timeout_seconds
         self.pi_command = pi_command
@@ -84,8 +92,7 @@ class OpenAICodexJudgeClient:
                 if attempt >= self.max_attempts:
                     raise err from exc
 
-            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
-            time.sleep(delay)
+            time.sleep(retry_delay_seconds(attempt))
 
         if last_error is not None:
             raise last_error

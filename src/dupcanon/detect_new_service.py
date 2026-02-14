@@ -8,6 +8,13 @@ from dupcanon.database import Database, utc_now
 from dupcanon.embed_service import build_embedding_text
 from dupcanon.gemini_embeddings import GeminiEmbeddingsClient
 from dupcanon.github_client import GitHubClient
+from dupcanon.judge_providers import (
+    default_judge_model,
+    normalize_judge_client_model,
+    normalize_judge_provider,
+    require_judge_api_key,
+    validate_thinking_for_provider,
+)
 from dupcanon.judge_service import (
     _SYSTEM_PROMPT,
     _bug_feature_veto_reason,
@@ -40,52 +47,6 @@ _ONLINE_SOURCE_BODY_MAX_CHARS = 12000
 _ONLINE_CANDIDATE_TITLE_MAX_CHARS = 300
 _ONLINE_CANDIDATE_BODY_MAX_CHARS = 3000
 _ONLINE_DUPLICATE_MIN_RETRIEVAL_SCORE = 0.90
-
-
-def _normalize_provider(value: str) -> str:
-    normalized = value.strip().lower()
-    if normalized not in {"gemini", "openai", "openrouter", "openai-codex"}:
-        msg = "--provider must be one of: gemini, openai, openrouter, openai-codex"
-        raise ValueError(msg)
-    return normalized
-
-
-def _default_judge_model(*, provider: str, settings: Settings, model: str | None) -> str:
-    if model is not None:
-        return model
-
-    if provider == "openai":
-        return "gpt-5-mini"
-    if provider == "openrouter":
-        return "minimax/minimax-m2.5"
-    if provider == "openai-codex":
-        return "gpt-5.1-codex-mini"
-    return settings.judge_model
-
-
-def _judge_api_key(*, settings: Settings, provider: str) -> str:
-    if provider == "gemini":
-        key = settings.gemini_api_key
-        if key:
-            return key
-        msg = "GEMINI_API_KEY is required for detect-new when --provider=gemini"
-        raise ValueError(msg)
-
-    if provider == "openai":
-        key = settings.openai_api_key
-        if key:
-            return key
-        msg = "OPENAI_API_KEY is required for detect-new when --provider=openai"
-        raise ValueError(msg)
-
-    if provider == "openrouter":
-        key = settings.openrouter_api_key
-        if key:
-            return key
-        msg = "OPENROUTER_API_KEY is required for detect-new when --provider=openrouter"
-        raise ValueError(msg)
-
-    return ""
 
 
 def _embedding_client(
@@ -289,13 +250,20 @@ def run_detect_new(
         duplicate_threshold=duplicate_threshold,
     )
 
-    normalized_provider = _normalize_provider(provider)
+    normalized_provider = normalize_judge_provider(provider, label="--provider")
     normalized_thinking_level = normalize_thinking_level(thinking_level)
-    if normalized_provider == "gemini" and normalized_thinking_level == "xhigh":
-        msg = "xhigh thinking is not supported when --provider=gemini"
-        raise ValueError(msg)
+    validate_thinking_for_provider(
+        provider=normalized_provider,
+        thinking_level=normalized_thinking_level,
+        provider_label="--provider",
+    )
 
-    judge_model = _default_judge_model(provider=normalized_provider, settings=settings, model=model)
+    judge_model = default_judge_model(
+        provider=normalized_provider,
+        configured_provider=settings.judge_provider,
+        configured_model=settings.judge_model,
+        override=model,
+    )
 
     db_url = require_postgres_dsn(settings.supabase_db_url)
     repo = RepoRef.parse(repo_value)
@@ -473,10 +441,15 @@ def run_detect_new(
         )
         return result
 
-    api_key = _judge_api_key(settings=settings, provider=normalized_provider)
-    client_model = (
-        "" if normalized_provider == "openai-codex" and judge_model == "pi-default" else judge_model
+    api_key = require_judge_api_key(
+        provider=normalized_provider,
+        gemini_api_key=settings.gemini_api_key,
+        openai_api_key=settings.openai_api_key,
+        openrouter_api_key=settings.openrouter_api_key,
+        context="detect-new",
+        provider_label="--provider",
     )
+    client_model = normalize_judge_client_model(provider=normalized_provider, model=judge_model)
     client = _get_thread_local_judge_client(
         provider=normalized_provider,
         api_key=api_key,

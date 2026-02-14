@@ -6,6 +6,7 @@ from typing import Any, cast
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from dupcanon.judge_providers import normalize_judge_provider
 from dupcanon.thinking import normalize_thinking_level
 
 
@@ -110,12 +111,8 @@ class Settings(BaseSettings):
         "judge_audit_strong_provider",
     )
     @classmethod
-    def normalize_judge_provider(cls, value: str) -> str:
-        normalized = value.strip().lower()
-        if normalized not in {"gemini", "openai", "openrouter", "openai-codex"}:
-            msg = "judge provider must be one of: gemini, openai, openrouter, openai-codex"
-            raise ValueError(msg)
-        return normalized
+    def normalize_judge_provider_setting(cls, value: str) -> str:
+        return normalize_judge_provider(value, label="judge provider")
 
     @field_validator(
         "judge_thinking",

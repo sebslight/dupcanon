@@ -17,6 +17,13 @@ from dupcanon.artifacts import write_artifact
 from dupcanon.config import Settings
 from dupcanon.database import Database, utc_now
 from dupcanon.gemini_judge import GeminiJudgeClient
+from dupcanon.judge_providers import (
+    default_judge_model,
+    normalize_judge_client_model,
+    normalize_judge_provider,
+    require_judge_api_key,
+    validate_thinking_for_provider,
+)
 from dupcanon.logging_config import BoundLogger
 from dupcanon.models import (
     ItemType,
@@ -608,6 +615,7 @@ def _judge_single_item(
     item_type: ItemType,
     normalized_provider: str,
     judge_model: str,
+    judge_api_key: str,
     thinking_level: str | None,
     min_edge: float,
     rejudge: bool,
@@ -672,22 +680,13 @@ def _judge_single_item(
             candidates=candidate_rows,
         )
 
-        if normalized_provider == "gemini":
-            api_key = settings.gemini_api_key
-        elif normalized_provider == "openai":
-            api_key = settings.openai_api_key
-        elif normalized_provider == "openrouter":
-            api_key = settings.openrouter_api_key
-        else:
-            api_key = ""
-        client_model = (
-            ""
-            if normalized_provider == "openai-codex" and judge_model == "pi-default"
-            else judge_model
+        client_model = normalize_judge_client_model(
+            provider=normalized_provider,
+            model=judge_model,
         )
         client = _get_thread_local_judge_client(
             provider=normalized_provider,
-            api_key=api_key or "",
+            api_key=judge_api_key,
             model=client_model,
             thinking_level=thinking_level,
         )
@@ -1152,29 +1151,27 @@ def run_judge(
 ) -> JudgeStats:
     command_started = perf_counter()
 
-    normalized_provider = provider.strip().lower()
-    if normalized_provider not in {"gemini", "openai", "openrouter", "openai-codex"}:
-        msg = "--provider must be one of: gemini, openai, openrouter, openai-codex"
-        raise ValueError(msg)
+    normalized_provider = normalize_judge_provider(provider, label="--provider")
     if min_edge < 0.0 or min_edge > 1.0:
         msg = "--min-edge must be between 0 and 1"
         raise ValueError(msg)
 
     normalized_thinking_level = normalize_thinking_level(thinking_level)
-    if normalized_provider == "gemini" and normalized_thinking_level == "xhigh":
-        msg = "xhigh thinking is not supported when --provider=gemini"
-        raise ValueError(msg)
+    validate_thinking_for_provider(
+        provider=normalized_provider,
+        thinking_level=normalized_thinking_level,
+        provider_label="--provider",
+    )
 
     db_url = require_postgres_dsn(settings.supabase_db_url)
-    if normalized_provider == "gemini" and not settings.gemini_api_key:
-        msg = "GEMINI_API_KEY is required for judge when --provider=gemini"
-        raise ValueError(msg)
-    if normalized_provider == "openai" and not settings.openai_api_key:
-        msg = "OPENAI_API_KEY is required for judge when --provider=openai"
-        raise ValueError(msg)
-    if normalized_provider == "openrouter" and not settings.openrouter_api_key:
-        msg = "OPENROUTER_API_KEY is required for judge when --provider=openrouter"
-        raise ValueError(msg)
+    judge_api_key = require_judge_api_key(
+        provider=normalized_provider,
+        gemini_api_key=settings.gemini_api_key,
+        openai_api_key=settings.openai_api_key,
+        openrouter_api_key=settings.openrouter_api_key,
+        context="judge",
+        provider_label="--provider",
+    )
 
     effective_worker_concurrency = (
         worker_concurrency if worker_concurrency is not None else settings.judge_worker_concurrency
@@ -1184,16 +1181,12 @@ def run_judge(
         raise ValueError(msg)
 
     repo = RepoRef.parse(repo_value)
-    if model is not None:
-        judge_model = model
-    elif normalized_provider == "openai":
-        judge_model = "gpt-5-mini"
-    elif normalized_provider == "openrouter":
-        judge_model = "minimax/minimax-m2.5"
-    elif normalized_provider == "openai-codex":
-        judge_model = "gpt-5.1-codex-mini"
-    else:
-        judge_model = settings.judge_model
+    judge_model = default_judge_model(
+        provider=normalized_provider,
+        configured_provider=settings.judge_provider,
+        configured_model=settings.judge_model,
+        override=model,
+    )
 
     logger = logger.bind(
         repo=repo.full_name(),
@@ -1276,6 +1269,7 @@ def run_judge(
                     item_type=item_type,
                     normalized_provider=normalized_provider,
                     judge_model=judge_model,
+                    judge_api_key=judge_api_key,
                     thinking_level=normalized_thinking_level,
                     min_edge=min_edge,
                     rejudge=rejudge,
@@ -1296,6 +1290,7 @@ def run_judge(
                         item_type=item_type,
                         normalized_provider=normalized_provider,
                         judge_model=judge_model,
+                        judge_api_key=judge_api_key,
                         thinking_level=normalized_thinking_level,
                         min_edge=min_edge,
                         rejudge=rejudge,

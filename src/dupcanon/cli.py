@@ -24,6 +24,7 @@ from dupcanon.config import (
 from dupcanon.detect_new_service import run_detect_new
 from dupcanon.embed_service import run_embed
 from dupcanon.judge_audit_service import run_judge_audit
+from dupcanon.judge_providers import default_judge_model, normalize_judge_provider
 from dupcanon.judge_service import run_judge
 from dupcanon.logging_config import BoundLogger, configure_logging, get_logger
 from dupcanon.maintainers_service import run_maintainers
@@ -200,14 +201,12 @@ def _bootstrap(command: str) -> tuple[Settings, str, BoundLogger]:
 
 
 def _default_model_for_provider(*, provider: str, settings: Settings) -> str | None:
-    normalized = provider.strip().lower()
-    if normalized == "openai":
-        return "gpt-5-mini"
-    if normalized == "openrouter":
-        return "minimax/minimax-m2.5"
-    if normalized == "openai-codex":
-        return "gpt-5.1-codex-mini"
-    return settings.judge_model
+    normalized_provider = normalize_judge_provider(provider, label="--provider")
+    return default_judge_model(
+        provider=normalized_provider,
+        configured_provider=settings.judge_provider,
+        configured_model=settings.judge_model,
+    )
 
 
 def _default_embedding_model_for_provider(*, provider: str, settings: Settings) -> str:
@@ -424,7 +423,7 @@ def refresh(
     refresh_known: bool = REFRESH_KNOWN_OPTION,
     dry_run: bool = DRY_RUN_OPTION,
 ) -> None:
-    """Refresh state for known items."""
+    """Discover new items; optionally refresh known item metadata."""
     settings, run_id, logger = _bootstrap("refresh")
 
     try:
