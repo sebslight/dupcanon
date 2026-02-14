@@ -43,3 +43,13 @@ def test_parse_embeddings_dim_mismatch_raises() -> None:
 
     with pytest.raises(OpenAIEmbeddingError):
         client._parse_embeddings(response=response, expected_count=1)
+
+
+def test_openai_embeddings_rejects_invalid_dimensions() -> None:
+    with pytest.raises(ValueError, match="output_dimensionality"):
+        OpenAIEmbeddingsClient(api_key="key", output_dimensionality=0)
+
+
+def test_openai_embeddings_rejects_invalid_max_attempts() -> None:
+    with pytest.raises(ValueError, match="max_attempts"):
+        OpenAIEmbeddingsClient(api_key="key", max_attempts=0)

@@ -37,3 +37,18 @@ def test_parse_embeddings_dim_mismatch_raises() -> None:
 
     with pytest.raises(GeminiEmbeddingError):
         client._parse_embeddings(raw=raw, expected_count=1)
+
+
+def test_gemini_embeddings_rejects_invalid_dimensions() -> None:
+    with pytest.raises(ValueError, match="output_dimensionality"):
+        GeminiEmbeddingsClient(api_key="key", output_dimensionality=0)
+
+
+def test_gemini_embeddings_rejects_invalid_max_attempts() -> None:
+    with pytest.raises(ValueError, match="max_attempts"):
+        GeminiEmbeddingsClient(api_key="key", max_attempts=0)
+
+
+def test_gemini_embeddings_rejects_invalid_timeout() -> None:
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        GeminiEmbeddingsClient(api_key="key", timeout_seconds=0)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 import dupcanon.github_client as github_client
 from dupcanon.github_client import (
     GitHubClient,
@@ -15,6 +17,11 @@ from dupcanon.models import ItemType, RepoRef, StateFilter
 
 def test_parse_http_status_extracts_code() -> None:
     assert _parse_http_status("gh: HTTP 502 Bad Gateway") == 502
+
+
+def test_github_client_rejects_invalid_max_attempts() -> None:
+    with pytest.raises(ValueError, match="max_attempts"):
+        GitHubClient(max_attempts=0)
 
 
 def test_parse_http_status_returns_none_when_absent() -> None:
