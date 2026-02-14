@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from threading import local
@@ -24,26 +25,43 @@ from dupcanon.models import (
     RepoRef,
     normalize_text,
 )
+from dupcanon.openai_judge import OpenAIJudgeClient
 from dupcanon.sync_service import require_postgres_dsn
 
-_SYSTEM_PROMPT = """You are a strict duplicate-triage judge for GitHub items.
+_SYSTEM_PROMPT = """You are a conservative duplicate-triage judge for GitHub issues/PRs.
 
 Task:
 Given one SOURCE item and a list of CANDIDATES (same repo, same type),
 decide whether SOURCE is a duplicate of exactly one candidate.
 
-Definition of duplicate:
-- Same underlying problem/request, not just same broad area.
-- Different wording is fine; core intent/root cause must match.
-- If uncertain, choose non-duplicate.
+Core definition (strict):
+A duplicate means the SOURCE and chosen candidate describe the same specific
+underlying root cause/request, not just the same broad area (e.g. both about
+"exec", "auth", "performance", etc.).
 
-Rules:
+Hard duplicate requirements:
+- Prefer non-duplicate unless evidence is strong.
+- Mark duplicate only when there are at least TWO concrete matching facts, such as:
+  1) same/similar error text, error code, or failure signature
+  2) same config keys/values (for example ask=off, security=full)
+  3) same command/tool/path/component and same behavior
+  4) same reproduction conditions / triggering scenario
+- If SOURCE is vague/generic (very short title/body, little detail), default to non-duplicate.
+- If details conflict on root cause, expected behavior, or subsystem, return non-duplicate.
+
+Decision rules:
 1) You may select at most one candidate.
-2) You may only select a candidate number that appears in ALLOWED_CANDIDATE_NUMBERS.
-3) If none match, return non-duplicate.
-4) Be conservative to avoid false positives.
-5) Ignore comments (you only have title/body).
-6) Output JSON only. No markdown, no extra text.
+2) You may only select a candidate number from ALLOWED_CANDIDATE_NUMBERS.
+3) If none clearly match, return non-duplicate.
+4) Ignore comments (title/body only).
+5) Output JSON only. No markdown. No extra text.
+
+Confidence rubric (self-assessed, not calibrated probability):
+- Non-duplicate: typically 0.00-0.80.
+- Duplicate 0.85-0.89: moderate evidence (minimum requirements met).
+- Duplicate 0.90-0.95: strong evidence (3+ specific aligned facts, no conflicts).
+- Duplicate 0.96-1.00: near-exact match in root cause/repro/details.
+- Do NOT use high confidence for generic or weakly-supported matches.
 
 Output JSON schema:
 {
@@ -57,7 +75,7 @@ Output constraints:
 - If is_duplicate is false, duplicate_of must be 0.
 - If is_duplicate is true, duplicate_of must be one of the candidate numbers.
 - confidence must be in [0,1].
-- reasoning must be short (<= 240 chars).
+- reasoning must be short (<= 240 chars) and mention concrete matching facts.
 - No extra keys.
 """
 
@@ -65,6 +83,50 @@ _TITLE_MAX_CHARS = 300
 _BODY_MAX_CHARS = 3000
 _CREATED_BY = "dupcanon/judge"
 _THREAD_LOCAL = local()
+
+_MIN_SOURCE_CHARS = 90
+_MIN_SOURCE_WORDS = 12
+_GENERIC_SOURCE_PHRASES = (
+    "plz fix",
+    "please fix",
+    "help me",
+    "not working",
+    "does not work",
+    "doesn't work",
+    "error all time",
+)
+
+
+def _looks_too_vague(*, source_title: str, source_body: str | None) -> bool:
+    title = normalize_text(source_title)
+    body = normalize_text(source_body)
+    text = f"{title}\n{body}".strip()
+    if not text:
+        return True
+
+    lowered = text.lower()
+    words = re.findall(r"\b\w+\b", text)
+    word_count = len(words)
+    char_count = len(text)
+
+    has_structured_signal = any(
+        marker in text for marker in ("`", "{", "}", "=", "/", "--", ":")
+    ) or bool(re.search(r"\b[a-zA-Z0-9_.-]+\.[a-zA-Z0-9_.-]+\b", text))
+
+    if any(phrase in lowered for phrase in _GENERIC_SOURCE_PHRASES) and char_count < 220:
+        return True
+
+    if char_count >= 180 and word_count >= 30:
+        return False
+
+    if (
+        has_structured_signal
+        and char_count >= _MIN_SOURCE_CHARS
+        and word_count >= _MIN_SOURCE_WORDS
+    ):
+        return False
+
+    return char_count < _MIN_SOURCE_CHARS or word_count < _MIN_SOURCE_WORDS
 
 
 @dataclass(frozen=True)
@@ -80,16 +142,38 @@ class _JudgeItemResult:
     failed: int = 0
 
 
-def _get_thread_local_judge_client(*, api_key: str, model: str) -> GeminiJudgeClient:
+def _get_thread_local_judge_client(
+    *,
+    provider: str,
+    api_key: str,
+    model: str,
+) -> GeminiJudgeClient | OpenAIJudgeClient:
     client = getattr(_THREAD_LOCAL, "judge_client", None)
+    current_provider = getattr(_THREAD_LOCAL, "judge_provider", None)
     current_model = getattr(_THREAD_LOCAL, "judge_model", None)
     current_key = getattr(_THREAD_LOCAL, "judge_api_key", None)
 
-    if isinstance(client, GeminiJudgeClient) and current_model == model and current_key == api_key:
+    if (
+        (isinstance(client, GeminiJudgeClient) or isinstance(client, OpenAIJudgeClient))
+        and current_provider == provider
+        and current_model == model
+        and current_key == api_key
+    ):
         return client
 
-    next_client = GeminiJudgeClient(api_key=api_key, model=model)
+    if provider == "gemini":
+        next_client: GeminiJudgeClient | OpenAIJudgeClient = GeminiJudgeClient(
+            api_key=api_key,
+            model=model,
+        )
+    elif provider == "openai":
+        next_client = OpenAIJudgeClient(api_key=api_key, model=model)
+    else:
+        msg = f"unsupported judge provider: {provider}"
+        raise ValueError(msg)
+
     _THREAD_LOCAL.judge_client = next_client
+    _THREAD_LOCAL.judge_provider = provider
     _THREAD_LOCAL.judge_model = model
     _THREAD_LOCAL.judge_api_key = api_key
     return next_client
@@ -202,6 +286,22 @@ def _judge_single_item(
                 stale_sets_used=stale_sets_used,
             )
 
+        if _looks_too_vague(
+            source_title=work_item.source_title,
+            source_body=work_item.source_body,
+        ):
+            logger.info(
+                "judge.skip_vague_source",
+                status="skip",
+                item_id=work_item.source_number,
+                item_type=work_item.source_type.value,
+                reason="source_too_vague",
+            )
+            return _JudgeItemResult(
+                skipped_not_duplicate=1,
+                stale_sets_used=stale_sets_used,
+            )
+
         has_existing_accepted = db.has_accepted_duplicate_edge(
             repo_id=repo_id,
             item_type=item_type,
@@ -233,8 +333,12 @@ def _judge_single_item(
             candidates=candidate_rows,
         )
 
+        api_key = (
+            settings.gemini_api_key if normalized_provider == "gemini" else settings.openai_api_key
+        )
         client = _get_thread_local_judge_client(
-            api_key=settings.gemini_api_key or "",
+            provider=normalized_provider,
+            api_key=api_key or "",
             model=judge_model,
         )
         raw_response = client.judge(system_prompt=_SYSTEM_PROMPT, user_prompt=user_prompt)
@@ -449,29 +553,35 @@ def run_judge(
     command_started = perf_counter()
 
     normalized_provider = provider.strip().lower()
-    if normalized_provider != "gemini":
-        msg = "--provider must be gemini in v1"
+    if normalized_provider not in {"gemini", "openai"}:
+        msg = "--provider must be one of: gemini, openai"
         raise ValueError(msg)
     if min_edge < 0.0 or min_edge > 1.0:
         msg = "--min-edge must be between 0 and 1"
         raise ValueError(msg)
 
     db_url = require_postgres_dsn(settings.supabase_db_url)
-    if not settings.gemini_api_key:
-        msg = "GEMINI_API_KEY is required for judge"
+    if normalized_provider == "gemini" and not settings.gemini_api_key:
+        msg = "GEMINI_API_KEY is required for judge when --provider=gemini"
+        raise ValueError(msg)
+    if normalized_provider == "openai" and not settings.openai_api_key:
+        msg = "OPENAI_API_KEY is required for judge when --provider=openai"
         raise ValueError(msg)
 
     effective_worker_concurrency = (
-        worker_concurrency
-        if worker_concurrency is not None
-        else settings.judge_worker_concurrency
+        worker_concurrency if worker_concurrency is not None else settings.judge_worker_concurrency
     )
     if effective_worker_concurrency <= 0:
         msg = "judge worker concurrency must be > 0"
         raise ValueError(msg)
 
     repo = RepoRef.parse(repo_value)
-    judge_model = model or settings.judge_model
+    if model is not None:
+        judge_model = model
+    elif normalized_provider == "openai":
+        judge_model = "gpt-5-mini"
+    else:
+        judge_model = settings.judge_model
 
     logger = logger.bind(
         repo=repo.full_name(),

@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     supabase_db_url: str | None = Field(default=None, validation_alias="SUPABASE_DB_URL")
     gemini_api_key: str | None = Field(default=None, validation_alias="GEMINI_API_KEY")
+    openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     github_token: str | None = Field(default=None, validation_alias="GITHUB_TOKEN")
     embedding_model: str = Field(
         default="gemini-embedding-001",
@@ -22,10 +23,17 @@ class Settings(BaseSettings):
         validation_alias="DUPCANON_EMBED_WORKER_CONCURRENCY",
     )
     judge_provider: str = Field(default="gemini", validation_alias="DUPCANON_JUDGE_PROVIDER")
-    judge_model: str = Field(default="gemini-2.5-flash", validation_alias="DUPCANON_JUDGE_MODEL")
+    judge_model: str = Field(
+        default="gemini-3-flash-preview",
+        validation_alias="DUPCANON_JUDGE_MODEL",
+    )
     judge_worker_concurrency: int = Field(
         default=4,
         validation_alias="DUPCANON_JUDGE_WORKER_CONCURRENCY",
+    )
+    candidate_worker_concurrency: int = Field(
+        default=4,
+        validation_alias="DUPCANON_CANDIDATE_WORKER_CONCURRENCY",
     )
     artifacts_dir: Path = Field(
         default=Path(".local/artifacts"),
@@ -57,7 +65,12 @@ class Settings(BaseSettings):
     def normalize_judge_provider(cls, value: str) -> str:
         return value.strip().lower()
 
-    @field_validator("embed_batch_size", "embed_worker_concurrency", "judge_worker_concurrency")
+    @field_validator(
+        "embed_batch_size",
+        "embed_worker_concurrency",
+        "judge_worker_concurrency",
+        "candidate_worker_concurrency",
+    )
     @classmethod
     def validate_positive_ints(cls, value: int) -> int:
         if value <= 0:

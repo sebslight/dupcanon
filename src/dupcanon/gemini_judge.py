@@ -27,7 +27,7 @@ class GeminiJudgeClient:
         self,
         *,
         api_key: str,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3-flash-preview",
         max_attempts: int = 5,
     ) -> None:
         self.client = genai.Client(api_key=api_key)
@@ -37,7 +37,7 @@ class GeminiJudgeClient:
     def judge(self, *, system_prompt: str, user_prompt: str) -> str:
         config = types.GenerateContentConfig(
             system_instruction=system_prompt,
-            temperature=0,
+            temperature=1,
             response_mime_type="application/json",
         )
 

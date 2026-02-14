@@ -15,7 +15,8 @@ When implementing behavior, schema, or defaults, follow the spec above first.
 
 - Embeddings: Gemini API `gemini-embedding-001`
 - Embedding dimension: `768` (pgvector column is `vector(768)`)
-- Judge model: Gemini API `gemini-2.5-flash`
+- Judge model default: Gemini API `gemini-3-flash-preview`
+- Optional judge override for evaluation: OpenAI `gpt-5-mini`
 - Retrieval defaults: `k=8`, `min_score=0.75`
 - Thresholds: `min_edge=0.85`, `min_close=0.90`
 - Input content for modeling: title + body only (no comments)
