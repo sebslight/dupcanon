@@ -260,6 +260,84 @@ class CanonicalizeStats(BaseModel):
     failed: int = 0
 
 
+class PlanCloseItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    item_id: int
+    number: int
+    state: StateFilter
+    author_login: str | None = None
+    assignees: list[str] = Field(default_factory=list)
+    assignees_unknown: bool = False
+    comment_count: int = 0
+    review_comment_count: int = 0
+    created_at_gh: datetime | None = None
+
+
+class AcceptedDuplicateEdge(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    from_item_id: int
+    to_item_id: int
+    confidence: float
+
+
+class PlanCloseStats(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    close_run_id: int | None = None
+    dry_run: bool = False
+    plan_hash: str | None = None
+    approval_file: str | None = None
+    accepted_edges: int = 0
+    clusters: int = 0
+    considered: int = 0
+    close_actions: int = 0
+    skip_actions: int = 0
+    skipped_not_open: int = 0
+    skipped_low_confidence: int = 0
+    skipped_missing_edge: int = 0
+    skipped_maintainer_author: int = 0
+    skipped_maintainer_assignee: int = 0
+    skipped_uncertain_maintainer_identity: int = 0
+    failed: int = 0
+
+
+class CloseRunRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    close_run_id: int
+    repo_id: int
+    repo_full_name: str
+    item_type: ItemType
+    mode: Literal["plan", "apply"]
+    min_confidence_close: float
+
+
+class ClosePlanEntry(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    item_id: int
+    item_number: int
+    canonical_item_id: int
+    canonical_number: int
+    action: Literal["close", "skip"]
+    skip_reason: str | None = None
+
+
+class ApplyCloseStats(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    plan_close_run_id: int
+    apply_close_run_id: int
+    planned_items: int = 0
+    planned_close_actions: int = 0
+    planned_skip_actions: int = 0
+    attempted: int = 0
+    applied: int = 0
+    failed: int = 0
+
+
 class UpsertResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 

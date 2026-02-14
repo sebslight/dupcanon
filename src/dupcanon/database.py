@@ -1,21 +1,25 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, cast
 
 from psycopg import Connection, connect
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from dupcanon.models import (
+    AcceptedDuplicateEdge,
     CandidateNeighbor,
     CandidateSourceItem,
     CanonicalNode,
+    ClosePlanEntry,
+    CloseRunRecord,
     EmbeddingItem,
     ItemPayload,
     ItemType,
     JudgeCandidate,
     JudgeWorkItem,
+    PlanCloseItem,
     RepoMetadata,
     RepoRef,
     StateFilter,
@@ -420,9 +424,7 @@ class Database:
         allow_stale: bool,
     ) -> list[JudgeWorkItem]:
         status_predicate = (
-            "cs.status in ('fresh', 'stale')"
-            if allow_stale
-            else "cs.status = 'fresh'"
+            "cs.status in ('fresh', 'stale')" if allow_stale else "cs.status = 'fresh'"
         )
         freshness_order = (
             "case when cs.status = 'fresh' then 0 else 1 end, cs.created_at desc"
@@ -675,6 +677,289 @@ class Database:
         for row in rows:
             result.append((int(row["from_item_id"]), int(row["to_item_id"])))
         return result
+
+    def list_accepted_duplicate_edges_with_confidence(
+        self,
+        *,
+        repo_id: int,
+        item_type: ItemType,
+    ) -> list[AcceptedDuplicateEdge]:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select from_item_id, to_item_id, confidence
+                from public.duplicate_edges
+                where
+                    repo_id = %s
+                    and type = %s
+                    and status = 'accepted'
+                order by id asc
+                """,
+                (repo_id, item_type.value),
+            )
+            rows = cur.fetchall()
+
+        result: list[AcceptedDuplicateEdge] = []
+        for row in rows:
+            result.append(
+                AcceptedDuplicateEdge(
+                    from_item_id=int(row["from_item_id"]),
+                    to_item_id=int(row["to_item_id"]),
+                    confidence=float(row["confidence"]),
+                )
+            )
+        return result
+
+    def list_items_for_close_planning(
+        self,
+        *,
+        repo_id: int,
+        item_type: ItemType,
+    ) -> list[PlanCloseItem]:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                with edge_items as (
+                    select from_item_id as item_id
+                    from public.duplicate_edges
+                    where repo_id = %s and type = %s and status = 'accepted'
+                    union
+                    select to_item_id as item_id
+                    from public.duplicate_edges
+                    where repo_id = %s and type = %s and status = 'accepted'
+                )
+                select
+                    i.id as item_id,
+                    i.number,
+                    i.state,
+                    i.author_login,
+                    i.assignees,
+                    i.comment_count,
+                    i.review_comment_count,
+                    i.created_at_gh
+                from edge_items e
+                join public.items i on i.id = e.item_id
+                order by i.id asc
+                """,
+                (repo_id, item_type.value, repo_id, item_type.value),
+            )
+            rows = cur.fetchall()
+
+        result: list[PlanCloseItem] = []
+        for row in rows:
+            raw_assignees = row.get("assignees")
+            assignees_unknown = False
+            assignees: list[str] = []
+            if raw_assignees is None:
+                assignees = []
+            elif isinstance(raw_assignees, list):
+                for value in raw_assignees:
+                    if isinstance(value, str):
+                        assignees.append(value)
+                    else:
+                        assignees_unknown = True
+            else:
+                assignees_unknown = True
+
+            result.append(
+                PlanCloseItem(
+                    item_id=int(row["item_id"]),
+                    number=int(row["number"]),
+                    state=StateFilter(str(row["state"])),
+                    author_login=row.get("author_login"),
+                    assignees=assignees,
+                    assignees_unknown=assignees_unknown,
+                    comment_count=int(row["comment_count"]),
+                    review_comment_count=int(row["review_comment_count"]),
+                    created_at_gh=row.get("created_at_gh"),
+                )
+            )
+        return result
+
+    def create_close_run(
+        self,
+        *,
+        repo_id: int,
+        item_type: ItemType,
+        mode: str,
+        min_confidence_close: float,
+        created_by: str,
+        created_at: datetime,
+    ) -> int:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                insert into public.close_runs (
+                    repo_id,
+                    type,
+                    mode,
+                    min_confidence_close,
+                    created_by,
+                    created_at
+                ) values (
+                    %s, %s, %s, %s, %s, %s
+                )
+                returning id
+                """,
+                (
+                    repo_id,
+                    item_type.value,
+                    mode,
+                    min_confidence_close,
+                    created_by,
+                    created_at,
+                ),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            msg = "failed to create close_run"
+            raise DatabaseError(msg)
+
+        return int(row["id"])
+
+    def create_close_run_item(
+        self,
+        *,
+        close_run_id: int,
+        item_id: int,
+        canonical_item_id: int,
+        action: str,
+        skip_reason: str | None,
+        created_at: datetime,
+    ) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into public.close_run_items (
+                    close_run_id,
+                    item_id,
+                    canonical_item_id,
+                    action,
+                    skip_reason,
+                    created_at
+                ) values (
+                    %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    close_run_id,
+                    item_id,
+                    canonical_item_id,
+                    action,
+                    skip_reason,
+                    created_at,
+                ),
+            )
+
+    def get_close_run_record(self, *, close_run_id: int) -> CloseRunRecord | None:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select
+                    cr.id as close_run_id,
+                    cr.repo_id,
+                    r.org,
+                    r.name,
+                    cr.type,
+                    cr.mode,
+                    cr.min_confidence_close
+                from public.close_runs cr
+                join public.repos r
+                    on r.id = cr.repo_id
+                where cr.id = %s
+                """,
+                (close_run_id,),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        raw_mode = str(row["mode"])
+        if raw_mode not in {"plan", "apply"}:
+            msg = f"invalid close_runs.mode value: {raw_mode}"
+            raise DatabaseError(msg)
+        mode = cast(Literal["plan", "apply"], raw_mode)
+
+        return CloseRunRecord(
+            close_run_id=int(row["close_run_id"]),
+            repo_id=int(row["repo_id"]),
+            repo_full_name=f"{row['org']}/{row['name']}",
+            item_type=ItemType(str(row["type"])),
+            mode=mode,
+            min_confidence_close=float(row["min_confidence_close"]),
+        )
+
+    def list_close_plan_entries(self, *, close_run_id: int) -> list[ClosePlanEntry]:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select
+                    cri.item_id,
+                    i.number as item_number,
+                    cri.canonical_item_id,
+                    canonical.number as canonical_number,
+                    cri.action,
+                    cri.skip_reason
+                from public.close_run_items cri
+                join public.items i
+                    on i.id = cri.item_id
+                join public.items canonical
+                    on canonical.id = cri.canonical_item_id
+                where cri.close_run_id = %s
+                order by i.number asc
+                """,
+                (close_run_id,),
+            )
+            rows = cur.fetchall()
+
+        result: list[ClosePlanEntry] = []
+        for row in rows:
+            raw_action = str(row["action"])
+            if raw_action not in {"close", "skip"}:
+                msg = f"invalid close_run_items.action value: {raw_action}"
+                raise DatabaseError(msg)
+            action = cast(Literal["close", "skip"], raw_action)
+
+            result.append(
+                ClosePlanEntry(
+                    item_id=int(row["item_id"]),
+                    item_number=int(row["item_number"]),
+                    canonical_item_id=int(row["canonical_item_id"]),
+                    canonical_number=int(row["canonical_number"]),
+                    action=action,
+                    skip_reason=row.get("skip_reason"),
+                )
+            )
+
+        return result
+
+    def update_close_run_item_apply_result(
+        self,
+        *,
+        close_run_id: int,
+        item_id: int,
+        applied_at: datetime,
+        gh_result: dict[str, Any],
+    ) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                update public.close_run_items
+                set applied_at = %s,
+                    gh_result = %s
+                where close_run_id = %s
+                  and item_id = %s
+                """,
+                (applied_at, Json(gh_result), close_run_id, item_id),
+            )
+            if cur.rowcount != 1:
+                msg = (
+                    "close_run_items row not found for "
+                    f"close_run_id={close_run_id} item_id={item_id}"
+                )
+                raise DatabaseError(msg)
 
     def list_nodes_for_canonicalization(
         self,

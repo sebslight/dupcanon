@@ -10,7 +10,7 @@ from dupcanon.github_client import (
     _parse_http_status,
     _should_retry,
 )
-from dupcanon.models import RepoRef, StateFilter
+from dupcanon.models import ItemType, RepoRef, StateFilter
 
 
 def test_parse_http_status_extracts_code() -> None:
@@ -238,3 +238,38 @@ def test_fetch_maintainers_filters_by_permissions(monkeypatch) -> None:
     assert params["affiliation"] == "all"
     assert params["per_page"] == 100
     assert captured["jq_expression"] == ".[]"
+
+
+def test_close_item_as_duplicate_uses_issue_command(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "closed"
+        stderr = ""
+
+    def fake_run(cmd, *, check, capture_output, text):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(github_client.subprocess, "run", fake_run)
+
+    client = GitHubClient(max_attempts=1)
+    result = client.close_item_as_duplicate(
+        repo=RepoRef.parse("org/repo"),
+        item_type=ItemType.ISSUE,
+        number=42,
+        canonical_number=7,
+    )
+
+    assert result["status"] == "closed"
+    assert result["item_type"] == "issue"
+    assert result["number"] == 42
+
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert cmd[:4] == ["gh", "issue", "close", "42"]
+    assert "--repo" in cmd
+    assert "org/repo" in cmd
+    assert "--comment" in cmd
+    assert "#7" in cmd[-1]

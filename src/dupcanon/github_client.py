@@ -504,6 +504,72 @@ query($owner:String!,$name:String!,$endCursor:String) {{
 
         return set(maintainers)
 
+    def _run_gh_command_with_retry(self, cmd: list[str]) -> tuple[str, str]:
+        last_error: Exception | None = None
+
+        for attempt in range(1, self.max_attempts + 1):
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            if proc.returncode == 0:
+                return proc.stdout, proc.stderr
+
+            status_code = _parse_http_status(proc.stderr)
+            message = proc.stderr.strip() or proc.stdout.strip() or "unknown gh command error"
+            error = GitHubApiError(message, status_code=status_code)
+            last_error = error
+
+            if attempt >= self.max_attempts or not _should_retry(status_code):
+                raise error
+
+            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
+            time.sleep(delay)
+
+        if last_error is not None:
+            raise last_error
+        raise GitHubApiError("unreachable gh command retry state")
+
+    def close_item_as_duplicate(
+        self,
+        *,
+        repo: RepoRef,
+        item_type: ItemType,
+        number: int,
+        canonical_number: int,
+    ) -> dict[str, Any]:
+        item_command = "issue" if item_type == ItemType.ISSUE else "pr"
+        comment = (
+            f"Closing as duplicate of #{canonical_number}. "
+            "If this is incorrect, please contact us."
+        )
+
+        stdout, stderr = self._run_gh_command_with_retry(
+            [
+                "gh",
+                item_command,
+                "close",
+                str(number),
+                "--repo",
+                repo.full_name(),
+                "--comment",
+                comment,
+            ]
+        )
+
+        return {
+            "status": "closed",
+            "item_type": item_type.value,
+            "number": number,
+            "canonical_number": canonical_number,
+            "comment": comment,
+            "stdout": stdout.strip(),
+            "stderr": stderr.strip(),
+        }
+
     def _to_issue_payload_from_graphql(self, row: dict[str, Any]) -> ItemPayload:
         assignees = [
             str(node.get("login"))
