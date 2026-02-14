@@ -68,6 +68,10 @@ Default model stack:
 - `DUPCANON_EMBEDDING_MODEL=text-embedding-3-large`
 - `DUPCANON_JUDGE_PROVIDER=openai-codex`
 - `DUPCANON_JUDGE_MODEL=gpt-5.1-codex-mini`
+- optional thinking default: `DUPCANON_JUDGE_THINKING` (`off|minimal|low|medium|high|xhigh`)
+- judge-audit env defaults (optional):
+  - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
+  - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
 - keep `DUPCANON_EMBEDDING_DIM=768`
 
 ### 3) Validate runtime
@@ -84,11 +88,11 @@ uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed
 # OpenAI embeddings override example:
 # uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed --provider openai --model text-embedding-3-large
 uv run dupcanon candidates --repo openclaw/openclaw --type issue --include open
-uv run dupcanon judge --repo openclaw/openclaw --type issue
-uv run dupcanon judge-audit --repo openclaw/openclaw --type issue --sample-size 100 --seed 42 --cheap-provider gemini --strong-provider openai --workers 4
+uv run dupcanon judge --repo openclaw/openclaw --type issue --thinking medium
+uv run dupcanon judge-audit --repo openclaw/openclaw --type issue --sample-size 100 --seed 42 --cheap-provider gemini --cheap-thinking low --strong-provider openai --strong-thinking high --workers 4
 # debugging openai-codex RPC behavior:
-# uv run dupcanon judge-audit ... --cheap-provider openai-codex --strong-provider openai-codex --debug-rpc --verbose
-uv run dupcanon detect-new --repo openclaw/openclaw --type issue --number 123
+# uv run dupcanon judge-audit ... --cheap-provider openai-codex --strong-provider openai-codex --cheap-thinking medium --strong-thinking medium --debug-rpc --verbose
+uv run dupcanon detect-new --repo openclaw/openclaw --type issue --number 123 --thinking low
 uv run dupcanon plan-close --repo openclaw/openclaw --type issue --dry-run
 # review plan output in DB, then:
 uv run dupcanon apply-close --close-run <id> --yes

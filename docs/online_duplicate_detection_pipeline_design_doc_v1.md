@@ -241,6 +241,7 @@ uv run dupcanon detect-new --repo org/name --type issue --number 123
 Current supported options:
 - `--provider`
 - `--model`
+- `--thinking` (`off|minimal|low|medium|high|xhigh`)
 - `--k`
 - `--min-score`
 - `--maybe-threshold`
@@ -280,11 +281,15 @@ Why this path first:
 
 ## 11) Config
 
-Use configurable provider/model with existing pattern:
+Use configurable provider/model/thinking with existing pattern:
 - provider in {`gemini`, `openai`, `openrouter`, `openai-codex`}
 - model string provider-specific
+- thinking in {`off`, `minimal`, `low`, `medium`, `high`, `xhigh`}
 
-Add online-specific defaults only if needed; otherwise inherit from existing judge config with command overrides.
+Online detect-new inherits judge defaults when flags are omitted:
+- `DUPCANON_JUDGE_PROVIDER`
+- `DUPCANON_JUDGE_MODEL`
+- `DUPCANON_JUDGE_THINKING`
 
 Potential online-specific env vars (optional):
 - `DUPCANON_ONLINE_K`

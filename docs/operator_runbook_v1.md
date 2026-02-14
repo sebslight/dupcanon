@@ -10,6 +10,10 @@ This runbook describes the current end-to-end workflow for running `dupcanon` sa
 - Credentials/runtime for selected embedding/judge providers:
   - Default embeddings use OpenAI (`DUPCANON_EMBEDDING_PROVIDER=openai`) -> requires `OPENAI_API_KEY`
   - Default judge uses OpenAI Codex via `pi` RPC (`DUPCANON_JUDGE_PROVIDER=openai-codex`)
+  - Optional global judge thinking default: `DUPCANON_JUDGE_THINKING` (`off|minimal|low|medium|high|xhigh`)
+  - Optional judge-audit defaults:
+    - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
+    - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
   - `GEMINI_API_KEY` only when embedding/judge provider is `gemini`
   - `OPENROUTER_API_KEY` only when judge provider is `openrouter`
 
@@ -76,10 +80,16 @@ Default (OpenAI Codex via `pi` RPC):
 uv run dupcanon judge --repo <org/repo> --type issue
 ```
 
+Judge with explicit thinking level:
+
+```bash
+uv run dupcanon judge --repo <org/repo> --type issue --thinking medium
+```
+
 Explicit OpenAI Codex model example:
 
 ```bash
-uv run dupcanon judge --repo <org/repo> --type issue --provider openai-codex --model gpt-5.1-codex-mini
+uv run dupcanon judge --repo <org/repo> --type issue --provider openai-codex --model gpt-5.1-codex-mini --thinking medium
 ```
 
 OpenAI override example:
@@ -91,8 +101,12 @@ uv run dupcanon judge --repo <org/repo> --type issue --provider openai --model g
 OpenRouter override example:
 
 ```bash
-uv run dupcanon judge --repo <org/repo> --type issue --provider openrouter --model minimax/minimax-m2.5
+uv run dupcanon judge --repo <org/repo> --type issue --provider openrouter --model minimax/minimax-m2.5 --thinking low
 ```
+
+Thinking levels:
+- `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
+- `xhigh` is rejected for Gemini provider paths.
 
 Judge guardrail:
 - Duplicate targets that are not open are rejected (`veto_reason=target_not_open`).
@@ -108,8 +122,8 @@ uv run dupcanon judge-audit \
   --sample-size 100 \
   --seed 42 \
   --min-edge 0.85 \
-  --cheap-provider gemini --cheap-model gemini-3-flash-preview \
-  --strong-provider openai --strong-model gpt-5-mini \
+  --cheap-provider gemini --cheap-model gemini-3-flash-preview --cheap-thinking low \
+  --strong-provider openai --strong-model gpt-5-mini --strong-thinking high \
   --workers 4
 ```
 
@@ -157,7 +171,7 @@ uv run dupcanon apply-close --close-run <plan_run_id> --yes
 Manual one-off check for a newly opened item:
 
 ```bash
-uv run dupcanon detect-new --repo <org/repo> --type issue --number <n>
+uv run dupcanon detect-new --repo <org/repo> --type issue --number <n> --thinking low
 ```
 
 PR example (includes changed-file + bounded patch excerpt context in judge prompt):
