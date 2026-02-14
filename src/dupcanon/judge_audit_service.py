@@ -18,14 +18,26 @@ from dupcanon.judge_providers import (
     require_judge_api_key,
     validate_thinking_for_provider,
 )
-from dupcanon.judge_service import (
-    _SYSTEM_PROMPT,
-    _bug_feature_veto_reason,
-    _build_user_prompt,
-    _duplicate_veto_reason,
-    _get_thread_local_judge_client,
-    _looks_too_vague,
-    _parse_judge_decision,
+from dupcanon.judge_runtime import (
+    SYSTEM_PROMPT as _SYSTEM_PROMPT,
+)
+from dupcanon.judge_runtime import (
+    bug_feature_veto_reason as _bug_feature_veto_reason,
+)
+from dupcanon.judge_runtime import (
+    build_user_prompt as _build_user_prompt,
+)
+from dupcanon.judge_runtime import (
+    duplicate_veto_reason as _duplicate_veto_reason,
+)
+from dupcanon.judge_runtime import (
+    get_thread_local_judge_client as _get_thread_local_judge_client,
+)
+from dupcanon.judge_runtime import (
+    looks_too_vague as _looks_too_vague,
+)
+from dupcanon.judge_runtime import (
+    parse_judge_decision as _parse_judge_decision,
 )
 from dupcanon.logging_config import BoundLogger
 from dupcanon.models import ItemType, JudgeAuditStats, JudgeWorkItem, RepoRef
