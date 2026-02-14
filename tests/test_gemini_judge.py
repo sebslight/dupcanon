@@ -103,24 +103,19 @@ def test_judge_passes_all_gemini_thinking_mappings(
     assert config.get("thinking_config") == expected_thinking_config
 
 
-def test_judge_rejects_xhigh_thinking_for_gemini(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeModels:
-        def generate_content(self, **kwargs):
-            class Response:
-                text = "{}"
-
-            return Response()
-
-    class FakeSdkClient:
-        def __init__(self, *, api_key: str) -> None:
-            self.api_key = api_key
-            self.models = FakeModels()
-
-    monkeypatch.setattr(gemini_judge.genai, "Client", FakeSdkClient)
-
-    client = GeminiJudgeClient(api_key="key", thinking_level="xhigh", max_attempts=1)
+def test_judge_rejects_xhigh_thinking_for_gemini() -> None:
     with pytest.raises(ValueError, match="xhigh thinking"):
-        client.judge(system_prompt="s", user_prompt="u")
+        GeminiJudgeClient(api_key="key", thinking_level="xhigh", max_attempts=1)
+
+
+def test_judge_rejects_invalid_thinking_level_for_gemini() -> None:
+    with pytest.raises(ValueError, match="thinking must be one of"):
+        GeminiJudgeClient(api_key="key", thinking_level="turbo", max_attempts=1)
+
+
+def test_judge_rejects_non_positive_max_attempts_for_gemini() -> None:
+    with pytest.raises(ValueError, match="max_attempts"):
+        GeminiJudgeClient(api_key="key", max_attempts=0)
 
 
 def test_judge_raises_on_empty_response(monkeypatch: pytest.MonkeyPatch) -> None:

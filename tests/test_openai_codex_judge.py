@@ -37,3 +37,13 @@ def test_openai_codex_judge_forwards_thinking_level_to_rpc(
 def test_openai_codex_judge_rejects_invalid_thinking_level() -> None:
     with pytest.raises(ValueError, match="thinking_level must be one of"):
         OpenAICodexJudgeClient(api_key="", thinking_level="turbo")
+
+
+def test_openai_codex_judge_rejects_non_positive_max_attempts() -> None:
+    with pytest.raises(ValueError, match="max_attempts"):
+        OpenAICodexJudgeClient(api_key="", max_attempts=0)
+
+
+def test_openai_codex_judge_rejects_non_positive_timeout() -> None:
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        OpenAICodexJudgeClient(api_key="", timeout_seconds=0)

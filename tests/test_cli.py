@@ -199,6 +199,31 @@ def test_judge_defaults_openai_model_when_provider_openai(monkeypatch: pytest.Mo
     assert captured.get("model") == "gpt-5-mini"
 
 
+def test_judge_defaults_gemini_model_when_provider_gemini(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_judge(**kwargs):
+        captured.update(kwargs)
+        return JudgeStats()
+
+    monkeypatch.setattr("dupcanon.cli.run_judge", fake_run_judge)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("DUPCANON_JUDGE_PROVIDER", "openai-codex")
+    monkeypatch.setenv("DUPCANON_JUDGE_MODEL", "gpt-5.1-codex-mini")
+
+    result = runner.invoke(
+        app,
+        ["judge", "--repo", "org/repo", "--type", "issue", "--provider", "gemini"],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("provider") == "gemini"
+    assert captured.get("model") == "gemini-3-flash-preview"
+
+
 def test_judge_defaults_openrouter_model_when_provider_openrouter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -351,6 +376,55 @@ def test_judge_audit_uses_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured.get("strong_provider") == "openai-codex"
     assert captured.get("strong_model") == "gpt-5.1-codex-mini"
     assert captured.get("strong_thinking_level") == "low"
+
+
+def test_detect_new_defaults_gemini_model_when_provider_gemini(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_detect_new(**kwargs):
+        captured.update(kwargs)
+        return DetectNewResult(
+            repo="org/repo",
+            type=ItemType.ISSUE,
+            source=DetectSource(number=1, title="Issue 1"),
+            verdict=DetectVerdict.NOT_DUPLICATE,
+            is_duplicate=False,
+            confidence=0.12,
+            duplicate_of=None,
+            reasoning="No match",
+            top_matches=[],
+            provider=str(kwargs.get("provider", "gemini")),
+            model=str(kwargs.get("model", "gemini-3-flash-preview")),
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+        )
+
+    monkeypatch.setattr("dupcanon.cli.run_detect_new", fake_run_detect_new)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("DUPCANON_JUDGE_PROVIDER", "openai-codex")
+    monkeypatch.setenv("DUPCANON_JUDGE_MODEL", "gpt-5.1-codex-mini")
+
+    result = runner.invoke(
+        app,
+        [
+            "detect-new",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--number",
+            "1",
+            "--provider",
+            "gemini",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("provider") == "gemini"
+    assert captured.get("model") == "gemini-3-flash-preview"
 
 
 def test_detect_new_defaults_openrouter_model_when_provider_openrouter(

@@ -85,6 +85,16 @@ def test_judge_passes_all_openrouter_reasoning_effort_values(
         assert captured.get("reasoning") == {"effort": reasoning_effort}
 
 
+def test_openrouter_judge_rejects_invalid_reasoning_effort() -> None:
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        OpenRouterJudgeClient(api_key="key", reasoning_effort="turbo")
+
+
+def test_openrouter_judge_rejects_non_positive_max_attempts() -> None:
+    with pytest.raises(ValueError, match="max_attempts"):
+        OpenRouterJudgeClient(api_key="key", max_attempts=0)
+
+
 def test_judge_raises_on_empty_response(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeChat:
         def send(self, **kwargs):

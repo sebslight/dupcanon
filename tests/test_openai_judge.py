@@ -91,6 +91,16 @@ def test_judge_passes_all_openai_reasoning_effort_values(
         assert captured.get("reasoning_effort") == reasoning_effort
 
 
+def test_openai_judge_rejects_invalid_reasoning_effort() -> None:
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        OpenAIJudgeClient(api_key="key", reasoning_effort="turbo")
+
+
+def test_openai_judge_rejects_non_positive_max_attempts() -> None:
+    with pytest.raises(ValueError, match="max_attempts"):
+        OpenAIJudgeClient(api_key="key", max_attempts=0)
+
+
 def test_judge_raises_on_empty_response(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeCompletions:
         def create(self, **kwargs):
