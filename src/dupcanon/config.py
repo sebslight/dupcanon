@@ -6,6 +6,8 @@ from typing import Any, cast
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from dupcanon.thinking import normalize_thinking_level
+
 
 class Settings(BaseSettings):
     supabase_db_url: str | None = Field(default=None, validation_alias="SUPABASE_DB_URL")
@@ -31,6 +33,34 @@ class Settings(BaseSettings):
     judge_model: str = Field(
         default="gpt-5.1-codex-mini",
         validation_alias="DUPCANON_JUDGE_MODEL",
+    )
+    judge_thinking: str | None = Field(
+        default=None,
+        validation_alias="DUPCANON_JUDGE_THINKING",
+    )
+    judge_audit_cheap_provider: str = Field(
+        default="gemini",
+        validation_alias="DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER",
+    )
+    judge_audit_cheap_model: str | None = Field(
+        default=None,
+        validation_alias="DUPCANON_JUDGE_AUDIT_CHEAP_MODEL",
+    )
+    judge_audit_cheap_thinking: str | None = Field(
+        default=None,
+        validation_alias="DUPCANON_JUDGE_AUDIT_CHEAP_THINKING",
+    )
+    judge_audit_strong_provider: str = Field(
+        default="openai",
+        validation_alias="DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER",
+    )
+    judge_audit_strong_model: str | None = Field(
+        default=None,
+        validation_alias="DUPCANON_JUDGE_AUDIT_STRONG_MODEL",
+    )
+    judge_audit_strong_thinking: str | None = Field(
+        default=None,
+        validation_alias="DUPCANON_JUDGE_AUDIT_STRONG_THINKING",
     )
     judge_worker_concurrency: int = Field(
         default=4,
@@ -74,10 +104,27 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return normalized
 
-    @field_validator("judge_provider")
+    @field_validator(
+        "judge_provider",
+        "judge_audit_cheap_provider",
+        "judge_audit_strong_provider",
+    )
     @classmethod
     def normalize_judge_provider(cls, value: str) -> str:
-        return value.strip().lower()
+        normalized = value.strip().lower()
+        if normalized not in {"gemini", "openai", "openrouter", "openai-codex"}:
+            msg = "judge provider must be one of: gemini, openai, openrouter, openai-codex"
+            raise ValueError(msg)
+        return normalized
+
+    @field_validator(
+        "judge_thinking",
+        "judge_audit_cheap_thinking",
+        "judge_audit_strong_thinking",
+    )
+    @classmethod
+    def normalize_judge_thinking(cls, value: str | None) -> str | None:
+        return normalize_thinking_level(value)
 
     @field_validator(
         "embed_batch_size",

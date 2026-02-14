@@ -23,6 +23,7 @@ from dupcanon.judge_service import (
 from dupcanon.logging_config import BoundLogger
 from dupcanon.models import ItemType, JudgeAuditStats, JudgeWorkItem, RepoRef
 from dupcanon.sync_service import require_postgres_dsn
+from dupcanon.thinking import normalize_thinking_level
 
 _CREATED_BY = "dupcanon/judge-audit"
 
@@ -116,6 +117,7 @@ def _judge_once(
     provider: str,
     model: str,
     api_key: str,
+    thinking_level: str | None,
     min_edge: float,
     work_item: JudgeWorkItem,
     debug_rpc: bool,
@@ -168,6 +170,7 @@ def _judge_once(
         provider=provider,
         api_key=api_key,
         model=client_model,
+        thinking_level=thinking_level,
         codex_debug=debug_rpc,
         codex_debug_sink=debug_rpc_sink,
     )
@@ -300,9 +303,11 @@ def _process_work_item(
     min_edge: float,
     cheap_provider: str,
     cheap_model: str,
+    cheap_thinking_level: str | None,
     cheap_api_key: str,
     strong_provider: str,
     strong_model: str,
+    strong_thinking_level: str | None,
     strong_api_key: str,
     debug_rpc: bool,
     debug_rpc_sink: Any | None,
@@ -312,6 +317,7 @@ def _process_work_item(
             provider=cheap_provider,
             model=cheap_model,
             api_key=cheap_api_key,
+            thinking_level=cheap_thinking_level,
             min_edge=min_edge,
             work_item=work_item,
             debug_rpc=debug_rpc,
@@ -321,6 +327,7 @@ def _process_work_item(
             provider=strong_provider,
             model=strong_model,
             api_key=strong_api_key,
+            thinking_level=strong_thinking_level,
             min_edge=min_edge,
             work_item=work_item,
             debug_rpc=debug_rpc,
@@ -354,6 +361,8 @@ def run_judge_audit(
     cheap_model: str | None,
     strong_provider: str,
     strong_model: str | None,
+    cheap_thinking_level: str | None,
+    strong_thinking_level: str | None,
     worker_concurrency: int | None,
     verbose: bool,
     debug_rpc: bool,
@@ -378,6 +387,15 @@ def run_judge_audit(
 
     normalized_cheap_provider = _normalize_provider(cheap_provider)
     normalized_strong_provider = _normalize_provider(strong_provider)
+    normalized_cheap_thinking = normalize_thinking_level(cheap_thinking_level)
+    normalized_strong_thinking = normalize_thinking_level(strong_thinking_level)
+
+    if normalized_cheap_provider == "gemini" and normalized_cheap_thinking == "xhigh":
+        msg = "xhigh thinking is not supported when cheap-provider=gemini"
+        raise ValueError(msg)
+    if normalized_strong_provider == "gemini" and normalized_strong_thinking == "xhigh":
+        msg = "xhigh thinking is not supported when strong-provider=gemini"
+        raise ValueError(msg)
 
     cheap_model_name = _default_model_for_provider(
         provider=normalized_cheap_provider,
@@ -405,8 +423,10 @@ def run_judge_audit(
         min_edge=min_edge,
         cheap_provider=normalized_cheap_provider,
         cheap_model=cheap_model_name,
+        cheap_thinking=normalized_cheap_thinking,
         strong_provider=normalized_strong_provider,
         strong_model=strong_model_name,
+        strong_thinking=normalized_strong_thinking,
         worker_concurrency=effective_worker_concurrency,
         verbose=verbose,
         debug_rpc=debug_rpc,
@@ -565,9 +585,11 @@ def run_judge_audit(
                     min_edge=min_edge,
                     cheap_provider=normalized_cheap_provider,
                     cheap_model=cheap_model_name,
+                    cheap_thinking_level=normalized_cheap_thinking,
                     cheap_api_key=cheap_api_key,
                     strong_provider=normalized_strong_provider,
                     strong_model=strong_model_name,
+                    strong_thinking_level=normalized_strong_thinking,
                     strong_api_key=strong_api_key,
                     debug_rpc=debug_rpc,
                     debug_rpc_sink=_debug_rpc_sink if debug_rpc else None,
@@ -591,9 +613,11 @@ def run_judge_audit(
                         min_edge=min_edge,
                         cheap_provider=normalized_cheap_provider,
                         cheap_model=cheap_model_name,
+                        cheap_thinking_level=normalized_cheap_thinking,
                         cheap_api_key=cheap_api_key,
                         strong_provider=normalized_strong_provider,
                         strong_model=strong_model_name,
+                        strong_thinking_level=normalized_strong_thinking,
                         strong_api_key=strong_api_key,
                         debug_rpc=debug_rpc,
                         debug_rpc_sink=_debug_rpc_sink if debug_rpc else None,

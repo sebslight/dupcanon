@@ -32,6 +32,7 @@ from dupcanon.openai_codex_judge import OpenAICodexJudgeClient
 from dupcanon.openai_judge import OpenAIJudgeClient
 from dupcanon.openrouter_judge import OpenRouterJudgeClient
 from dupcanon.sync_service import require_postgres_dsn
+from dupcanon.thinking import normalize_thinking_level, to_openai_reasoning_effort
 
 _SYSTEM_PROMPT = """You are a conservative duplicate-triage judge for GitHub issues/PRs.
 
@@ -170,6 +171,7 @@ def _get_thread_local_judge_client(
     provider: str,
     api_key: str,
     model: str,
+    thinking_level: str | None = None,
     codex_debug: bool = False,
     codex_debug_sink: Any | None = None,
 ) -> GeminiJudgeClient | OpenAIJudgeClient | OpenRouterJudgeClient | OpenAICodexJudgeClient:
@@ -177,6 +179,7 @@ def _get_thread_local_judge_client(
     current_provider = getattr(_THREAD_LOCAL, "judge_provider", None)
     current_model = getattr(_THREAD_LOCAL, "judge_model", None)
     current_key = getattr(_THREAD_LOCAL, "judge_api_key", None)
+    current_thinking = getattr(_THREAD_LOCAL, "judge_thinking_level", None)
     current_codex_debug = getattr(_THREAD_LOCAL, "judge_codex_debug", None)
     current_codex_debug_sink = getattr(_THREAD_LOCAL, "judge_codex_debug_sink", None)
 
@@ -190,6 +193,7 @@ def _get_thread_local_judge_client(
         and current_provider == provider
         and current_model == model
         and current_key == api_key
+        and current_thinking == thinking_level
         and current_codex_debug == codex_debug
         and current_codex_debug_sink is codex_debug_sink
     ):
@@ -201,15 +205,25 @@ def _get_thread_local_judge_client(
         ) = GeminiJudgeClient(
             api_key=api_key,
             model=model,
+            thinking_level=thinking_level,
         )
     elif provider == "openai":
-        next_client = OpenAIJudgeClient(api_key=api_key, model=model)
+        next_client = OpenAIJudgeClient(
+            api_key=api_key,
+            model=model,
+            reasoning_effort=to_openai_reasoning_effort(normalize_thinking_level(thinking_level)),
+        )
     elif provider == "openrouter":
-        next_client = OpenRouterJudgeClient(api_key=api_key, model=model)
+        next_client = OpenRouterJudgeClient(
+            api_key=api_key,
+            model=model,
+            reasoning_effort=to_openai_reasoning_effort(normalize_thinking_level(thinking_level)),
+        )
     elif provider == "openai-codex":
         next_client = OpenAICodexJudgeClient(
             api_key=api_key,
             model=model,
+            thinking_level=thinking_level,
             debug=codex_debug,
             debug_sink=codex_debug_sink,
         )
@@ -221,6 +235,7 @@ def _get_thread_local_judge_client(
     _THREAD_LOCAL.judge_provider = provider
     _THREAD_LOCAL.judge_model = model
     _THREAD_LOCAL.judge_api_key = api_key
+    _THREAD_LOCAL.judge_thinking_level = thinking_level
     _THREAD_LOCAL.judge_codex_debug = codex_debug
     _THREAD_LOCAL.judge_codex_debug_sink = codex_debug_sink
     return next_client
@@ -593,6 +608,7 @@ def _judge_single_item(
     item_type: ItemType,
     normalized_provider: str,
     judge_model: str,
+    thinking_level: str | None,
     min_edge: float,
     rejudge: bool,
     work_item: JudgeWorkItem,
@@ -673,6 +689,7 @@ def _judge_single_item(
             provider=normalized_provider,
             api_key=api_key or "",
             model=client_model,
+            thinking_level=thinking_level,
         )
         raw_response = client.judge(system_prompt=_SYSTEM_PROMPT, user_prompt=user_prompt)
 
@@ -1131,6 +1148,7 @@ def run_judge(
     worker_concurrency: int | None,
     console: Console,
     logger: BoundLogger,
+    thinking_level: str | None = None,
 ) -> JudgeStats:
     command_started = perf_counter()
 
@@ -1140,6 +1158,11 @@ def run_judge(
         raise ValueError(msg)
     if min_edge < 0.0 or min_edge > 1.0:
         msg = "--min-edge must be between 0 and 1"
+        raise ValueError(msg)
+
+    normalized_thinking_level = normalize_thinking_level(thinking_level)
+    if normalized_provider == "gemini" and normalized_thinking_level == "xhigh":
+        msg = "xhigh thinking is not supported when --provider=gemini"
         raise ValueError(msg)
 
     db_url = require_postgres_dsn(settings.supabase_db_url)
@@ -1178,6 +1201,7 @@ def run_judge(
         stage="judge",
         provider=normalized_provider,
         model=judge_model,
+        thinking=normalized_thinking_level,
     )
     logger.info(
         "judge.start",
@@ -1186,6 +1210,7 @@ def run_judge(
         allow_stale=allow_stale,
         rejudge=rejudge,
         worker_concurrency=effective_worker_concurrency,
+        thinking=normalized_thinking_level,
     )
 
     db = Database(db_url)
@@ -1251,6 +1276,7 @@ def run_judge(
                     item_type=item_type,
                     normalized_provider=normalized_provider,
                     judge_model=judge_model,
+                    thinking_level=normalized_thinking_level,
                     min_edge=min_edge,
                     rejudge=rejudge,
                     work_item=work_item,
@@ -1270,6 +1296,7 @@ def run_judge(
                         item_type=item_type,
                         normalized_provider=normalized_provider,
                         judge_model=judge_model,
+                        thinking_level=normalized_thinking_level,
                         min_edge=min_edge,
                         rejudge=rejudge,
                         work_item=work_item,

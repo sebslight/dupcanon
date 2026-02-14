@@ -27,6 +27,7 @@ class OpenAICodexJudgeClient:
         *,
         api_key: str,
         model: str = "",
+        thinking_level: str | None = None,
         max_attempts: int = 3,
         timeout_seconds: float = 120.0,
         pi_command: str = "pi",
@@ -36,6 +37,17 @@ class OpenAICodexJudgeClient:
         # Kept for parity with other judge clients; authentication is handled by `pi`.
         self.api_key = api_key
         self.model = model.strip()
+        self.thinking_level = thinking_level.strip().lower() if thinking_level else None
+        if self.thinking_level is not None and self.thinking_level not in {
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        }:
+            msg = "thinking_level must be one of: off, minimal, low, medium, high, xhigh"
+            raise ValueError(msg)
         self.max_attempts = max_attempts
         self.timeout_seconds = timeout_seconds
         self.pi_command = pi_command
@@ -51,6 +63,7 @@ class OpenAICodexJudgeClient:
                 response_text = _invoke_pi_rpc(
                     pi_command=self.pi_command,
                     model=self.model,
+                    thinking_level=self.thinking_level,
                     prompt=prompt,
                     timeout_seconds=self.timeout_seconds,
                     debug=self.debug,
@@ -104,6 +117,7 @@ def _invoke_pi_rpc(
     *,
     pi_command: str,
     model: str,
+    thinking_level: str | None,
     prompt: str,
     timeout_seconds: float,
     debug: bool,
@@ -113,6 +127,9 @@ def _invoke_pi_rpc(
     model_value = model.strip()
     if model_value:
         command.extend(["--model", model_value])
+
+    if thinking_level:
+        command.extend(["--thinking", thinking_level])
 
     try:
         process = subprocess.Popen(

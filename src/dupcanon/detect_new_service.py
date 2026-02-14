@@ -30,6 +30,7 @@ from dupcanon.models import (
 )
 from dupcanon.openai_embeddings import OpenAIEmbeddingsClient
 from dupcanon.sync_service import require_postgres_dsn
+from dupcanon.thinking import normalize_thinking_level
 
 _PR_MAX_CHANGED_FILES = 30
 _PR_MAX_PATCH_CHARS_PER_FILE = 2000
@@ -274,6 +275,7 @@ def run_detect_new(
     duplicate_threshold: float,
     run_id: str,
     logger: BoundLogger,
+    thinking_level: str | None = None,
 ) -> DetectNewResult:
     started = perf_counter()
 
@@ -288,6 +290,11 @@ def run_detect_new(
     )
 
     normalized_provider = _normalize_provider(provider)
+    normalized_thinking_level = normalize_thinking_level(thinking_level)
+    if normalized_provider == "gemini" and normalized_thinking_level == "xhigh":
+        msg = "xhigh thinking is not supported when --provider=gemini"
+        raise ValueError(msg)
+
     judge_model = _default_judge_model(provider=normalized_provider, settings=settings, model=model)
 
     db_url = require_postgres_dsn(settings.supabase_db_url)
@@ -300,6 +307,7 @@ def run_detect_new(
         item_id=number,
         provider=normalized_provider,
         model=judge_model,
+        thinking=normalized_thinking_level,
     )
     logger.info(
         "detect_new.start",
@@ -308,6 +316,7 @@ def run_detect_new(
         min_score=min_score,
         maybe_threshold=maybe_threshold,
         duplicate_threshold=duplicate_threshold,
+        thinking=normalized_thinking_level,
     )
 
     gh = GitHubClient()
@@ -472,6 +481,7 @@ def run_detect_new(
         provider=normalized_provider,
         api_key=api_key,
         model=client_model,
+        thinking_level=normalized_thinking_level,
     )
 
     user_prompt = _build_online_user_prompt(

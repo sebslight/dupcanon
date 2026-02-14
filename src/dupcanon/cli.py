@@ -30,6 +30,7 @@ from dupcanon.maintainers_service import run_maintainers
 from dupcanon.models import ItemType, StateFilter, TypeFilter
 from dupcanon.plan_close_service import run_plan_close
 from dupcanon.sync_service import run_refresh, run_sync
+from dupcanon.thinking import normalize_thinking_level
 
 app = typer.Typer(help="Duplicate canonicalization CLI")
 console = Console()
@@ -75,6 +76,11 @@ JUDGE_PROVIDER_OPTION = typer.Option(
     help="Judge provider override (gemini, openai, openrouter, or openai-codex)",
 )
 JUDGE_MODEL_OPTION = typer.Option(None, "--model", help="Judge model override")
+JUDGE_THINKING_OPTION = typer.Option(
+    None,
+    "--thinking",
+    help="Judge thinking level override (off, minimal, low, medium, high, xhigh)",
+)
 MIN_EDGE_OPTION = typer.Option(0.85, "--min-edge", help="Minimum confidence to accept edge")
 ALLOW_STALE_OPTION = typer.Option(False, "--allow-stale", help="Allow judging stale candidate sets")
 REJUDGE_OPTION = typer.Option(
@@ -100,17 +106,27 @@ JUDGE_AUDIT_MIN_EDGE_OPTION = typer.Option(
     help="Minimum confidence required for accepted edge in both models",
 )
 JUDGE_AUDIT_CHEAP_PROVIDER_OPTION = typer.Option(
-    "gemini",
+    None,
     "--cheap-provider",
     help="Cheap model provider (gemini, openai, openrouter, openai-codex)",
 )
 JUDGE_AUDIT_CHEAP_MODEL_OPTION = typer.Option(None, "--cheap-model", help="Cheap model")
+JUDGE_AUDIT_CHEAP_THINKING_OPTION = typer.Option(
+    None,
+    "--cheap-thinking",
+    help="Cheap model thinking level (off, minimal, low, medium, high, xhigh)",
+)
 JUDGE_AUDIT_STRONG_PROVIDER_OPTION = typer.Option(
-    "openai",
+    None,
     "--strong-provider",
     help="Strong model provider (gemini, openai, openrouter, openai-codex)",
 )
 JUDGE_AUDIT_STRONG_MODEL_OPTION = typer.Option(None, "--strong-model", help="Strong model")
+JUDGE_AUDIT_STRONG_THINKING_OPTION = typer.Option(
+    None,
+    "--strong-thinking",
+    help="Strong model thinking level (off, minimal, low, medium, high, xhigh)",
+)
 JUDGE_AUDIT_WORKERS_OPTION = typer.Option(
     None,
     "--workers",
@@ -134,6 +150,11 @@ DETECT_PROVIDER_OPTION = typer.Option(
     help="Judge provider override (gemini, openai, openrouter, or openai-codex)",
 )
 DETECT_MODEL_OPTION = typer.Option(None, "--model", help="Judge model override")
+DETECT_THINKING_OPTION = typer.Option(
+    None,
+    "--thinking",
+    help="Judge thinking level override (off, minimal, low, medium, high, xhigh)",
+)
 DETECT_K_OPTION = typer.Option(8, "--k", help="Number of nearest neighbors to retrieve")
 DETECT_MIN_SCORE_OPTION = typer.Option(0.75, "--min-score", help="Minimum similarity score")
 DETECT_MAYBE_THRESHOLD_OPTION = typer.Option(
@@ -597,6 +618,7 @@ def judge(
     item_type: ItemType = JUDGE_TYPE_OPTION,
     provider: str | None = JUDGE_PROVIDER_OPTION,
     model: str | None = JUDGE_MODEL_OPTION,
+    thinking: str | None = JUDGE_THINKING_OPTION,
     min_edge: float = MIN_EDGE_OPTION,
     allow_stale: bool = ALLOW_STALE_OPTION,
     rejudge: bool = REJUDGE_OPTION,
@@ -612,6 +634,7 @@ def judge(
         )
     else:
         effective_model = model
+    effective_thinking = normalize_thinking_level(thinking or settings.judge_thinking)
 
     try:
         stats = run_judge(
@@ -620,6 +643,7 @@ def judge(
             item_type=item_type,
             provider=effective_provider,
             model=effective_model,
+            thinking_level=effective_thinking,
             min_edge=min_edge,
             allow_stale=allow_stale,
             rejudge=rejudge,
@@ -638,6 +662,7 @@ def judge(
                 "type": item_type.value,
                 "provider": effective_provider,
                 "model": effective_model,
+                "thinking": effective_thinking,
                 "min_edge": min_edge,
                 "allow_stale": allow_stale,
                 "rejudge": rejudge,
@@ -661,6 +686,7 @@ def judge(
     table.add_column("Value")
     table.add_row("provider", effective_provider)
     table.add_row("model", effective_model or "pi-default")
+    table.add_row("thinking", effective_thinking or "default")
     table.add_row("min_edge", str(min_edge))
     table.add_row("allow_stale", str(allow_stale))
     table.add_row("rejudge", str(rejudge))
@@ -679,16 +705,32 @@ def judge_audit(
     sample_size: int = JUDGE_AUDIT_SAMPLE_SIZE_OPTION,
     seed: int = JUDGE_AUDIT_SEED_OPTION,
     min_edge: float = JUDGE_AUDIT_MIN_EDGE_OPTION,
-    cheap_provider: str = JUDGE_AUDIT_CHEAP_PROVIDER_OPTION,
+    cheap_provider: str | None = JUDGE_AUDIT_CHEAP_PROVIDER_OPTION,
     cheap_model: str | None = JUDGE_AUDIT_CHEAP_MODEL_OPTION,
-    strong_provider: str = JUDGE_AUDIT_STRONG_PROVIDER_OPTION,
+    cheap_thinking: str | None = JUDGE_AUDIT_CHEAP_THINKING_OPTION,
+    strong_provider: str | None = JUDGE_AUDIT_STRONG_PROVIDER_OPTION,
     strong_model: str | None = JUDGE_AUDIT_STRONG_MODEL_OPTION,
+    strong_thinking: str | None = JUDGE_AUDIT_STRONG_THINKING_OPTION,
     workers: int | None = JUDGE_AUDIT_WORKERS_OPTION,
     verbose: bool = JUDGE_AUDIT_VERBOSE_OPTION,
     debug_rpc: bool = JUDGE_AUDIT_DEBUG_RPC_OPTION,
 ) -> None:
     """Run sampled cheap-vs-strong judge audit on open items."""
     settings, run_id, logger = _bootstrap("judge-audit")
+    effective_cheap_provider = (
+        cheap_provider or settings.judge_audit_cheap_provider
+    ).strip().lower()
+    effective_cheap_model = cheap_model or settings.judge_audit_cheap_model
+    effective_cheap_thinking = normalize_thinking_level(
+        cheap_thinking or settings.judge_audit_cheap_thinking
+    )
+    effective_strong_provider = (
+        strong_provider or settings.judge_audit_strong_provider
+    ).strip().lower()
+    effective_strong_model = strong_model or settings.judge_audit_strong_model
+    effective_strong_thinking = normalize_thinking_level(
+        strong_thinking or settings.judge_audit_strong_thinking
+    )
 
     try:
         stats = run_judge_audit(
@@ -698,10 +740,12 @@ def judge_audit(
             sample_size=sample_size,
             sample_seed=seed,
             min_edge=min_edge,
-            cheap_provider=cheap_provider,
-            cheap_model=cheap_model,
-            strong_provider=strong_provider,
-            strong_model=strong_model,
+            cheap_provider=effective_cheap_provider,
+            cheap_model=effective_cheap_model,
+            cheap_thinking_level=effective_cheap_thinking,
+            strong_provider=effective_strong_provider,
+            strong_model=effective_strong_model,
+            strong_thinking_level=effective_strong_thinking,
             worker_concurrency=workers,
             verbose=verbose,
             debug_rpc=debug_rpc,
@@ -720,10 +764,12 @@ def judge_audit(
                 "sample_size": sample_size,
                 "seed": seed,
                 "min_edge": min_edge,
-                "cheap_provider": cheap_provider,
-                "cheap_model": cheap_model,
-                "strong_provider": strong_provider,
-                "strong_model": strong_model,
+                "cheap_provider": effective_cheap_provider,
+                "cheap_model": effective_cheap_model,
+                "cheap_thinking": effective_cheap_thinking,
+                "strong_provider": effective_strong_provider,
+                "strong_model": effective_strong_model,
+                "strong_thinking": effective_strong_thinking,
                 "workers": workers,
                 "verbose": verbose,
                 "debug_rpc": debug_rpc,
@@ -747,10 +793,12 @@ def judge_audit(
     table.add_row("sample_size", str(sample_size))
     table.add_row("seed", str(seed))
     table.add_row("min_edge", str(min_edge))
-    table.add_row("cheap_provider", cheap_provider)
-    table.add_row("cheap_model", cheap_model or "default")
-    table.add_row("strong_provider", strong_provider)
-    table.add_row("strong_model", strong_model or "default")
+    table.add_row("cheap_provider", effective_cheap_provider)
+    table.add_row("cheap_model", effective_cheap_model or "default")
+    table.add_row("cheap_thinking", effective_cheap_thinking or "default")
+    table.add_row("strong_provider", effective_strong_provider)
+    table.add_row("strong_model", effective_strong_model or "default")
+    table.add_row("strong_thinking", effective_strong_thinking or "default")
     table.add_row("workers", str(workers or settings.judge_worker_concurrency))
     table.add_row("verbose", str(verbose))
     table.add_row("debug_rpc", str(debug_rpc))
@@ -768,6 +816,7 @@ def detect_new(
     number: int = DETECT_NUMBER_OPTION,
     provider: str | None = DETECT_PROVIDER_OPTION,
     model: str | None = DETECT_MODEL_OPTION,
+    thinking: str | None = DETECT_THINKING_OPTION,
     k: int = DETECT_K_OPTION,
     min_score: float = DETECT_MIN_SCORE_OPTION,
     maybe_threshold: float = DETECT_MAYBE_THRESHOLD_OPTION,
@@ -784,6 +833,7 @@ def detect_new(
         )
     else:
         effective_model = model
+    effective_thinking = normalize_thinking_level(thinking or settings.judge_thinking)
 
     try:
         result = run_detect_new(
@@ -793,6 +843,7 @@ def detect_new(
             number=number,
             provider=effective_provider,
             model=effective_model,
+            thinking_level=effective_thinking,
             k=k,
             min_score=min_score,
             maybe_threshold=maybe_threshold,
@@ -812,6 +863,7 @@ def detect_new(
                 "number": number,
                 "provider": effective_provider,
                 "model": effective_model,
+                "thinking": effective_thinking,
                 "k": k,
                 "min_score": min_score,
                 "maybe_threshold": maybe_threshold,

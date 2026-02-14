@@ -27,10 +27,12 @@ class OpenAIJudgeClient:
         *,
         api_key: str,
         model: str = "gpt-5-mini",
+        reasoning_effort: str | None = None,
         max_attempts: int = 5,
     ) -> None:
         self.client = OpenAI(api_key=api_key)
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.max_attempts = max_attempts
 
     def judge(self, *, system_prompt: str, user_prompt: str) -> str:
@@ -38,15 +40,19 @@ class OpenAIJudgeClient:
 
         for attempt in range(1, self.max_attempts + 1):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
+                request: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=1,
-                    response_format={"type": "json_object"},
-                )
+                    "temperature": 1,
+                    "response_format": {"type": "json_object"},
+                }
+                if self.reasoning_effort is not None:
+                    request["reasoning_effort"] = self.reasoning_effort
+
+                response = self.client.chat.completions.create(**request)
                 text = _extract_text(response)
                 if text:
                     return text

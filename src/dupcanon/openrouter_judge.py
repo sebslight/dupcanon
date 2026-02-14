@@ -28,10 +28,12 @@ class OpenRouterJudgeClient:
         *,
         api_key: str,
         model: str = "minimax/minimax-m2.5",
+        reasoning_effort: str | None = None,
         max_attempts: int = 5,
     ) -> None:
         self.client = OpenRouter(api_key=api_key)
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.max_attempts = max_attempts
 
     def judge(self, *, system_prompt: str, user_prompt: str) -> str:
@@ -39,16 +41,20 @@ class OpenRouterJudgeClient:
 
         for attempt in range(1, self.max_attempts + 1):
             try:
-                response = self.client.chat.send(
-                    model=self.model,
-                    messages=[
+                request: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=1,
-                    response_format={"type": "json_object"},
-                    stream=False,
-                )
+                    "temperature": 1,
+                    "response_format": {"type": "json_object"},
+                    "stream": False,
+                }
+                if self.reasoning_effort is not None:
+                    request["reasoning"] = {"effort": self.reasoning_effort}
+
+                response = self.client.chat.send(**request)
                 text = _extract_text(response)
                 if text:
                     return text
