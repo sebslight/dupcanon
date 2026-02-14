@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import random
 import time
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
+
+from dupcanon.llm_retry import retry_delay_seconds, should_retry_http_status, validate_max_attempts
 
 
 class OpenAIEmbeddingError(RuntimeError):
@@ -13,11 +14,7 @@ class OpenAIEmbeddingError(RuntimeError):
 
 
 def _should_retry(status_code: int | None) -> bool:
-    if status_code is None:
-        return True
-    if status_code == 429:
-        return True
-    return 500 <= status_code <= 599
+    return should_retry_http_status(status_code)
 
 
 class OpenAIEmbeddingsClient:
@@ -29,8 +26,13 @@ class OpenAIEmbeddingsClient:
         output_dimensionality: int = 768,
         max_attempts: int = 5,
     ) -> None:
+        if output_dimensionality <= 0:
+            msg = "output_dimensionality must be > 0"
+            raise ValueError(msg)
+        validate_max_attempts(max_attempts)
+
         self.client = OpenAI(api_key=api_key)
-        self.model = model
+        self.model = model.strip()
         self.output_dimensionality = output_dimensionality
         self.max_attempts = max_attempts
 
@@ -70,8 +72,7 @@ class OpenAIEmbeddingsClient:
                 if attempt >= self.max_attempts:
                     raise err from exc
 
-            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
-            time.sleep(delay)
+            time.sleep(retry_delay_seconds(attempt))
 
         if last_error is not None:
             raise last_error

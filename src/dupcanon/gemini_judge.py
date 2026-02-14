@@ -7,7 +7,7 @@ from google import genai
 from google.genai import types
 from google.genai.errors import APIError
 
-from dupcanon.llm_retry import retry_delay_seconds
+from dupcanon.llm_retry import retry_delay_seconds, should_retry_http_status, validate_max_attempts
 from dupcanon.thinking import normalize_thinking_level
 
 
@@ -18,11 +18,7 @@ class GeminiJudgeError(RuntimeError):
 
 
 def _should_retry(status_code: int | None) -> bool:
-    if status_code is None:
-        return True
-    if status_code == 429:
-        return True
-    return 500 <= status_code <= 599
+    return should_retry_http_status(status_code)
 
 
 class GeminiJudgeClient:
@@ -38,9 +34,7 @@ class GeminiJudgeClient:
         if normalized_thinking == "xhigh":
             msg = "xhigh thinking is not supported for Gemini judge"
             raise ValueError(msg)
-        if max_attempts <= 0:
-            msg = "max_attempts must be > 0"
-            raise ValueError(msg)
+        validate_max_attempts(max_attempts)
 
         self.client = genai.Client(api_key=api_key)
         self.model = model.removeprefix("models/")

@@ -5,7 +5,7 @@ from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
 
-from dupcanon.llm_retry import retry_delay_seconds
+from dupcanon.llm_retry import retry_delay_seconds, should_retry_http_status, validate_max_attempts
 
 
 class OpenAIJudgeError(RuntimeError):
@@ -15,11 +15,7 @@ class OpenAIJudgeError(RuntimeError):
 
 
 def _should_retry(status_code: int | None) -> bool:
-    if status_code is None:
-        return True
-    if status_code == 429:
-        return True
-    return 500 <= status_code <= 599
+    return should_retry_http_status(status_code)
 
 
 _ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
@@ -41,9 +37,7 @@ class OpenAIJudgeClient:
         ):
             msg = "reasoning_effort must be one of: none, minimal, low, medium, high, xhigh"
             raise ValueError(msg)
-        if max_attempts <= 0:
-            msg = "max_attempts must be > 0"
-            raise ValueError(msg)
+        validate_max_attempts(max_attempts)
 
         self.client = OpenAI(api_key=api_key)
         self.model = model

@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any, cast
 
-from dupcanon.llm_retry import retry_delay_seconds
+from dupcanon.llm_retry import retry_delay_seconds, validate_max_attempts
 
 
 class OpenAICodexJudgeError(RuntimeError):
@@ -49,9 +49,7 @@ class OpenAICodexJudgeClient:
         }:
             msg = "thinking_level must be one of: off, minimal, low, medium, high, xhigh"
             raise ValueError(msg)
-        if max_attempts <= 0:
-            msg = "max_attempts must be > 0"
-            raise ValueError(msg)
+        validate_max_attempts(max_attempts)
         if timeout_seconds <= 0:
             msg = "timeout_seconds must be > 0"
             raise ValueError(msg)

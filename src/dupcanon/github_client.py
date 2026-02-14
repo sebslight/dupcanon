@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import random
 import re
 import subprocess
 import time
@@ -11,6 +10,7 @@ from json import JSONDecodeError
 from typing import Any, TypeVar
 from urllib.parse import urlencode
 
+from dupcanon.llm_retry import retry_delay_seconds, should_retry_http_status, validate_max_attempts
 from dupcanon.models import (
     ItemPayload,
     ItemType,
@@ -42,11 +42,7 @@ def _parse_http_status(stderr: str) -> int | None:
 
 
 def _should_retry(status_code: int | None) -> bool:
-    if status_code is None:
-        return True
-    if status_code == 429:
-        return True
-    return 500 <= status_code <= 599
+    return should_retry_http_status(status_code)
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -73,6 +69,7 @@ def _extract_labels(raw: Any) -> list[str]:
 
 class GitHubClient:
     def __init__(self, *, max_attempts: int = 5) -> None:
+        validate_max_attempts(max_attempts)
         self.max_attempts = max_attempts
 
     def _gh_api(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
@@ -114,8 +111,7 @@ class GitHubClient:
             if attempt >= self.max_attempts or not _should_retry(status_code):
                 raise error
 
-            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
-            time.sleep(delay)
+            time.sleep(retry_delay_seconds(attempt))
 
         if last_error is not None:
             raise last_error
@@ -207,8 +203,7 @@ class GitHubClient:
             if attempt >= self.max_attempts or not _should_retry(status_code):
                 raise error
 
-            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
-            time.sleep(delay)
+            time.sleep(retry_delay_seconds(attempt))
 
         if last_error is not None:
             raise last_error
@@ -297,8 +292,7 @@ class GitHubClient:
             if attempt >= self.max_attempts or not _should_retry(status_code):
                 raise error
 
-            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
-            time.sleep(delay)
+            time.sleep(retry_delay_seconds(attempt))
 
         if last_error is not None:
             raise last_error
@@ -558,8 +552,7 @@ query($owner:String!,$name:String!,$endCursor:String) {{
             if attempt >= self.max_attempts or not _should_retry(status_code):
                 raise error
 
-            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
-            time.sleep(delay)
+            time.sleep(retry_delay_seconds(attempt))
 
         if last_error is not None:
             raise last_error

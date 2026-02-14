@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import random
 import time
 from urllib import error, request
+
+from dupcanon.llm_retry import retry_delay_seconds, should_retry_http_status, validate_max_attempts
 
 
 class GeminiEmbeddingError(RuntimeError):
@@ -13,11 +14,7 @@ class GeminiEmbeddingError(RuntimeError):
 
 
 def _should_retry(status_code: int | None) -> bool:
-    if status_code is None:
-        return True
-    if status_code == 429:
-        return True
-    return 500 <= status_code <= 599
+    return should_retry_http_status(status_code)
 
 
 class GeminiEmbeddingsClient:
@@ -30,8 +27,16 @@ class GeminiEmbeddingsClient:
         max_attempts: int = 5,
         timeout_seconds: float = 60.0,
     ) -> None:
+        if output_dimensionality <= 0:
+            msg = "output_dimensionality must be > 0"
+            raise ValueError(msg)
+        validate_max_attempts(max_attempts)
+        if timeout_seconds <= 0:
+            msg = "timeout_seconds must be > 0"
+            raise ValueError(msg)
+
         self.api_key = api_key
-        self.model = model.removeprefix("models/")
+        self.model = model.strip().removeprefix("models/")
         self.output_dimensionality = output_dimensionality
         self.max_attempts = max_attempts
         self.timeout_seconds = timeout_seconds
@@ -84,8 +89,7 @@ class GeminiEmbeddingsClient:
                 if attempt >= self.max_attempts:
                     raise err from exc
 
-            delay = min(30.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
-            time.sleep(delay)
+            time.sleep(retry_delay_seconds(attempt))
 
         if last_error is not None:
             raise last_error
