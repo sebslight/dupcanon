@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     supabase_db_url: str | None = Field(default=None, validation_alias="SUPABASE_DB_URL")
     gemini_api_key: str | None = Field(default=None, validation_alias="GEMINI_API_KEY")
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    openrouter_api_key: str | None = Field(default=None, validation_alias="OPENROUTER_API_KEY")
     github_token: str | None = Field(default=None, validation_alias="GITHUB_TOKEN")
     embedding_model: str = Field(
         default="gemini-embedding-001",

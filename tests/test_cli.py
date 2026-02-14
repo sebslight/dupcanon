@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from dupcanon.cli import _friendly_error_message, app
-from dupcanon.models import JudgeStats
+from dupcanon.models import (
+    DetectNewResult,
+    DetectSource,
+    DetectVerdict,
+    ItemType,
+    JudgeAuditStats,
+    JudgeStats,
+)
 
 runner = CliRunner()
 
@@ -19,8 +27,9 @@ def test_cli_help_shows_core_commands() -> None:
     assert "sync" in result.stdout
     assert "maintainers" in result.stdout
     assert "judge" in result.stdout
+    assert "judge-audit" in result.stdout
+    assert "detect-new" in result.stdout
     assert "plan-close" in result.stdout
-    assert "approve-plan" in result.stdout
     assert "apply-close" in result.stdout
 
 
@@ -67,6 +76,32 @@ def test_candidates_help_includes_core_options() -> None:
     assert "--workers" in result.stdout
 
 
+def test_candidates_defaults_include_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_candidates(**kwargs):
+        captured.update(kwargs)
+
+        class _Stats:
+            def model_dump(self):
+                return {}
+
+        return _Stats()
+
+    monkeypatch.setattr("dupcanon.cli.run_candidates", fake_run_candidates)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        ["candidates", "--repo", "org/repo", "--type", "issue"],
+    )
+
+    assert result.exit_code == 0
+    include_filter = captured.get("include_filter")
+    assert include_filter is not None
+    assert getattr(include_filter, "value", None) == "open"
+
+
 def test_judge_help_includes_core_options() -> None:
     result = runner.invoke(app, ["judge", "--help"])
 
@@ -78,6 +113,38 @@ def test_judge_help_includes_core_options() -> None:
     assert "--allow-stale" in result.stdout
     assert "--rejudge" in result.stdout
     assert "--workers" in result.stdout
+
+
+def test_judge_audit_help_includes_core_options() -> None:
+    result = runner.invoke(app, ["judge-audit", "--help"])
+
+    assert result.exit_code == 0
+    assert "--type" in result.stdout
+    assert "--sample-size" in result.stdout
+    assert "--seed" in result.stdout
+    assert "--min-edge" in result.stdout
+    assert "--cheap-provider" in result.stdout
+    assert "--cheap-model" in result.stdout
+    assert "--strong-provider" in result.stdout
+    assert "--strong-model" in result.stdout
+    assert "--workers" in result.stdout
+    assert "--verbose" in result.stdout
+    assert "--debug-rpc" in result.stdout
+
+
+def test_detect_new_help_includes_core_options() -> None:
+    result = runner.invoke(app, ["detect-new", "--help"])
+
+    assert result.exit_code == 0
+    assert "--type" in result.stdout
+    assert "--number" in result.stdout
+    assert "--provider" in result.stdout
+    assert "--model" in result.stdout
+    assert "--k" in result.stdout
+    assert "--min-score" in result.stdout
+    assert "--maybe-threshold" in result.stdout
+    assert "--duplicate-threshold" in result.stdout
+    assert "--json-out" in result.stdout
 
 
 def test_judge_defaults_openai_model_when_provider_openai(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,6 +168,239 @@ def test_judge_defaults_openai_model_when_provider_openai(monkeypatch: pytest.Mo
     assert captured.get("model") == "gpt-5-mini"
 
 
+def test_judge_defaults_openrouter_model_when_provider_openrouter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_judge(**kwargs):
+        captured.update(kwargs)
+        return JudgeStats()
+
+    monkeypatch.setattr("dupcanon.cli.run_judge", fake_run_judge)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+
+    result = runner.invoke(
+        app,
+        ["judge", "--repo", "org/repo", "--type", "issue", "--provider", "openrouter"],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("provider") == "openrouter"
+    assert captured.get("model") == "minimax/minimax-m2.5"
+
+
+def test_judge_defaults_openai_codex_model_when_provider_openai_codex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_judge(**kwargs):
+        captured.update(kwargs)
+        return JudgeStats()
+
+    monkeypatch.setattr("dupcanon.cli.run_judge", fake_run_judge)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        ["judge", "--repo", "org/repo", "--type", "issue", "--provider", "openai-codex"],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("provider") == "openai-codex"
+    assert captured.get("model") is None
+
+
+def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_judge_audit(**kwargs):
+        captured.update(kwargs)
+        return JudgeAuditStats(audit_run_id=12, sample_size_requested=25, sample_size_actual=20)
+
+    monkeypatch.setattr("dupcanon.cli.run_judge_audit", fake_run_judge_audit)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "judge-audit",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--sample-size",
+            "25",
+            "--seed",
+            "7",
+            "--cheap-provider",
+            "gemini",
+            "--strong-provider",
+            "openai",
+            "--workers",
+            "3",
+            "--verbose",
+            "--debug-rpc",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("sample_size") == 25
+    assert captured.get("sample_seed") == 7
+    assert captured.get("cheap_provider") == "gemini"
+    assert captured.get("strong_provider") == "openai"
+    assert captured.get("worker_concurrency") == 3
+    assert captured.get("verbose") is True
+    assert captured.get("debug_rpc") is True
+
+
+def test_detect_new_defaults_openrouter_model_when_provider_openrouter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_detect_new(**kwargs):
+        captured.update(kwargs)
+        return DetectNewResult(
+            repo="org/repo",
+            type=ItemType.ISSUE,
+            source=DetectSource(number=1, title="Issue 1"),
+            verdict=DetectVerdict.NOT_DUPLICATE,
+            is_duplicate=False,
+            confidence=0.12,
+            duplicate_of=None,
+            reasoning="No match",
+            top_matches=[],
+            provider=str(kwargs.get("provider", "openrouter")),
+            model=str(kwargs.get("model", "minimax/minimax-m2.5")),
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+        )
+
+    monkeypatch.setattr("dupcanon.cli.run_detect_new", fake_run_detect_new)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "detect-new",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--number",
+            "1",
+            "--provider",
+            "openrouter",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("provider") == "openrouter"
+    assert captured.get("model") == "minimax/minimax-m2.5"
+
+
+def test_detect_new_defaults_openai_codex_model_when_provider_openai_codex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_detect_new(**kwargs):
+        captured.update(kwargs)
+        return DetectNewResult(
+            repo="org/repo",
+            type=ItemType.ISSUE,
+            source=DetectSource(number=1, title="Issue 1"),
+            verdict=DetectVerdict.NOT_DUPLICATE,
+            is_duplicate=False,
+            confidence=0.12,
+            duplicate_of=None,
+            reasoning="No match",
+            top_matches=[],
+            provider=str(kwargs.get("provider", "openai-codex")),
+            model=str(kwargs.get("model") or "pi-default"),
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+        )
+
+    monkeypatch.setattr("dupcanon.cli.run_detect_new", fake_run_detect_new)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "detect-new",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--number",
+            "1",
+            "--provider",
+            "openai-codex",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("provider") == "openai-codex"
+    assert captured.get("model") is None
+
+
+def test_detect_new_json_out_writes_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_file = tmp_path / "detect-new.json"
+
+    def fake_run_detect_new(**kwargs):
+        return DetectNewResult(
+            repo="org/repo",
+            type=ItemType.ISSUE,
+            source=DetectSource(number=123, title="Issue 123"),
+            verdict=DetectVerdict.MAYBE_DUPLICATE,
+            is_duplicate=False,
+            confidence=0.88,
+            duplicate_of=98,
+            reasoning="Potential duplicate",
+            top_matches=[],
+            provider="openai",
+            model="gpt-5-mini",
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+            reason="low_confidence_duplicate",
+        )
+
+    monkeypatch.setattr("dupcanon.cli.run_detect_new", fake_run_detect_new)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "detect-new",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--number",
+            "123",
+            "--provider",
+            "openai",
+            "--json-out",
+            str(output_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert output_file.exists()
+    content = output_file.read_text(encoding="utf-8")
+    assert '"verdict": "maybe_duplicate"' in content
+    assert '"number": 123' in content
+
+
 def test_canonicalize_help_includes_type() -> None:
     result = runner.invoke(app, ["canonicalize", "--help"])
 
@@ -116,17 +416,6 @@ def test_plan_close_help_includes_core_options() -> None:
     assert "--min-close" in result.stdout
     assert "--maintainers-source" in result.stdout
     assert "--dry-run" in result.stdout
-    assert "--approval-file-out" in result.stdout
-
-
-def test_approve_plan_help_includes_options() -> None:
-    result = runner.invoke(app, ["approve-plan", "--help"])
-
-    assert result.exit_code == 0
-    assert "--approval-file" in result.stdout
-    assert "--approved-by" in result.stdout
-    assert "--approved-at" in result.stdout
-    assert "--force" in result.stdout
 
 
 def test_apply_close_help_includes_gate_options() -> None:
@@ -134,7 +423,6 @@ def test_apply_close_help_includes_gate_options() -> None:
 
     assert result.exit_code == 0
     assert "--close-run" in result.stdout
-    assert "--approval-file" in result.stdout
     assert "--yes" in result.stdout
 
 

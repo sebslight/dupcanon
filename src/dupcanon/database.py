@@ -9,6 +9,7 @@ from psycopg.types.json import Json
 
 from dupcanon.models import (
     AcceptedDuplicateEdge,
+    CandidateItemContext,
     CandidateNeighbor,
     CandidateSourceItem,
     CanonicalNode,
@@ -159,6 +160,89 @@ class Database:
                         if row.get("embedded_content_hash") is not None
                         else None
                     ),
+                )
+            )
+        return result
+
+    def get_embedding_item_by_number(
+        self,
+        *,
+        repo_id: int,
+        item_type: ItemType,
+        number: int,
+        model: str,
+    ) -> EmbeddingItem | None:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select
+                    i.id as item_id,
+                    i.type,
+                    i.number,
+                    i.title,
+                    i.body,
+                    i.content_hash,
+                    e.embedded_content_hash
+                from public.items i
+                left join public.embeddings e
+                    on e.item_id = i.id and e.model = %s
+                where
+                    i.repo_id = %s
+                    and i.type = %s
+                    and i.number = %s
+                limit 1
+                """,
+                (model, repo_id, item_type.value, number),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        return EmbeddingItem(
+            item_id=int(row["item_id"]),
+            type=ItemType(str(row["type"])),
+            number=int(row["number"]),
+            title=str(row["title"]),
+            body=row.get("body"),
+            content_hash=str(row["content_hash"]),
+            embedded_content_hash=(
+                str(row["embedded_content_hash"])
+                if row.get("embedded_content_hash") is not None
+                else None
+            ),
+        )
+
+    def list_item_context_by_ids(self, *, item_ids: list[int]) -> list[CandidateItemContext]:
+        if not item_ids:
+            return []
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select
+                    i.id as item_id,
+                    i.number,
+                    i.state,
+                    i.title,
+                    i.body
+                from public.items i
+                where i.id = any(%s::bigint[])
+                order by i.id asc
+                """,
+                (item_ids,),
+            )
+            rows = cur.fetchall()
+
+        result: list[CandidateItemContext] = []
+        for row in rows:
+            result.append(
+                CandidateItemContext(
+                    item_id=int(row["item_id"]),
+                    number=int(row["number"]),
+                    state=StateFilter(str(row["state"])),
+                    title=str(row["title"]),
+                    body=row.get("body"),
                 )
             )
         return result
@@ -468,6 +552,7 @@ class Database:
                 on m.candidate_set_id = s.candidate_set_id
             left join public.items cand
                 on cand.id = m.candidate_item_id
+            where src.state = 'open'
             order by s.candidate_set_id asc, m.rank asc
         """
 
@@ -519,6 +604,104 @@ class Database:
             result.append(JudgeWorkItem(**grouped[candidate_set_id]))
         return result
 
+    def list_candidate_sets_for_judge_audit(
+        self,
+        *,
+        repo_id: int,
+        item_type: ItemType,
+        sample_size: int,
+        sample_seed: int,
+    ) -> list[JudgeWorkItem]:
+        query = """
+            with latest_fresh as (
+                select distinct on (cs.item_id)
+                    cs.id as candidate_set_id,
+                    cs.item_id
+                from public.candidate_sets cs
+                join public.items src on src.id = cs.item_id
+                where
+                    cs.repo_id = %s
+                    and cs.type = %s
+                    and cs.status = 'fresh'
+                    and src.state = 'open'
+                order by cs.item_id, cs.created_at desc
+            ),
+            sampled as (
+                select
+                    lf.candidate_set_id,
+                    lf.item_id
+                from latest_fresh lf
+                order by md5(lf.item_id::text || ':' || %s::text)
+                limit %s
+            )
+            select
+                s.candidate_set_id,
+                src.id as source_item_id,
+                src.number as source_number,
+                src.type as source_type,
+                src.state as source_state,
+                src.title as source_title,
+                src.body as source_body,
+                m.rank,
+                m.score,
+                cand.id as candidate_item_id,
+                cand.number as candidate_number,
+                cand.state as candidate_state,
+                cand.title as candidate_title,
+                cand.body as candidate_body
+            from sampled s
+            join public.items src
+                on src.id = s.item_id
+            left join public.candidate_set_members m
+                on m.candidate_set_id = s.candidate_set_id
+            left join public.items cand
+                on cand.id = m.candidate_item_id
+            order by s.candidate_set_id asc, m.rank asc
+        """
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, (repo_id, item_type.value, sample_seed, sample_size))
+            rows = cur.fetchall()
+
+        grouped: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            candidate_set_id = int(row["candidate_set_id"])
+            current = grouped.get(candidate_set_id)
+            if current is None:
+                current = {
+                    "candidate_set_id": candidate_set_id,
+                    "candidate_set_status": "fresh",
+                    "source_item_id": int(row["source_item_id"]),
+                    "source_number": int(row["source_number"]),
+                    "source_type": ItemType(str(row["source_type"])),
+                    "source_state": StateFilter(str(row["source_state"])),
+                    "source_title": str(row["source_title"]),
+                    "source_body": row.get("source_body"),
+                    "candidates": [],
+                }
+                grouped[candidate_set_id] = current
+
+            candidate_item_id = row.get("candidate_item_id")
+            if candidate_item_id is None:
+                continue
+
+            current["candidates"].append(
+                JudgeCandidate(
+                    candidate_item_id=int(candidate_item_id),
+                    number=int(row["candidate_number"]),
+                    state=StateFilter(str(row["candidate_state"])),
+                    title=str(row["candidate_title"]),
+                    body=row.get("candidate_body"),
+                    score=float(row["score"]),
+                    rank=int(row["rank"]),
+                )
+            )
+
+        result: list[JudgeWorkItem] = []
+        for candidate_set_id in sorted(grouped):
+            result.append(JudgeWorkItem(**grouped[candidate_set_id]))
+        return result
+
     def has_accepted_duplicate_edge(
         self,
         *,
@@ -530,12 +713,12 @@ class Database:
             cur.execute(
                 """
                 select 1
-                from public.duplicate_edges
+                from public.judge_decisions
                 where
                     repo_id = %s
                     and type = %s
                     and from_item_id = %s
-                    and status = 'accepted'
+                    and final_status = 'accepted'
                 limit 1
                 """,
                 (repo_id, item_type.value, from_item_id),
@@ -559,23 +742,34 @@ class Database:
         status: str,
         created_at: datetime,
     ) -> None:
+        final_status: Literal["accepted", "rejected", "skipped"]
+        if status == "accepted":
+            final_status = "accepted"
+        elif status == "rejected":
+            final_status = "rejected"
+        else:
+            msg = f"invalid duplicate edge status: {status}"
+            raise DatabaseError(msg)
+
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                insert into public.duplicate_edges (
+                insert into public.judge_decisions (
                     repo_id,
                     type,
                     from_item_id,
                     to_item_id,
+                    model_is_duplicate,
+                    final_status,
                     confidence,
                     reasoning,
+                    min_edge,
                     llm_provider,
                     llm_model,
                     created_by,
-                    created_at,
-                    status
+                    created_at
                 ) values (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, true, %s, %s, %s, 0, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -583,13 +777,90 @@ class Database:
                     item_type.value,
                     from_item_id,
                     to_item_id,
+                    final_status,
                     confidence,
                     reasoning,
                     llm_provider,
                     llm_model,
                     created_by,
                     created_at,
-                    status,
+                ),
+            )
+
+    def insert_judge_decision(
+        self,
+        *,
+        repo_id: int,
+        item_type: ItemType,
+        from_item_id: int,
+        candidate_set_id: int | None,
+        to_item_id: int | None,
+        model_is_duplicate: bool,
+        final_status: Literal["accepted", "rejected", "skipped"],
+        confidence: float,
+        reasoning: str,
+        relation: str | None,
+        root_cause_match: str | None,
+        scope_relation: str | None,
+        path_match: str | None,
+        certainty: str | None,
+        veto_reason: str | None,
+        min_edge: float,
+        llm_provider: str,
+        llm_model: str,
+        created_by: str,
+        created_at: datetime,
+    ) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into public.judge_decisions (
+                    repo_id,
+                    type,
+                    from_item_id,
+                    candidate_set_id,
+                    to_item_id,
+                    model_is_duplicate,
+                    final_status,
+                    confidence,
+                    reasoning,
+                    relation,
+                    root_cause_match,
+                    scope_relation,
+                    path_match,
+                    certainty,
+                    veto_reason,
+                    min_edge,
+                    llm_provider,
+                    llm_model,
+                    created_by,
+                    created_at
+                ) values (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    repo_id,
+                    item_type.value,
+                    from_item_id,
+                    candidate_set_id,
+                    to_item_id,
+                    model_is_duplicate,
+                    final_status,
+                    confidence,
+                    reasoning,
+                    relation,
+                    root_cause_match,
+                    scope_relation,
+                    path_match,
+                    certainty,
+                    veto_reason,
+                    min_edge,
+                    llm_provider,
+                    llm_model,
+                    created_by,
+                    created_at,
                 ),
             )
 
@@ -610,46 +881,16 @@ class Database:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                update public.duplicate_edges
-                set status = 'rejected'
+                update public.judge_decisions
+                set final_status = 'rejected',
+                    veto_reason = coalesce(veto_reason, 'superseded_by_rejudge')
                 where
                     repo_id = %s
                     and type = %s
                     and from_item_id = %s
-                    and status = 'accepted'
+                    and final_status = 'accepted'
                 """,
                 (repo_id, item_type.value, from_item_id),
-            )
-            cur.execute(
-                """
-                insert into public.duplicate_edges (
-                    repo_id,
-                    type,
-                    from_item_id,
-                    to_item_id,
-                    confidence,
-                    reasoning,
-                    llm_provider,
-                    llm_model,
-                    created_by,
-                    created_at,
-                    status
-                ) values (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'accepted'
-                )
-                """,
-                (
-                    repo_id,
-                    item_type.value,
-                    from_item_id,
-                    to_item_id,
-                    confidence,
-                    reasoning,
-                    llm_provider,
-                    llm_model,
-                    created_by,
-                    created_at,
-                ),
             )
 
     def list_accepted_duplicate_edges(
@@ -662,11 +903,11 @@ class Database:
             cur.execute(
                 """
                 select from_item_id, to_item_id
-                from public.duplicate_edges
+                from public.judge_decisions
                 where
                     repo_id = %s
                     and type = %s
-                    and status = 'accepted'
+                    and final_status = 'accepted'
                 order by id asc
                 """,
                 (repo_id, item_type.value),
@@ -688,11 +929,11 @@ class Database:
             cur.execute(
                 """
                 select from_item_id, to_item_id, confidence
-                from public.duplicate_edges
+                from public.judge_decisions
                 where
                     repo_id = %s
                     and type = %s
-                    and status = 'accepted'
+                    and final_status = 'accepted'
                 order by id asc
                 """,
                 (repo_id, item_type.value),
@@ -721,18 +962,20 @@ class Database:
                 """
                 with edge_items as (
                     select from_item_id as item_id
-                    from public.duplicate_edges
-                    where repo_id = %s and type = %s and status = 'accepted'
+                    from public.judge_decisions
+                    where repo_id = %s and type = %s and final_status = 'accepted'
                     union
                     select to_item_id as item_id
-                    from public.duplicate_edges
-                    where repo_id = %s and type = %s and status = 'accepted'
+                    from public.judge_decisions
+                    where repo_id = %s and type = %s and final_status = 'accepted'
                 )
                 select
                     i.id as item_id,
                     i.number,
                     i.state,
                     i.author_login,
+                    i.title,
+                    i.body,
                     i.assignees,
                     i.comment_count,
                     i.review_comment_count,
@@ -767,6 +1010,8 @@ class Database:
                     number=int(row["number"]),
                     state=StateFilter(str(row["state"])),
                     author_login=row.get("author_login"),
+                    title=row.get("title"),
+                    body=row.get("body"),
                     assignees=assignees,
                     assignees_unknown=assignees_unknown,
                     comment_count=int(row["comment_count"]),
@@ -775,6 +1020,197 @@ class Database:
                 )
             )
         return result
+
+    def create_judge_audit_run(
+        self,
+        *,
+        repo_id: int,
+        item_type: ItemType,
+        sample_policy: str,
+        sample_seed: int,
+        sample_size_requested: int,
+        sample_size_actual: int,
+        min_edge: float,
+        cheap_llm_provider: str,
+        cheap_llm_model: str,
+        strong_llm_provider: str,
+        strong_llm_model: str,
+        created_by: str,
+        created_at: datetime,
+    ) -> int:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                insert into public.judge_audit_runs (
+                    repo_id,
+                    type,
+                    sample_policy,
+                    sample_seed,
+                    sample_size_requested,
+                    sample_size_actual,
+                    min_edge,
+                    cheap_llm_provider,
+                    cheap_llm_model,
+                    strong_llm_provider,
+                    strong_llm_model,
+                    status,
+                    created_by,
+                    created_at
+                ) values (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, 'running', %s, %s
+                )
+                returning id
+                """,
+                (
+                    repo_id,
+                    item_type.value,
+                    sample_policy,
+                    sample_seed,
+                    sample_size_requested,
+                    sample_size_actual,
+                    min_edge,
+                    cheap_llm_provider,
+                    cheap_llm_model,
+                    strong_llm_provider,
+                    strong_llm_model,
+                    created_by,
+                    created_at,
+                ),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            msg = "failed to create judge_audit_run"
+            raise DatabaseError(msg)
+
+        return int(row["id"])
+
+    def insert_judge_audit_run_item(
+        self,
+        *,
+        audit_run_id: int,
+        source_item_id: int,
+        source_number: int,
+        source_state: StateFilter,
+        candidate_set_id: int,
+        cheap_model_is_duplicate: bool,
+        cheap_final_status: Literal["accepted", "rejected", "skipped"],
+        cheap_to_item_id: int | None,
+        cheap_confidence: float,
+        cheap_veto_reason: str | None,
+        cheap_reasoning: str,
+        strong_model_is_duplicate: bool,
+        strong_final_status: Literal["accepted", "rejected", "skipped"],
+        strong_to_item_id: int | None,
+        strong_confidence: float,
+        strong_veto_reason: str | None,
+        strong_reasoning: str,
+        outcome_class: Literal["tp", "fp", "fn", "tn", "conflict", "incomplete"],
+        created_at: datetime,
+    ) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into public.judge_audit_run_items (
+                    audit_run_id,
+                    source_item_id,
+                    source_number,
+                    source_state,
+                    candidate_set_id,
+                    cheap_model_is_duplicate,
+                    cheap_final_status,
+                    cheap_to_item_id,
+                    cheap_confidence,
+                    cheap_veto_reason,
+                    cheap_reasoning,
+                    strong_model_is_duplicate,
+                    strong_final_status,
+                    strong_to_item_id,
+                    strong_confidence,
+                    strong_veto_reason,
+                    strong_reasoning,
+                    outcome_class,
+                    created_at
+                ) values (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s
+                )
+                """,
+                (
+                    audit_run_id,
+                    source_item_id,
+                    source_number,
+                    source_state.value,
+                    candidate_set_id,
+                    cheap_model_is_duplicate,
+                    cheap_final_status,
+                    cheap_to_item_id,
+                    cheap_confidence,
+                    cheap_veto_reason,
+                    cheap_reasoning,
+                    strong_model_is_duplicate,
+                    strong_final_status,
+                    strong_to_item_id,
+                    strong_confidence,
+                    strong_veto_reason,
+                    strong_reasoning,
+                    outcome_class,
+                    created_at,
+                ),
+            )
+
+    def complete_judge_audit_run(
+        self,
+        *,
+        audit_run_id: int,
+        status: Literal["completed", "failed"],
+        sample_size_actual: int,
+        compared_count: int,
+        tp: int,
+        fp: int,
+        fn: int,
+        tn: int,
+        conflict: int,
+        incomplete: int,
+        completed_at: datetime,
+    ) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                update public.judge_audit_runs
+                set
+                    status = %s,
+                    sample_size_actual = %s,
+                    compared_count = %s,
+                    tp = %s,
+                    fp = %s,
+                    fn = %s,
+                    tn = %s,
+                    conflict = %s,
+                    incomplete = %s,
+                    completed_at = %s
+                where id = %s
+                """,
+                (
+                    status,
+                    sample_size_actual,
+                    compared_count,
+                    tp,
+                    fp,
+                    fn,
+                    tn,
+                    conflict,
+                    incomplete,
+                    completed_at,
+                    audit_run_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                msg = f"judge_audit_run not found: {audit_run_id}"
+                raise DatabaseError(msg)
 
     def create_close_run(
         self,
@@ -851,6 +1287,44 @@ class Database:
                     created_at,
                 ),
             )
+
+    def copy_close_run_items(
+        self,
+        *,
+        source_close_run_id: int,
+        target_close_run_id: int,
+        created_at: datetime,
+    ) -> int:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into public.close_run_items (
+                    close_run_id,
+                    item_id,
+                    canonical_item_id,
+                    action,
+                    skip_reason,
+                    created_at
+                )
+                select
+                    %s,
+                    cri.item_id,
+                    cri.canonical_item_id,
+                    cri.action,
+                    cri.skip_reason,
+                    %s
+                from public.close_run_items cri
+                where cri.close_run_id = %s
+                """,
+                (
+                    target_close_run_id,
+                    created_at,
+                    source_close_run_id,
+                ),
+            )
+            inserted = cur.rowcount
+
+        return max(int(inserted), 0)
 
     def get_close_run_record(self, *, close_run_id: int) -> CloseRunRecord | None:
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -972,18 +1446,20 @@ class Database:
                 """
                 with edge_items as (
                     select from_item_id as item_id
-                    from public.duplicate_edges
-                    where repo_id = %s and type = %s and status = 'accepted'
+                    from public.judge_decisions
+                    where repo_id = %s and type = %s and final_status = 'accepted'
                     union
                     select to_item_id as item_id
-                    from public.duplicate_edges
-                    where repo_id = %s and type = %s and status = 'accepted'
+                    from public.judge_decisions
+                    where repo_id = %s and type = %s and final_status = 'accepted'
                 )
                 select
                     i.id as item_id,
                     i.number,
                     i.state,
                     i.author_login,
+                    i.title,
+                    i.body,
                     i.comment_count,
                     i.review_comment_count,
                     i.created_at_gh
@@ -1003,6 +1479,8 @@ class Database:
                     number=int(row["number"]),
                     state=StateFilter(str(row["state"])),
                     author_login=row.get("author_login"),
+                    title=row.get("title"),
+                    body=row.get("body"),
                     comment_count=int(row["comment_count"]),
                     review_comment_count=int(row["review_comment_count"]),
                     created_at_gh=row.get("created_at_gh"),

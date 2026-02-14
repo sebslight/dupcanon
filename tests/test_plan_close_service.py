@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 from rich.console import Console
 
@@ -101,8 +99,6 @@ def test_run_plan_close_dry_run_uses_guardrails_and_threshold(monkeypatch) -> No
 
     assert stats.close_run_id is None
     assert stats.dry_run is True
-    assert stats.plan_hash is None
-    assert stats.approval_file is None
     assert stats.accepted_edges == 2
     assert stats.clusters == 1
     assert stats.considered == 2
@@ -111,7 +107,7 @@ def test_run_plan_close_dry_run_uses_guardrails_and_threshold(monkeypatch) -> No
     assert stats.skipped_low_confidence == 1
 
 
-def test_run_plan_close_persists_close_run_items(monkeypatch, tmp_path) -> None:
+def test_run_plan_close_persists_close_run_items(monkeypatch) -> None:
     captured: dict[str, object] = {"close_run": [], "close_items": []}
 
     class FakeDatabase:
@@ -192,8 +188,6 @@ def test_run_plan_close_persists_close_run_items(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(plan_close_service, "Database", FakeDatabase)
     monkeypatch.setattr(plan_close_service, "GitHubClient", FakeGitHubClient)
 
-    approval_file = tmp_path / "approval.json"
-
     stats = plan_close_service.run_plan_close(
         settings=Settings(supabase_db_url="postgresql://localhost/db"),
         repo_value="org/repo",
@@ -201,14 +195,11 @@ def test_run_plan_close_persists_close_run_items(monkeypatch, tmp_path) -> None:
         min_close=0.90,
         maintainers_source="collaborators",
         dry_run=False,
-        approval_file_out=approval_file,
         console=Console(),
         logger=get_logger("test"),
     )
 
     assert stats.close_run_id == 777
-    assert stats.plan_hash is not None
-    assert stats.approval_file == str(approval_file)
     assert stats.considered == 5
     assert stats.close_actions == 0
     assert stats.skip_actions == 5
@@ -227,12 +218,6 @@ def test_run_plan_close_persists_close_run_items(monkeypatch, tmp_path) -> None:
     assert isinstance(close_items, list)
     assert len(close_items) == 5
 
-    payload = json.loads(approval_file.read_text(encoding="utf-8"))
-    assert payload["close_run_id"] == 777
-    assert payload["repo"] == "org/repo"
-    assert payload["type"] == "issue"
-    assert payload["min_close"] == 0.9
-    assert payload["plan_hash"] == stats.plan_hash
 
 
 def test_run_plan_close_requires_direct_edge_to_canonical(monkeypatch) -> None:

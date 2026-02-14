@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 import pytest
 
-from dupcanon.models import ItemType, JudgeDecision, RepoRef, parse_since, semantic_content_hash
+from dupcanon.models import (
+    DetectNewResult,
+    DetectSource,
+    DetectVerdict,
+    ItemType,
+    JudgeDecision,
+    RepoRef,
+    parse_since,
+    semantic_content_hash,
+)
 
 
 def test_repo_ref_parse() -> None:
@@ -75,6 +84,20 @@ def test_judge_decision_valid_non_duplicate() -> None:
     assert decision.duplicate_of == 0
 
 
+def test_judge_decision_accepts_certainty_unsure() -> None:
+    decision = JudgeDecision.model_validate(
+        {
+            "is_duplicate": True,
+            "duplicate_of": 123,
+            "confidence": 0.86,
+            "reasoning": "Partial overlap; unsure.",
+            "certainty": "unsure",
+        }
+    )
+
+    assert decision.certainty == "unsure"
+
+
 def test_judge_decision_rejects_extra_fields() -> None:
     with pytest.raises(ValueError):
         JudgeDecision.model_validate(
@@ -111,3 +134,41 @@ def test_judge_decision_truncates_long_reasoning() -> None:
     )
 
     assert len(decision.reasoning) == 240
+
+
+def test_detect_new_result_duplicate_requires_target() -> None:
+    result = DetectNewResult(
+        repo="org/repo",
+        type=ItemType.ISSUE,
+        source=DetectSource(number=1, title="Issue 1"),
+        verdict=DetectVerdict.DUPLICATE,
+        is_duplicate=True,
+        confidence=0.95,
+        duplicate_of=99,
+        reasoning="Same root cause.",
+        provider="gemini",
+        model="gemini-3-flash-preview",
+        run_id="run123",
+        timestamp=datetime.now(tz=UTC),
+    )
+
+    assert result.schema_version == "v1"
+    assert result.duplicate_of == 99
+
+
+def test_detect_new_result_not_duplicate_rejects_duplicate_target() -> None:
+    with pytest.raises(ValueError):
+        DetectNewResult(
+            repo="org/repo",
+            type=ItemType.ISSUE,
+            source=DetectSource(number=1, title="Issue 1"),
+            verdict=DetectVerdict.NOT_DUPLICATE,
+            is_duplicate=False,
+            confidence=0.2,
+            duplicate_of=99,
+            reasoning="Different issue.",
+            provider="openai",
+            model="gpt-5-mini",
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+        )

@@ -1,0 +1,214 @@
+name: dupcanon detect-new (shadow)
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repository in org/name format"
+        required: false
+        default: ""
+      type:
+        description: "Item type (issue or pr)"
+        required: true
+        type: choice
+        options:
+          - issue
+          - pr
+      number:
+        description: "Issue/PR number"
+        required: true
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: dupcanon-detect-new-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  detect-new:
+    name: Detect duplicate (shadow mode)
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      DUPCANON_ONLINE_PROVIDER: ${{ vars.DUPCANON_ONLINE_PROVIDER || 'gemini' }}
+      DUPCANON_ONLINE_MODEL: ${{ vars.DUPCANON_ONLINE_MODEL || '' }}
+      DUPCANON_ONLINE_K: ${{ vars.DUPCANON_ONLINE_K || '8' }}
+      DUPCANON_ONLINE_MIN_SCORE: ${{ vars.DUPCANON_ONLINE_MIN_SCORE || '0.75' }}
+      DUPCANON_ONLINE_MAYBE_THRESHOLD: ${{ vars.DUPCANON_ONLINE_MAYBE_THRESHOLD || '0.85' }}
+      DUPCANON_ONLINE_DUPLICATE_THRESHOLD: ${{ vars.DUPCANON_ONLINE_DUPLICATE_THRESHOLD || '0.92' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Resolve source item
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "issues" ]]; then
+            repo="${{ github.repository }}"
+            item_type="issue"
+            item_number="${{ github.event.issue.number }}"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            repo="${{ github.repository }}"
+            item_type="pr"
+            item_number="${{ github.event.pull_request.number }}"
+          else
+            repo="${{ github.event.inputs.repo }}"
+            if [[ -z "$repo" ]]; then
+              repo="${{ github.repository }}"
+            fi
+            item_type="${{ github.event.inputs.type }}"
+            item_number="${{ github.event.inputs.number }}"
+          fi
+
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          echo "item_type=$item_type" >> "$GITHUB_OUTPUT"
+          echo "item_number=$item_number" >> "$GITHUB_OUTPUT"
+
+      - name: Preflight checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SUPABASE_DB_URL:-}" ]]; then
+            echo "SUPABASE_DB_URL secret is required"
+            exit 1
+          fi
+
+          case "${DUPCANON_ONLINE_PROVIDER}" in
+            gemini)
+              if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+                echo "GEMINI_API_KEY secret is required when provider=gemini"
+                exit 1
+              fi
+              ;;
+            openai)
+              if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+                echo "OPENAI_API_KEY secret is required when provider=openai"
+                exit 1
+              fi
+              ;;
+            openrouter)
+              if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+                echo "OPENROUTER_API_KEY secret is required when provider=openrouter"
+                exit 1
+              fi
+              ;;
+            openai-codex)
+              if ! command -v pi >/dev/null 2>&1; then
+                echo "pi CLI is required when provider=openai-codex"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Unsupported provider: ${DUPCANON_ONLINE_PROVIDER}"
+              exit 1
+              ;;
+          esac
+
+      - name: Run detect-new (shadow mode)
+        id: run
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p .local/artifacts
+
+          repo='${{ steps.source.outputs.repo }}'
+          item_type='${{ steps.source.outputs.item_type }}'
+          item_number='${{ steps.source.outputs.item_number }}'
+          json_out=".local/artifacts/detect-new-${item_type}-${item_number}.json"
+
+          cmd=(
+            uv run dupcanon detect-new
+            --repo "$repo"
+            --type "$item_type"
+            --number "$item_number"
+            --provider "${DUPCANON_ONLINE_PROVIDER}"
+            --k "${DUPCANON_ONLINE_K}"
+            --min-score "${DUPCANON_ONLINE_MIN_SCORE}"
+            --maybe-threshold "${DUPCANON_ONLINE_MAYBE_THRESHOLD}"
+            --duplicate-threshold "${DUPCANON_ONLINE_DUPLICATE_THRESHOLD}"
+            --json-out "$json_out"
+          )
+
+          if [[ -n "${DUPCANON_ONLINE_MODEL}" ]]; then
+            cmd+=(--model "${DUPCANON_ONLINE_MODEL}")
+          fi
+
+          "${cmd[@]}"
+
+          echo "json_out=$json_out" >> "$GITHUB_OUTPUT"
+
+      - name: Publish detect-new job summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          json_out='${{ steps.run.outputs.json_out }}'
+          if [[ -z "$json_out" || ! -f "$json_out" ]]; then
+            echo "## dupcanon detect-new result" >> "$GITHUB_STEP_SUMMARY"
+            echo "No JSON output artifact was produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          uv run python - "$json_out" <<'PY'
+          import json
+          import os
+          import sys
+
+          path = sys.argv[1]
+          with open(path, encoding="utf-8") as f:
+              payload = json.load(f)
+
+          source = payload.get("source") or {}
+          lines = [
+              "## dupcanon detect-new result",
+              "",
+              "| field | value |",
+              "|---|---|",
+              f"| schema_version | `{payload.get('schema_version', '')}` |",
+              f"| repo | `{payload.get('repo', '')}` |",
+              f"| type | `{payload.get('type', '')}` |",
+              f"| item_number | `{source.get('number', '')}` |",
+              f"| verdict | `{payload.get('verdict', '')}` |",
+              f"| is_duplicate | `{payload.get('is_duplicate', '')}` |",
+              f"| confidence | `{payload.get('confidence', '')}` |",
+              f"| duplicate_of | `{payload.get('duplicate_of', '')}` |",
+              f"| provider | `{payload.get('provider', '')}` |",
+              f"| model | `{payload.get('model', '')}` |",
+              f"| run_id | `{payload.get('run_id', '')}` |",
+          ]
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload detect-new JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: detect-new-${{ steps.source.outputs.item_type }}-${{ steps.source.outputs.item_number }}
+          path: ${{ steps.run.outputs.json_out }}
+          if-no-files-found: warn

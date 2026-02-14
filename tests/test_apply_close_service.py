@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from pathlib import Path
-
 import pytest
 from rich.console import Console
 
 import dupcanon.apply_close_service as apply_close_service
-from dupcanon.approval import ApprovalCheckpoint, compute_plan_hash, write_approval_checkpoint
 from dupcanon.config import Settings
 from dupcanon.logging_config import get_logger
 from dupcanon.models import ClosePlanEntry, CloseRunRecord, ItemType
@@ -34,10 +30,10 @@ def _plan_entries() -> list[ClosePlanEntry]:
     ]
 
 
-def test_run_apply_close_applies_approved_items(monkeypatch, tmp_path) -> None:
+def test_run_apply_close_applies_plan_items(monkeypatch) -> None:
     captured: dict[str, object] = {
         "create_close_run": [],
-        "create_close_run_item": [],
+        "copy_close_run_items": [],
         "update_close_run_item_apply_result": [],
         "close_calls": [],
     }
@@ -66,10 +62,11 @@ def test_run_apply_close_applies_approved_items(monkeypatch, tmp_path) -> None:
             create_close_run.append(kwargs)
             return 900
 
-        def create_close_run_item(self, **kwargs) -> None:
-            create_close_run_item = captured["create_close_run_item"]
-            assert isinstance(create_close_run_item, list)
-            create_close_run_item.append(kwargs)
+        def copy_close_run_items(self, **kwargs) -> int:
+            copied = captured["copy_close_run_items"]
+            assert isinstance(copied, list)
+            copied.append(kwargs)
+            return len(entries)
 
         def update_close_run_item_apply_result(self, **kwargs) -> None:
             updates = captured["update_close_run_item_apply_result"]
@@ -77,9 +74,6 @@ def test_run_apply_close_applies_approved_items(monkeypatch, tmp_path) -> None:
             updates.append(kwargs)
 
     class FakeGitHubClient:
-        def fetch_maintainers(self, *, repo):
-            return {"maintainer"}
-
         def close_item_as_duplicate(self, *, repo, item_type, number: int, canonical_number: int):
             close_calls = captured["close_calls"]
             assert isinstance(close_calls, list)
@@ -96,30 +90,9 @@ def test_run_apply_close_applies_approved_items(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(apply_close_service, "Database", FakeDatabase)
     monkeypatch.setattr(apply_close_service, "GitHubClient", FakeGitHubClient)
 
-    plan_hash = compute_plan_hash(
-        repo="org/repo",
-        item_type=ItemType.ISSUE,
-        min_close=0.9,
-        items=entries,
-    )
-    approval_file = tmp_path / "approval.json"
-    write_approval_checkpoint(
-        path=approval_file,
-        checkpoint=ApprovalCheckpoint(
-            close_run_id=77,
-            repo="org/repo",
-            type=ItemType.ISSUE,
-            min_close=0.9,
-            plan_hash=plan_hash,
-            approved_by="reviewer",
-            approved_at=datetime(2026, 2, 13, 15, 0, tzinfo=UTC),
-        ),
-    )
-
     stats = apply_close_service.run_apply_close(
         settings=Settings(supabase_db_url="postgresql://localhost/db"),
         close_run_id=77,
-        approval_file=approval_file,
         yes=True,
         console=Console(),
         logger=get_logger("test"),
@@ -138,9 +111,11 @@ def test_run_apply_close_applies_approved_items(monkeypatch, tmp_path) -> None:
     assert isinstance(create_close_run, list)
     assert create_close_run[0]["mode"] == "apply"
 
-    created_items = captured["create_close_run_item"]
-    assert isinstance(created_items, list)
-    assert len(created_items) == 2
+    copied_items = captured["copy_close_run_items"]
+    assert isinstance(copied_items, list)
+    assert len(copied_items) == 1
+    assert copied_items[0]["source_close_run_id"] == 77
+    assert copied_items[0]["target_close_run_id"] == 900
 
     updates = captured["update_close_run_item_apply_result"]
     assert isinstance(updates, list)
@@ -164,16 +139,13 @@ def test_run_apply_close_requires_yes() -> None:
         apply_close_service.run_apply_close(
             settings=Settings(supabase_db_url="postgresql://localhost/db"),
             close_run_id=1,
-            approval_file=Path("approval.json"),
             yes=False,
             console=Console(),
             logger=get_logger("test"),
         )
 
 
-def test_run_apply_close_fails_on_plan_hash_mismatch(monkeypatch, tmp_path) -> None:
-    entries = _plan_entries()
-
+def test_run_apply_close_requires_plan_mode(monkeypatch) -> None:
     class FakeDatabase:
         def __init__(self, db_url: str) -> None:
             self.db_url = db_url
@@ -184,34 +156,16 @@ def test_run_apply_close_fails_on_plan_hash_mismatch(monkeypatch, tmp_path) -> N
                 repo_id=42,
                 repo_full_name="org/repo",
                 item_type=ItemType.ISSUE,
-                mode="plan",
+                mode="apply",
                 min_confidence_close=0.9,
             )
 
-        def list_close_plan_entries(self, *, close_run_id: int):
-            return entries
-
     monkeypatch.setattr(apply_close_service, "Database", FakeDatabase)
 
-    approval_file = tmp_path / "approval.json"
-    write_approval_checkpoint(
-        path=approval_file,
-        checkpoint=ApprovalCheckpoint(
-            close_run_id=99,
-            repo="org/repo",
-            type=ItemType.ISSUE,
-            min_close=0.9,
-            plan_hash="f" * 64,
-            approved_by="reviewer",
-            approved_at=datetime(2026, 2, 13, 15, 0, tzinfo=UTC),
-        ),
-    )
-
-    with pytest.raises(ValueError, match="plan_hash mismatch"):
+    with pytest.raises(ValueError, match="mode=plan"):
         apply_close_service.run_apply_close(
             settings=Settings(supabase_db_url="postgresql://localhost/db"),
             close_run_id=99,
-            approval_file=approval_file,
             yes=True,
             console=Console(),
             logger=get_logger("test"),

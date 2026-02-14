@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any
@@ -9,7 +11,6 @@ from rich.console import Console
 from rich.table import Table
 
 from dupcanon.apply_close_service import run_apply_close
-from dupcanon.approve_plan_service import run_approve_plan
 from dupcanon.artifacts import write_artifact
 from dupcanon.candidates_service import run_candidates
 from dupcanon.canonicalize_service import run_canonicalize
@@ -20,7 +21,9 @@ from dupcanon.config import (
     load_settings,
     postgres_dsn_help_text,
 )
+from dupcanon.detect_new_service import run_detect_new
 from dupcanon.embed_service import run_embed
+from dupcanon.judge_audit_service import run_judge_audit
 from dupcanon.judge_service import run_judge
 from dupcanon.logging_config import BoundLogger, configure_logging, get_logger
 from dupcanon.maintainers_service import run_maintainers
@@ -46,9 +49,9 @@ CANDIDATE_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr
 K_OPTION = typer.Option(8, "--k", help="Number of nearest neighbors to retrieve")
 MIN_SCORE_OPTION = typer.Option(0.75, "--min-score", help="Minimum similarity score")
 INCLUDE_OPTION = typer.Option(
-    StateFilter.ALL,
+    StateFilter.OPEN,
     "--include",
-    help="Include candidate item states (open, closed, all)",
+    help="Include candidate item states (open, closed, all). Default is open.",
 )
 CANDIDATES_WORKERS_OPTION = typer.Option(
     None,
@@ -59,7 +62,7 @@ JUDGE_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 JUDGE_PROVIDER_OPTION = typer.Option(
     None,
     "--provider",
-    help="Judge provider override (gemini or openai)",
+    help="Judge provider override (gemini, openai, openrouter, or openai-codex)",
 )
 JUDGE_MODEL_OPTION = typer.Option(None, "--model", help="Judge model override")
 MIN_EDGE_OPTION = typer.Option(0.85, "--min-edge", help="Minimum confidence to accept edge")
@@ -74,6 +77,66 @@ JUDGE_WORKERS_OPTION = typer.Option(
     "--workers",
     help="Judge worker concurrency override",
 )
+JUDGE_AUDIT_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
+JUDGE_AUDIT_SAMPLE_SIZE_OPTION = typer.Option(
+    100,
+    "--sample-size",
+    help="Random uniform sample size from latest fresh candidate sets",
+)
+JUDGE_AUDIT_SEED_OPTION = typer.Option(42, "--seed", help="Sampling seed")
+JUDGE_AUDIT_MIN_EDGE_OPTION = typer.Option(
+    0.85,
+    "--min-edge",
+    help="Minimum confidence required for accepted edge in both models",
+)
+JUDGE_AUDIT_CHEAP_PROVIDER_OPTION = typer.Option(
+    "gemini",
+    "--cheap-provider",
+    help="Cheap model provider (gemini, openai, openrouter, openai-codex)",
+)
+JUDGE_AUDIT_CHEAP_MODEL_OPTION = typer.Option(None, "--cheap-model", help="Cheap model")
+JUDGE_AUDIT_STRONG_PROVIDER_OPTION = typer.Option(
+    "openai",
+    "--strong-provider",
+    help="Strong model provider (gemini, openai, openrouter, openai-codex)",
+)
+JUDGE_AUDIT_STRONG_MODEL_OPTION = typer.Option(None, "--strong-model", help="Strong model")
+JUDGE_AUDIT_WORKERS_OPTION = typer.Option(
+    None,
+    "--workers",
+    help="Judge-audit worker concurrency override",
+)
+JUDGE_AUDIT_VERBOSE_OPTION = typer.Option(
+    False,
+    "--verbose",
+    help="Log per-item audit start/completion details",
+)
+JUDGE_AUDIT_DEBUG_RPC_OPTION = typer.Option(
+    False,
+    "--debug-rpc",
+    help="Print raw pi RPC stdout/stderr events for openai-codex judge calls",
+)
+DETECT_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
+DETECT_NUMBER_OPTION = typer.Option(..., "--number", help="Issue/PR number to evaluate")
+DETECT_PROVIDER_OPTION = typer.Option(
+    None,
+    "--provider",
+    help="Judge provider override (gemini, openai, openrouter, or openai-codex)",
+)
+DETECT_MODEL_OPTION = typer.Option(None, "--model", help="Judge model override")
+DETECT_K_OPTION = typer.Option(8, "--k", help="Number of nearest neighbors to retrieve")
+DETECT_MIN_SCORE_OPTION = typer.Option(0.75, "--min-score", help="Minimum similarity score")
+DETECT_MAYBE_THRESHOLD_OPTION = typer.Option(
+    0.85,
+    "--maybe-threshold",
+    help="Minimum confidence for maybe_duplicate",
+)
+DETECT_DUPLICATE_THRESHOLD_OPTION = typer.Option(
+    0.92,
+    "--duplicate-threshold",
+    help="Minimum confidence for duplicate",
+)
+DETECT_JSON_OUT_OPTION = typer.Option(None, "--json-out", help="Write JSON result to this path")
 CANONICAL_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 PLAN_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 MIN_CLOSE_OPTION = typer.Option(
@@ -86,20 +149,7 @@ MAINTAINERS_SOURCE_OPTION = typer.Option(
     "--maintainers-source",
     help="Maintainer resolution source (v1: collaborators)",
 )
-APPROVAL_FILE_OUT_OPTION = typer.Option(
-    None,
-    "--approval-file-out",
-    help="Optional output path for plan approval checkpoint file",
-)
 CLOSE_RUN_OPTION = typer.Option(..., help="Close run id")
-APPROVAL_FILE_OPTION = typer.Option(..., help="Approval checkpoint path")
-APPROVED_BY_OPTION = typer.Option(..., "--approved-by", help="Approver identity")
-APPROVED_AT_OPTION = typer.Option(
-    None,
-    "--approved-at",
-    help="Approval timestamp (ISO-8601, default: now UTC)",
-)
-FORCE_OPTION = typer.Option(False, "--force", help="Overwrite existing approval metadata")
 YES_OPTION = typer.Option(False, "--yes", help="Confirm apply-close execution")
 
 
@@ -116,6 +166,17 @@ def _bootstrap(command: str) -> tuple[Settings, str, BoundLogger]:
         artifacts_dir=str(settings.artifacts_dir),
     )
     return settings, run_id, logger
+
+
+def _default_model_for_provider(*, provider: str, settings: Settings) -> str | None:
+    normalized = provider.strip().lower()
+    if normalized == "openai":
+        return "gpt-5-mini"
+    if normalized == "openrouter":
+        return "minimax/minimax-m2.5"
+    if normalized == "openai-codex":
+        return None
+    return settings.judge_model
 
 
 def _friendly_error_message(exc: Exception) -> str:
@@ -194,6 +255,10 @@ def init() -> None:
         "SUPABASE_DB_URL is Postgres DSN": is_postgres_dsn(settings.supabase_db_url),
         "GEMINI_API_KEY (required when judge provider=gemini)": bool(settings.gemini_api_key),
         "OPENAI_API_KEY (required when judge provider=openai)": bool(settings.openai_api_key),
+        "OPENROUTER_API_KEY (required when judge provider=openrouter)": bool(
+            settings.openrouter_api_key
+        ),
+        "pi CLI on PATH (required when judge provider=openai-codex)": bool(shutil.which("pi")),
         "GITHUB_TOKEN (optional if gh auth is used)": bool(settings.github_token),
         "Artifacts dir exists": settings.artifacts_dir.exists(),
     }
@@ -501,9 +566,12 @@ def judge(
 ) -> None:
     """Judge duplicate candidates with the configured LLM provider."""
     settings, run_id, logger = _bootstrap("judge")
-    effective_provider = provider or settings.judge_provider
+    effective_provider = (provider or settings.judge_provider).strip().lower()
     if model is None:
-        effective_model = "gpt-5-mini" if effective_provider == "openai" else settings.judge_model
+        effective_model = _default_model_for_provider(
+            provider=effective_provider,
+            settings=settings,
+        )
     else:
         effective_model = model
 
@@ -554,7 +622,7 @@ def judge(
     table.add_column("Metric")
     table.add_column("Value")
     table.add_row("provider", effective_provider)
-    table.add_row("model", effective_model)
+    table.add_row("model", effective_model or "pi-default")
     table.add_row("min_edge", str(min_edge))
     table.add_row("allow_stale", str(allow_stale))
     table.add_row("rejudge", str(rejudge))
@@ -564,6 +632,175 @@ def judge(
 
     console.print(table)
     console.print(f"run_id: [bold]{run_id}[/bold]")
+
+
+@app.command("judge-audit")
+def judge_audit(
+    repo: str = REPO_OPTION,
+    item_type: ItemType = JUDGE_AUDIT_TYPE_OPTION,
+    sample_size: int = JUDGE_AUDIT_SAMPLE_SIZE_OPTION,
+    seed: int = JUDGE_AUDIT_SEED_OPTION,
+    min_edge: float = JUDGE_AUDIT_MIN_EDGE_OPTION,
+    cheap_provider: str = JUDGE_AUDIT_CHEAP_PROVIDER_OPTION,
+    cheap_model: str | None = JUDGE_AUDIT_CHEAP_MODEL_OPTION,
+    strong_provider: str = JUDGE_AUDIT_STRONG_PROVIDER_OPTION,
+    strong_model: str | None = JUDGE_AUDIT_STRONG_MODEL_OPTION,
+    workers: int | None = JUDGE_AUDIT_WORKERS_OPTION,
+    verbose: bool = JUDGE_AUDIT_VERBOSE_OPTION,
+    debug_rpc: bool = JUDGE_AUDIT_DEBUG_RPC_OPTION,
+) -> None:
+    """Run sampled cheap-vs-strong judge audit on open items."""
+    settings, run_id, logger = _bootstrap("judge-audit")
+
+    try:
+        stats = run_judge_audit(
+            settings=settings,
+            repo_value=repo,
+            item_type=item_type,
+            sample_size=sample_size,
+            sample_seed=seed,
+            min_edge=min_edge,
+            cheap_provider=cheap_provider,
+            cheap_model=cheap_model,
+            strong_provider=strong_provider,
+            strong_model=strong_model,
+            worker_concurrency=workers,
+            verbose=verbose,
+            debug_rpc=debug_rpc,
+            console=console,
+            logger=logger,
+        )
+    except Exception as exc:  # noqa: BLE001
+        artifact_path = _persist_command_failure_artifact(
+            settings=settings,
+            logger=logger,
+            command="judge-audit",
+            error=exc,
+            context={
+                "repo": repo,
+                "type": item_type.value,
+                "sample_size": sample_size,
+                "seed": seed,
+                "min_edge": min_edge,
+                "cheap_provider": cheap_provider,
+                "cheap_model": cheap_model,
+                "strong_provider": strong_provider,
+                "strong_model": strong_model,
+                "workers": workers,
+                "verbose": verbose,
+                "debug_rpc": debug_rpc,
+            },
+        )
+        logger.error(
+            "judge_audit.failed",
+            stage="judge_audit",
+            status="error",
+            error_class=type(exc).__name__,
+            artifact_path=artifact_path,
+        )
+        console.print(f"[red]judge-audit failed:[/red] {_friendly_error_message(exc)}")
+        if artifact_path is not None:
+            console.print(f"artifact: [bold]{artifact_path}[/bold]")
+        raise typer.Exit(code=1) from exc
+
+    table = Table(title="judge-audit summary")
+    table.add_column("Metric")
+    table.add_column("Value")
+    table.add_row("sample_size", str(sample_size))
+    table.add_row("seed", str(seed))
+    table.add_row("min_edge", str(min_edge))
+    table.add_row("cheap_provider", cheap_provider)
+    table.add_row("cheap_model", cheap_model or "default")
+    table.add_row("strong_provider", strong_provider)
+    table.add_row("strong_model", strong_model or "default")
+    table.add_row("workers", str(workers or settings.judge_worker_concurrency))
+    table.add_row("verbose", str(verbose))
+    table.add_row("debug_rpc", str(debug_rpc))
+    for key, value in stats.model_dump().items():
+        table.add_row(key, str(value))
+
+    console.print(table)
+    console.print(f"run_id: [bold]{run_id}[/bold]")
+
+
+@app.command("detect-new")
+def detect_new(
+    repo: str = REPO_OPTION,
+    item_type: ItemType = DETECT_TYPE_OPTION,
+    number: int = DETECT_NUMBER_OPTION,
+    provider: str | None = DETECT_PROVIDER_OPTION,
+    model: str | None = DETECT_MODEL_OPTION,
+    k: int = DETECT_K_OPTION,
+    min_score: float = DETECT_MIN_SCORE_OPTION,
+    maybe_threshold: float = DETECT_MAYBE_THRESHOLD_OPTION,
+    duplicate_threshold: float = DETECT_DUPLICATE_THRESHOLD_OPTION,
+    json_out: Path | None = DETECT_JSON_OUT_OPTION,
+) -> None:
+    """Run online duplicate detection for a single new issue/PR."""
+    settings, run_id, logger = _bootstrap("detect-new")
+    effective_provider = (provider or settings.judge_provider).strip().lower()
+    if model is None:
+        effective_model = _default_model_for_provider(
+            provider=effective_provider,
+            settings=settings,
+        )
+    else:
+        effective_model = model
+
+    try:
+        result = run_detect_new(
+            settings=settings,
+            repo_value=repo,
+            item_type=item_type,
+            number=number,
+            provider=effective_provider,
+            model=effective_model,
+            k=k,
+            min_score=min_score,
+            maybe_threshold=maybe_threshold,
+            duplicate_threshold=duplicate_threshold,
+            run_id=run_id,
+            logger=logger,
+        )
+    except Exception as exc:  # noqa: BLE001
+        artifact_path = _persist_command_failure_artifact(
+            settings=settings,
+            logger=logger,
+            command="detect-new",
+            error=exc,
+            context={
+                "repo": repo,
+                "type": item_type.value,
+                "number": number,
+                "provider": effective_provider,
+                "model": effective_model,
+                "k": k,
+                "min_score": min_score,
+                "maybe_threshold": maybe_threshold,
+                "duplicate_threshold": duplicate_threshold,
+                "json_out": str(json_out) if json_out is not None else None,
+            },
+        )
+        logger.error(
+            "detect_new.failed",
+            stage="detect_new",
+            status="error",
+            error_class=type(exc).__name__,
+            artifact_path=artifact_path,
+        )
+        console.print(f"[red]detect-new failed:[/red] {_friendly_error_message(exc)}")
+        if artifact_path is not None:
+            console.print(f"artifact: [bold]{artifact_path}[/bold]")
+        raise typer.Exit(code=1) from exc
+
+    payload_json = json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True)
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(payload_json + "\n", encoding="utf-8")
+
+    console.print(payload_json)
+    if json_out is not None:
+        console.print(f"json_out: [bold]{json_out}[/bold]")
 
 
 @app.command()
@@ -622,7 +859,6 @@ def plan_close(
     min_close: float = MIN_CLOSE_OPTION,
     maintainers_source: str = MAINTAINERS_SOURCE_OPTION,
     dry_run: bool = DRY_RUN_OPTION,
-    approval_file_out: Path | None = APPROVAL_FILE_OUT_OPTION,
 ) -> None:
     """Build a close plan with guardrails."""
     settings, run_id, logger = _bootstrap("plan-close")
@@ -635,7 +871,6 @@ def plan_close(
             min_close=min_close,
             maintainers_source=maintainers_source,
             dry_run=dry_run,
-            approval_file_out=approval_file_out,
             console=console,
             logger=logger,
         )
@@ -651,7 +886,6 @@ def plan_close(
                 "min_close": min_close,
                 "maintainers_source": maintainers_source,
                 "dry_run": dry_run,
-                "approval_file_out": str(approval_file_out) if approval_file_out else None,
             },
         )
         logger.error(
@@ -671,69 +905,8 @@ def plan_close(
     table.add_column("Value")
     table.add_row("min_close", str(min_close))
     table.add_row("maintainers_source", maintainers_source)
-    table.add_row("approval_file_out", str(approval_file_out) if approval_file_out else "auto")
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))
-
-    console.print(table)
-    console.print(f"run_id: [bold]{run_id}[/bold]")
-
-
-@app.command("approve-plan")
-def approve_plan(
-    approval_file: Path = APPROVAL_FILE_OPTION,
-    approved_by: str = APPROVED_BY_OPTION,
-    approved_at: str | None = APPROVED_AT_OPTION,
-    force: bool = FORCE_OPTION,
-) -> None:
-    """Populate approval metadata in a plan checkpoint file."""
-    settings, run_id, logger = _bootstrap("approve-plan")
-
-    try:
-        checkpoint = run_approve_plan(
-            approval_file=approval_file,
-            approved_by=approved_by,
-            approved_at=approved_at,
-            force=force,
-            logger=logger,
-        )
-    except Exception as exc:  # noqa: BLE001
-        artifact_path = _persist_command_failure_artifact(
-            settings=settings,
-            logger=logger,
-            command="approve-plan",
-            error=exc,
-            context={
-                "approval_file": str(approval_file),
-                "approved_by": approved_by,
-                "approved_at": approved_at,
-                "force": force,
-            },
-        )
-        logger.error(
-            "approve_plan.failed",
-            stage="approve_plan",
-            status="error",
-            error_class=type(exc).__name__,
-            artifact_path=artifact_path,
-        )
-        console.print(f"[red]approve-plan failed:[/red] {_friendly_error_message(exc)}")
-        if artifact_path is not None:
-            console.print(f"artifact: [bold]{artifact_path}[/bold]")
-        raise typer.Exit(code=1) from exc
-
-    table = Table(title="approve-plan summary")
-    table.add_column("Metric")
-    table.add_column("Value")
-    table.add_row("approval_file", str(approval_file))
-    table.add_row("close_run_id", str(checkpoint.close_run_id))
-    table.add_row("repo", checkpoint.repo)
-    table.add_row("type", checkpoint.type.value)
-    table.add_row("approved_by", str(checkpoint.approved_by))
-    table.add_row(
-        "approved_at",
-        checkpoint.approved_at.isoformat() if checkpoint.approved_at is not None else "None",
-    )
 
     console.print(table)
     console.print(f"run_id: [bold]{run_id}[/bold]")
@@ -742,7 +915,6 @@ def approve_plan(
 @app.command("apply-close")
 def apply_close(
     close_run: int = CLOSE_RUN_OPTION,
-    approval_file: Path = APPROVAL_FILE_OPTION,
     yes: bool = YES_OPTION,
 ) -> None:
     """Apply a reviewed close plan."""
@@ -752,7 +924,6 @@ def apply_close(
         stats = run_apply_close(
             settings=settings,
             close_run_id=close_run,
-            approval_file=approval_file,
             yes=yes,
             console=console,
             logger=logger,
@@ -765,7 +936,6 @@ def apply_close(
             error=exc,
             context={
                 "close_run": close_run,
-                "approval_file": str(approval_file),
                 "yes": yes,
             },
         )
@@ -785,7 +955,6 @@ def apply_close(
     table.add_column("Metric")
     table.add_column("Value")
     table.add_row("close_run", str(close_run))
-    table.add_row("approval_file", str(approval_file))
     table.add_row("yes", str(yes))
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))

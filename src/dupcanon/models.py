@@ -82,6 +82,14 @@ class ItemPayload(BaseModel):
     closed_at_gh: datetime | None = None
 
 
+class PullRequestFileChange(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    status: str | None = None
+    patch: str | None = None
+
+
 class SyncStats(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -186,6 +194,28 @@ class JudgeDecision(BaseModel):
     duplicate_of: int | None = None
     confidence: float
     reasoning: str
+    relation: (
+        Literal[
+            "same_instance",
+            "related_followup",
+            "partial_overlap",
+            "different",
+        ]
+        | None
+    ) = None
+    root_cause_match: Literal["same", "adjacent", "different"] | None = None
+    scope_relation: (
+        Literal[
+            "same_scope",
+            "source_subset",
+            "source_superset",
+            "partial_overlap",
+            "different_scope",
+        ]
+        | None
+    ) = None
+    path_match: Literal["same", "different", "unknown"] | None = None
+    certainty: Literal["sure", "unsure"] | None = None
 
     @field_validator("confidence")
     @classmethod
@@ -235,6 +265,113 @@ class JudgeStats(BaseModel):
     failed: int = 0
 
 
+class JudgeAuditStats(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    audit_run_id: int | None = None
+    sample_size_requested: int = 0
+    sample_size_actual: int = 0
+    compared_count: int = 0
+    tp: int = 0
+    fp: int = 0
+    fn: int = 0
+    tn: int = 0
+    conflict: int = 0
+    incomplete: int = 0
+    failed: int = 0
+
+
+class CandidateItemContext(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    item_id: int
+    number: int
+    state: StateFilter
+    title: str
+    body: str | None = None
+
+
+class DetectVerdict(StrEnum):
+    DUPLICATE = "duplicate"
+    MAYBE_DUPLICATE = "maybe_duplicate"
+    NOT_DUPLICATE = "not_duplicate"
+
+
+class DetectSource(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    number: int
+    title: str
+
+
+class DetectTopMatch(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    number: int
+    score: float
+    state: StateFilter
+    title: str
+
+
+class DetectNewResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: str = "v1"
+    repo: str
+    type: ItemType
+    source: DetectSource
+    verdict: DetectVerdict
+    is_duplicate: bool
+    confidence: float
+    duplicate_of: int | None = None
+    reasoning: str
+    top_matches: list[DetectTopMatch] = Field(default_factory=list)
+    provider: str
+    model: str
+    run_id: str
+    timestamp: datetime
+    error_class: str | None = None
+    reason: str | None = None
+
+    @field_validator("confidence")
+    @classmethod
+    def validate_confidence(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            msg = "confidence must be between 0 and 1"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("reasoning")
+    @classmethod
+    def validate_reasoning(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            msg = "reasoning cannot be blank"
+            raise ValueError(msg)
+        return text
+
+    @model_validator(mode="after")
+    def validate_consistency(self) -> DetectNewResult:
+        if self.verdict == DetectVerdict.DUPLICATE:
+            if not self.is_duplicate:
+                msg = "is_duplicate must be true when verdict is duplicate"
+                raise ValueError(msg)
+            if self.duplicate_of is None or self.duplicate_of <= 0:
+                msg = "duplicate_of must be set when verdict is duplicate"
+                raise ValueError(msg)
+            return self
+
+        if self.is_duplicate:
+            msg = "is_duplicate must be false when verdict is not duplicate"
+            raise ValueError(msg)
+
+        if self.verdict == DetectVerdict.NOT_DUPLICATE and self.duplicate_of is not None:
+            msg = "duplicate_of must be null when verdict is not_duplicate"
+            raise ValueError(msg)
+
+        return self
+
+
 class CanonicalNode(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -242,6 +379,8 @@ class CanonicalNode(BaseModel):
     number: int
     state: StateFilter
     author_login: str | None = None
+    title: str | None = None
+    body: str | None = None
     comment_count: int = 0
     review_comment_count: int = 0
     created_at_gh: datetime | None = None
@@ -256,6 +395,7 @@ class CanonicalizeStats(BaseModel):
     canonical_items: int = 0
     mappings: int = 0
     open_preferred_clusters: int = 0
+    english_preferred_clusters: int = 0
     maintainer_preferred_clusters: int = 0
     failed: int = 0
 
@@ -267,6 +407,8 @@ class PlanCloseItem(BaseModel):
     number: int
     state: StateFilter
     author_login: str | None = None
+    title: str | None = None
+    body: str | None = None
     assignees: list[str] = Field(default_factory=list)
     assignees_unknown: bool = False
     comment_count: int = 0
@@ -287,8 +429,6 @@ class PlanCloseStats(BaseModel):
 
     close_run_id: int | None = None
     dry_run: bool = False
-    plan_hash: str | None = None
-    approval_file: str | None = None
     accepted_edges: int = 0
     clusters: int = 0
     considered: int = 0

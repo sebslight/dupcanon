@@ -1,27 +1,18 @@
 from __future__ import annotations
 
-from pathlib import Path
 from time import perf_counter
 from typing import Any
 
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-from dupcanon.approval import ApprovalCheckpoint, compute_plan_hash, write_approval_checkpoint
 from dupcanon.artifacts import write_artifact
 from dupcanon.canonicalize_service import _components_from_edges, _select_canonical
 from dupcanon.config import Settings
 from dupcanon.database import Database, utc_now
 from dupcanon.github_client import GitHubClient
 from dupcanon.logging_config import BoundLogger
-from dupcanon.models import (
-    CanonicalNode,
-    ClosePlanEntry,
-    ItemType,
-    PlanCloseStats,
-    RepoRef,
-    StateFilter,
-)
+from dupcanon.models import CanonicalNode, ItemType, PlanCloseStats, RepoRef, StateFilter
 from dupcanon.sync_service import require_postgres_dsn
 
 _CREATED_BY = "dupcanon/plan-close"
@@ -52,23 +43,6 @@ def _persist_failure_artifact(
     return str(artifact_path)
 
 
-def _write_approval_checkpoint(
-    *,
-    settings: Settings,
-    checkpoint: ApprovalCheckpoint,
-    approval_file_out: Path | None,
-) -> Path:
-    if approval_file_out is not None:
-        return write_approval_checkpoint(path=approval_file_out, checkpoint=checkpoint)
-
-    return write_artifact(
-        artifacts_dir=settings.artifacts_dir,
-        command="plan-close",
-        category="approval_checkpoint",
-        payload=checkpoint.model_dump(mode="json"),
-    )
-
-
 def run_plan_close(
     *,
     settings: Settings,
@@ -77,7 +51,6 @@ def run_plan_close(
     min_close: float,
     maintainers_source: str,
     dry_run: bool,
-    approval_file_out: Path | None = None,
     console: Console,
     logger: BoundLogger,
 ) -> PlanCloseStats:
@@ -106,7 +79,6 @@ def run_plan_close(
         min_close=min_close,
         maintainers_source=normalized_maintainers_source,
         dry_run=dry_run,
-        approval_file_out=str(approval_file_out) if approval_file_out is not None else None,
     )
 
     db = Database(db_url)
@@ -154,7 +126,6 @@ def run_plan_close(
     skipped_maintainer_assignee = 0
     skipped_uncertain_maintainer_identity = 0
     failed = 0
-    planned_entries: list[ClosePlanEntry] = []
 
     stage_started = perf_counter()
     progress = Progress(
@@ -178,6 +149,8 @@ def run_plan_close(
                         number=item.number,
                         state=item.state,
                         author_login=item.author_login,
+                        title=item.title,
+                        body=item.body,
                         comment_count=item.comment_count,
                         review_comment_count=item.review_comment_count,
                         created_at_gh=item.created_at_gh,
@@ -190,7 +163,6 @@ def run_plan_close(
                     maintainer_logins=maintainer_logins,
                 )
                 canonical_item_id = selection.canonical.item_id
-                canonical_number = selection.canonical.number
 
                 for item in component_items:
                     if item.item_id == canonical_item_id:
@@ -233,17 +205,6 @@ def run_plan_close(
                             skip_reason = "low_confidence"
                             skipped_low_confidence += 1
 
-                    planned_entries.append(
-                        ClosePlanEntry(
-                            item_id=item.item_id,
-                            item_number=item.number,
-                            canonical_item_id=canonical_item_id,
-                            canonical_number=canonical_number,
-                            action=action,
-                            skip_reason=skip_reason,
-                        )
-                    )
-
                     if action == "close":
                         close_actions += 1
                     else:
@@ -285,43 +246,9 @@ def run_plan_close(
             finally:
                 progress.advance(task)
 
-    plan_hash: str | None = None
-    approval_file: str | None = None
-    if close_run_id is not None:
-        plan_hash = compute_plan_hash(
-            repo=repo.full_name(),
-            item_type=item_type,
-            min_close=min_close,
-            items=planned_entries,
-        )
-        checkpoint = ApprovalCheckpoint(
-            close_run_id=close_run_id,
-            repo=repo.full_name(),
-            type=item_type,
-            min_close=min_close,
-            plan_hash=plan_hash,
-            approved_by=None,
-            approved_at=None,
-        )
-        checkpoint_path = _write_approval_checkpoint(
-            settings=settings,
-            checkpoint=checkpoint,
-            approval_file_out=approval_file_out,
-        )
-        approval_file = str(checkpoint_path)
-        logger.info(
-            "plan_close.approval_checkpoint_written",
-            status="ok",
-            close_run_id=close_run_id,
-            approval_file=approval_file,
-            plan_hash=plan_hash,
-        )
-
     stats = PlanCloseStats(
         close_run_id=close_run_id,
         dry_run=dry_run,
-        plan_hash=plan_hash,
-        approval_file=approval_file,
         accepted_edges=len(edges),
         clusters=len(components),
         considered=considered,

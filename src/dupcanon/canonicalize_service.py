@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,7 +23,57 @@ from dupcanon.sync_service import require_postgres_dsn
 class CanonicalSelection:
     canonical: CanonicalNode
     used_open_filter: bool
+    used_english_preference: bool
     used_maintainer_preference: bool
+
+
+_ENGLISH_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "with",
+}
+_LATIN_WORD_RE = re.compile(r"[A-Za-z]+")
+
+
+def _is_likely_english(node: CanonicalNode) -> bool:
+    parts = [node.title, node.body]
+    text = "\n".join(part for part in parts if isinstance(part, str) and part.strip())
+    if not text:
+        return False
+
+    words = [word.lower() for word in _LATIN_WORD_RE.findall(text)]
+    if len(words) < 2:
+        return False
+
+    alpha_chars = [char for char in text if char.isalpha()]
+    if not alpha_chars:
+        return False
+
+    latin_chars = [char for char in alpha_chars if ("a" <= char.lower() <= "z")]
+    latin_ratio = len(latin_chars) / len(alpha_chars)
+    if len(alpha_chars) >= 8 and latin_ratio < 0.6:
+        return False
+
+    stopword_hits = sum(1 for word in words if word in _ENGLISH_STOPWORDS)
+    return stopword_hits >= 1
 
 
 def _activity_score(*, node: CanonicalNode, item_type: ItemType) -> int:
@@ -54,6 +105,11 @@ def _select_canonical(
         [node for node in nodes if node.state == StateFilter.OPEN] if has_open else list(nodes)
     )
 
+    eligible_english = [node for node in eligible if _is_likely_english(node)]
+    used_english_preference = bool(eligible_english)
+    if used_english_preference:
+        eligible = eligible_english
+
     eligible_maintainer = [
         node
         for node in eligible
@@ -76,6 +132,7 @@ def _select_canonical(
     return CanonicalSelection(
         canonical=canonical,
         used_open_filter=has_open,
+        used_english_preference=used_english_preference,
         used_maintainer_preference=used_maintainer_preference,
     )
 
@@ -172,6 +229,7 @@ def run_canonicalize(
     components = _components_from_edges(edges)
 
     open_preferred_clusters = 0
+    english_preferred_clusters = 0
     maintainer_preferred_clusters = 0
     mappings = 0
     failed = 0
@@ -200,6 +258,8 @@ def run_canonicalize(
 
                 if selection.used_open_filter:
                     open_preferred_clusters += 1
+                if selection.used_english_preference:
+                    english_preferred_clusters += 1
                 if selection.used_maintainer_preference:
                     maintainer_preferred_clusters += 1
 
@@ -236,6 +296,7 @@ def run_canonicalize(
         canonical_items=len(components),
         mappings=mappings,
         open_preferred_clusters=open_preferred_clusters,
+        english_preferred_clusters=english_preferred_clusters,
         maintainer_preferred_clusters=maintainer_preferred_clusters,
         failed=failed,
     )

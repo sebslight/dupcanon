@@ -208,6 +208,44 @@ def test_fetch_pulls_with_since_uses_server_side_created_filter(monkeypatch) -> 
     assert captured["jq_expression"] == ".items[]"
 
 
+def test_fetch_pull_request_files_uses_paginated_endpoint(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_collect(self, path, *, params, row_mapper, jq_expression=".[]", on_batch_count=None):
+        captured["path"] = path
+        captured["params"] = params
+        captured["jq_expression"] = jq_expression
+
+        rows = [
+            {
+                "filename": "src/main.py",
+                "status": "modified",
+                "patch": "@@ -1 +1 @@\n-old\n+new",
+            },
+            {
+                "filename": "assets/logo.png",
+                "status": "modified",
+            },
+        ]
+        return [value for row in rows if (value := row_mapper(row)) is not None]
+
+    monkeypatch.setattr(GitHubClient, "_gh_api_paginated_collect", fake_collect)
+
+    client = GitHubClient(max_attempts=1)
+    files = client.fetch_pull_request_files(repo=RepoRef.parse("org/repo"), number=12)
+
+    assert len(files) == 2
+    assert files[0].path == "src/main.py"
+    assert files[0].patch is not None
+    assert files[1].path == "assets/logo.png"
+    assert files[1].patch is None
+    assert captured["path"] == "repos/org/repo/pulls/12/files"
+    params = captured["params"]
+    assert isinstance(params, dict)
+    assert params["per_page"] == 100
+    assert captured["jq_expression"] == ".[]"
+
+
 def test_fetch_maintainers_filters_by_permissions(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

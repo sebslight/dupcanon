@@ -17,6 +17,8 @@ def _node(
     state: StateFilter,
     author_login: str | None,
     comment_count: int,
+    title: str | None = None,
+    body: str | None = None,
     review_comment_count: int = 0,
     created_at_gh: datetime | None = None,
 ) -> CanonicalNode:
@@ -25,6 +27,8 @@ def _node(
         number=number,
         state=state,
         author_login=author_login,
+        title=title,
+        body=body,
         comment_count=comment_count,
         review_comment_count=review_comment_count,
         created_at_gh=created_at_gh,
@@ -67,7 +71,44 @@ def test_select_canonical_prefers_open_then_maintainer() -> None:
 
     assert selection.canonical.item_id == 2
     assert selection.used_open_filter is True
+    assert selection.used_english_preference is False
     assert selection.used_maintainer_preference is True
+
+
+def test_select_canonical_prefers_english_when_available() -> None:
+    nodes = [
+        _node(
+            item_id=1,
+            number=101,
+            state=StateFilter.OPEN,
+            author_login="contributor",
+            comment_count=20,
+            title="Error al iniciar sesión en Linux",
+            body="No puedo iniciar sesión después de actualizar.",
+            created_at_gh=datetime(2026, 2, 1, tzinfo=UTC),
+        ),
+        _node(
+            item_id=2,
+            number=102,
+            state=StateFilter.OPEN,
+            author_login="contributor",
+            comment_count=1,
+            title="Login fails after upgrade",
+            body="This issue happens after updating to the latest version.",
+            created_at_gh=datetime(2026, 2, 2, tzinfo=UTC),
+        ),
+    ]
+
+    selection = canonicalize_service._select_canonical(
+        nodes=nodes,
+        item_type=ItemType.ISSUE,
+        maintainer_logins=set(),
+    )
+
+    assert selection.canonical.item_id == 2
+    assert selection.used_open_filter is True
+    assert selection.used_english_preference is True
+    assert selection.used_maintainer_preference is False
 
 
 def test_select_canonical_falls_back_to_activity_created_number() -> None:
@@ -106,6 +147,7 @@ def test_select_canonical_falls_back_to_activity_created_number() -> None:
 
     assert selection.canonical.item_id == 11
     assert selection.used_open_filter is False
+    assert selection.used_english_preference is False
     assert selection.used_maintainer_preference is False
 
 
@@ -180,5 +222,6 @@ def test_run_canonicalize_aggregates_cluster_stats(monkeypatch) -> None:
     assert stats.canonical_items == 2
     assert stats.mappings == 3
     assert stats.open_preferred_clusters == 1
+    assert stats.english_preferred_clusters == 0
     assert stats.maintainer_preferred_clusters == 2
     assert stats.failed == 0

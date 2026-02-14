@@ -11,7 +11,14 @@ from json import JSONDecodeError
 from typing import Any, TypeVar
 from urllib.parse import urlencode
 
-from dupcanon.models import ItemPayload, ItemType, RepoMetadata, RepoRef, StateFilter
+from dupcanon.models import (
+    ItemPayload,
+    ItemType,
+    PullRequestFileChange,
+    RepoMetadata,
+    RepoRef,
+    StateFilter,
+)
 
 _HTTP_STATUS_RE = re.compile(r"HTTP\s+(?P<code>\d{3})")
 _T = TypeVar("_T")
@@ -481,6 +488,31 @@ query($owner:String!,$name:String!,$endCursor:String) {{
         pr = self._gh_api(f"repos/{repo.full_name()}/pulls/{number}")
         return self._to_pr_payload(pr, issue_like=issue_like)
 
+    def fetch_pull_request_files(
+        self, *, repo: RepoRef, number: int
+    ) -> list[PullRequestFileChange]:
+        def to_file_change(row: dict[str, Any]) -> PullRequestFileChange | None:
+            filename = row.get("filename")
+            if not isinstance(filename, str) or not filename:
+                return None
+
+            status = row.get("status")
+            if not isinstance(status, str):
+                status = None
+
+            patch = row.get("patch")
+            if not isinstance(patch, str):
+                patch = None
+
+            return PullRequestFileChange(path=filename, status=status, patch=patch)
+
+        return self._gh_api_paginated_collect(
+            f"repos/{repo.full_name()}/pulls/{number}/files",
+            params={"per_page": 100},
+            row_mapper=to_file_change,
+            jq_expression=".[]",
+        )
+
     def fetch_maintainers(self, *, repo: RepoRef) -> set[str]:
         def to_maintainer_login(row: dict[str, Any]) -> str | None:
             login = row.get("login")
@@ -543,8 +575,7 @@ query($owner:String!,$name:String!,$endCursor:String) {{
     ) -> dict[str, Any]:
         item_command = "issue" if item_type == ItemType.ISSUE else "pr"
         comment = (
-            f"Closing as duplicate of #{canonical_number}. "
-            "If this is incorrect, please contact us."
+            f"Closing as duplicate of #{canonical_number}. If this is incorrect, please contact us."
         )
 
         stdout, stderr = self._run_gh_command_with_retry(

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 from time import perf_counter
 from typing import Any
 
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-from dupcanon.approval import compute_plan_hash, load_approval_checkpoint
 from dupcanon.artifacts import write_artifact
 from dupcanon.config import Settings
 from dupcanon.database import Database, utc_now
@@ -47,7 +45,6 @@ def run_apply_close(
     *,
     settings: Settings,
     close_run_id: int,
-    approval_file: Path,
     yes: bool,
     console: Console,
     logger: BoundLogger,
@@ -58,101 +55,82 @@ def run_apply_close(
         msg = "--yes is required to apply close actions"
         raise ValueError(msg)
 
-    checkpoint = load_approval_checkpoint(path=approval_file)
-    if checkpoint.approved_by is None or checkpoint.approved_at is None:
-        msg = "approval checkpoint must include approved_by and approved_at"
-        raise ValueError(msg)
-
     db_url = require_postgres_dsn(settings.supabase_db_url)
     db = Database(db_url)
-
-    run_record = db.get_close_run_record(close_run_id=close_run_id)
-    if run_record is None:
-        msg = f"close_run {close_run_id} not found"
-        raise ValueError(msg)
-    if run_record.mode != "plan":
-        msg = f"close_run {close_run_id} must be mode=plan"
-        raise ValueError(msg)
-
-    repo_ref = RepoRef.parse(run_record.repo_full_name)
-    logger = logger.bind(
-        repo=repo_ref.full_name(),
-        type=run_record.item_type.value,
-        stage="apply_close",
-    )
-
-    if checkpoint.close_run_id != close_run_id:
-        msg = (
-            f"approval checkpoint close_run_id={checkpoint.close_run_id} "
-            f"does not match --close-run={close_run_id}"
-        )
-        raise ValueError(msg)
-    if checkpoint.repo.lower() != repo_ref.full_name().lower():
-        msg = (
-            f"approval checkpoint repo={checkpoint.repo} "
-            f"does not match close_run repo={repo_ref.full_name()}"
-        )
-        raise ValueError(msg)
-    if checkpoint.type != run_record.item_type:
-        msg = (
-            f"approval checkpoint type={checkpoint.type.value} "
-            f"does not match close_run type={run_record.item_type.value}"
-        )
-        raise ValueError(msg)
-
-    min_close = round(run_record.min_confidence_close, 6)
-    if round(checkpoint.min_close, 6) != min_close:
-        msg = (
-            f"approval checkpoint min_close={checkpoint.min_close} "
-            f"does not match close_run min_close={run_record.min_confidence_close}"
-        )
-        raise ValueError(msg)
-
-    plan_entries = db.list_close_plan_entries(close_run_id=close_run_id)
-    plan_hash = compute_plan_hash(
-        repo=repo_ref.full_name(),
-        item_type=run_record.item_type,
-        min_close=run_record.min_confidence_close,
-        items=plan_entries,
-    )
-    if checkpoint.plan_hash != plan_hash:
-        msg = (
-            f"approval checkpoint plan_hash mismatch: expected {plan_hash}, "
-            f"got {checkpoint.plan_hash}"
-        )
-        raise ValueError(msg)
 
     logger.info(
         "apply_close.start",
         status="started",
         close_run_id=close_run_id,
-        approval_file=str(approval_file),
-        approved_by=checkpoint.approved_by,
-        approved_at=checkpoint.approved_at.isoformat(),
-        plan_hash=plan_hash,
     )
 
-    gh = GitHubClient()
-    _ = gh.fetch_maintainers(repo=repo_ref)
-
-    apply_close_run_id = db.create_close_run(
-        repo_id=run_record.repo_id,
-        item_type=run_record.item_type,
-        mode="apply",
-        min_confidence_close=run_record.min_confidence_close,
-        created_by=_CREATED_BY,
-        created_at=utc_now(),
+    init_started = perf_counter()
+    init_progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
     )
 
-    for entry in plan_entries:
-        db.create_close_run_item(
-            close_run_id=apply_close_run_id,
-            item_id=entry.item_id,
-            canonical_item_id=entry.canonical_item_id,
-            action=entry.action,
-            skip_reason=entry.skip_reason,
+    with init_progress:
+        init_task = init_progress.add_task("Initializing apply-close", total=4)
+
+        run_record = db.get_close_run_record(close_run_id=close_run_id)
+        if run_record is None:
+            msg = f"close_run {close_run_id} not found"
+            raise ValueError(msg)
+        if run_record.mode != "plan":
+            msg = f"close_run {close_run_id} must be mode=plan"
+            raise ValueError(msg)
+        init_progress.advance(init_task)
+
+        repo_ref = RepoRef.parse(run_record.repo_full_name)
+        logger = logger.bind(
+            repo=repo_ref.full_name(),
+            type=run_record.item_type.value,
+            stage="apply_close",
+        )
+        plan_entries = db.list_close_plan_entries(close_run_id=close_run_id)
+        init_progress.advance(init_task)
+
+        gh = GitHubClient()
+        apply_close_run_id = db.create_close_run(
+            repo_id=run_record.repo_id,
+            item_type=run_record.item_type,
+            mode="apply",
+            min_confidence_close=run_record.min_confidence_close,
+            created_by=_CREATED_BY,
             created_at=utc_now(),
         )
+        init_progress.advance(init_task)
+
+        copied_items = db.copy_close_run_items(
+            source_close_run_id=close_run_id,
+            target_close_run_id=apply_close_run_id,
+            created_at=utc_now(),
+        )
+        init_progress.advance(init_task)
+
+    if copied_items != len(plan_entries):
+        logger.warning(
+            "apply_close.copy_count_mismatch",
+            status="warn",
+            expected=len(plan_entries),
+            copied=copied_items,
+            close_run_id=close_run_id,
+            apply_close_run_id=apply_close_run_id,
+        )
+
+    logger.info(
+        "apply_close.initialization_complete",
+        status="ok",
+        close_run_id=close_run_id,
+        apply_close_run_id=apply_close_run_id,
+        planned_items=len(plan_entries),
+        duration_ms=int((perf_counter() - init_started) * 1000),
+    )
 
     close_entries = [entry for entry in plan_entries if entry.action == "close"]
     attempted = 0
