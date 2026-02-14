@@ -1241,4 +1241,4 @@ def test_run_judge_openai_codex_provider_works_without_api_key(monkeypatch) -> N
 
     assert stats.judged == 1
     assert stats.accepted_edges == 1
-    assert captured["model"] == ""
+    assert captured["model"] == "gpt-5.1-codex-mini"

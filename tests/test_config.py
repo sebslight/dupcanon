@@ -16,6 +16,7 @@ def test_load_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
     monkeypatch.setenv("DUPCANON_ARTIFACTS_DIR", str(artifacts_dir))
     monkeypatch.setenv("DUPCANON_LOG_LEVEL", "debug")
+    monkeypatch.setenv("DUPCANON_EMBEDDING_PROVIDER", "gemini")
     monkeypatch.setenv("DUPCANON_EMBEDDING_MODEL", "gemini-embedding-001")
     monkeypatch.setenv("DUPCANON_EMBEDDING_DIM", "768")
     monkeypatch.setenv("DUPCANON_EMBED_BATCH_SIZE", "64")
@@ -34,6 +35,7 @@ def test_load_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert settings.github_token == "gh-token"
     assert settings.artifacts_dir == artifacts_dir
     assert settings.log_level == "DEBUG"
+    assert settings.embedding_provider == "gemini"
     assert settings.embedding_model == "gemini-embedding-001"
     assert settings.embedding_dim == 768
     assert settings.embed_batch_size == 64
@@ -52,6 +54,7 @@ def test_load_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("DUPCANON_ARTIFACTS_DIR", raising=False)
     monkeypatch.delenv("DUPCANON_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("DUPCANON_EMBEDDING_PROVIDER", raising=False)
     monkeypatch.delenv("DUPCANON_EMBEDDING_MODEL", raising=False)
     monkeypatch.delenv("DUPCANON_EMBEDDING_DIM", raising=False)
     monkeypatch.delenv("DUPCANON_EMBED_BATCH_SIZE", raising=False)
@@ -70,12 +73,13 @@ def test_load_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert settings.github_token is None
     assert str(settings.artifacts_dir) == ".local/artifacts"
     assert settings.log_level == "INFO"
-    assert settings.embedding_model == "gemini-embedding-001"
+    assert settings.embedding_provider == "openai"
+    assert settings.embedding_model == "text-embedding-3-large"
     assert settings.embedding_dim == 768
     assert settings.embed_batch_size == 32
     assert settings.embed_worker_concurrency == 2
-    assert settings.judge_provider == "gemini"
-    assert settings.judge_model == "gemini-3-flash-preview"
+    assert settings.judge_provider == "openai-codex"
+    assert settings.judge_model == "gpt-5.1-codex-mini"
     assert settings.judge_worker_concurrency == 4
     assert settings.candidate_worker_concurrency == 4
 
@@ -89,6 +93,21 @@ def test_is_postgres_dsn() -> None:
 
 def test_embedding_dim_locked_to_v1(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DUPCANON_EMBEDDING_DIM", "1024")
+
+    with pytest.raises(ValueError):
+        load_settings()
+
+
+def test_embedding_provider_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DUPCANON_EMBEDDING_PROVIDER", "invalid")
+
+    with pytest.raises(ValueError):
+        load_settings()
+
+
+def test_openai_embedding_provider_requires_openai_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DUPCANON_EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("DUPCANON_EMBEDDING_MODEL", "gemini-embedding-001")
 
     with pytest.raises(ValueError):
         load_settings()

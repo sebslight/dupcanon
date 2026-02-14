@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,8 +13,12 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openrouter_api_key: str | None = Field(default=None, validation_alias="OPENROUTER_API_KEY")
     github_token: str | None = Field(default=None, validation_alias="GITHUB_TOKEN")
+    embedding_provider: str = Field(
+        default="openai",
+        validation_alias="DUPCANON_EMBEDDING_PROVIDER",
+    )
     embedding_model: str = Field(
-        default="gemini-embedding-001",
+        default="text-embedding-3-large",
         validation_alias="DUPCANON_EMBEDDING_MODEL",
     )
     embedding_dim: int = Field(default=768, validation_alias="DUPCANON_EMBEDDING_DIM")
@@ -23,9 +27,9 @@ class Settings(BaseSettings):
         default=2,
         validation_alias="DUPCANON_EMBED_WORKER_CONCURRENCY",
     )
-    judge_provider: str = Field(default="gemini", validation_alias="DUPCANON_JUDGE_PROVIDER")
+    judge_provider: str = Field(default="openai-codex", validation_alias="DUPCANON_JUDGE_PROVIDER")
     judge_model: str = Field(
-        default="gemini-3-flash-preview",
+        default="gpt-5.1-codex-mini",
         validation_alias="DUPCANON_JUDGE_MODEL",
     )
     judge_worker_concurrency: int = Field(
@@ -61,6 +65,15 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return value
 
+    @field_validator("embedding_provider")
+    @classmethod
+    def normalize_embedding_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"gemini", "openai"}:
+            msg = "DUPCANON_EMBEDDING_PROVIDER must be one of: gemini, openai"
+            raise ValueError(msg)
+        return normalized
+
     @field_validator("judge_provider")
     @classmethod
     def normalize_judge_provider(cls, value: str) -> str:
@@ -78,6 +91,16 @@ class Settings(BaseSettings):
             msg = "runtime concurrency/batch settings must be positive integers"
             raise ValueError(msg)
         return value
+
+    @model_validator(mode="after")
+    def validate_embedding_provider_model_pair(self) -> Settings:
+        if self.embedding_provider == "openai" and self.embedding_model.startswith("gemini-"):
+            msg = (
+                "DUPCANON_EMBEDDING_MODEL must be an OpenAI embedding model when "
+                "DUPCANON_EMBEDDING_PROVIDER=openai"
+            )
+            raise ValueError(msg)
+        return self
 
 
 def load_settings(*, dotenv_path: str | Path | None = None) -> Settings:

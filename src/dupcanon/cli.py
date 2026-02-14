@@ -38,13 +38,23 @@ REPO_OPTION = typer.Option(..., help="GitHub repo org/name")
 TYPE_OPTION = typer.Option(TypeFilter.ALL, "--type", help="Item type filter")
 STATE_OPTION = typer.Option(StateFilter.ALL, "--state", help="Item state filter")
 SINCE_OPTION = typer.Option(None, "--since", help="Since window, e.g. 30d or YYYY-MM-DD")
-KNOWN_ONLY_OPTION = typer.Option(False, "--known-only", help="Refresh only already-known items")
+REFRESH_KNOWN_OPTION = typer.Option(
+    False,
+    "--refresh-known",
+    help="Also refresh metadata for already-known items",
+)
 DRY_RUN_OPTION = typer.Option(False, "--dry-run", help="Compute changes without writing to DB")
 ONLY_CHANGED_OPTION = typer.Option(
     False,
     "--only-changed",
     help="Embed only items missing embeddings or with changed content",
 )
+EMBED_PROVIDER_OPTION = typer.Option(
+    None,
+    "--provider",
+    help="Embedding provider override (gemini or openai)",
+)
+EMBED_MODEL_OPTION = typer.Option(None, "--model", help="Embedding model override")
 CANDIDATE_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 K_OPTION = typer.Option(8, "--k", help="Number of nearest neighbors to retrieve")
 MIN_SCORE_OPTION = typer.Option(0.75, "--min-score", help="Minimum similarity score")
@@ -175,8 +185,17 @@ def _default_model_for_provider(*, provider: str, settings: Settings) -> str | N
     if normalized == "openrouter":
         return "minimax/minimax-m2.5"
     if normalized == "openai-codex":
-        return None
+        return "gpt-5.1-codex-mini"
     return settings.judge_model
+
+
+def _default_embedding_model_for_provider(*, provider: str, settings: Settings) -> str:
+    normalized = provider.strip().lower()
+    if normalized == settings.embedding_provider:
+        return settings.embedding_model
+    if normalized == "openai":
+        return "text-embedding-3-large"
+    return "gemini-embedding-001"
 
 
 def _friendly_error_message(exc: Exception) -> str:
@@ -254,7 +273,9 @@ def init() -> None:
         "SUPABASE_DB_URL set": bool(settings.supabase_db_url),
         "SUPABASE_DB_URL is Postgres DSN": is_postgres_dsn(settings.supabase_db_url),
         "GEMINI_API_KEY (required when judge provider=gemini)": bool(settings.gemini_api_key),
-        "OPENAI_API_KEY (required when judge provider=openai)": bool(settings.openai_api_key),
+        "OPENAI_API_KEY (required when judge provider=openai or embedding provider=openai)": bool(
+            settings.openai_api_key
+        ),
         "OPENROUTER_API_KEY (required when judge provider=openrouter)": bool(
             settings.openrouter_api_key
         ),
@@ -379,7 +400,7 @@ def sync(
 def refresh(
     repo: str = REPO_OPTION,
     item_type: TypeFilter = TYPE_OPTION,
-    known_only: bool = KNOWN_ONLY_OPTION,
+    refresh_known: bool = REFRESH_KNOWN_OPTION,
     dry_run: bool = DRY_RUN_OPTION,
 ) -> None:
     """Refresh state for known items."""
@@ -390,7 +411,7 @@ def refresh(
             settings=settings,
             repo_value=repo,
             type_filter=item_type,
-            known_only=known_only,
+            refresh_known=refresh_known,
             dry_run=dry_run,
             console=console,
             logger=logger,
@@ -404,7 +425,7 @@ def refresh(
             context={
                 "repo": repo,
                 "type": item_type.value,
-                "known_only": known_only,
+                "refresh_known": refresh_known,
                 "dry_run": dry_run,
             },
         )
@@ -423,6 +444,7 @@ def refresh(
     table = Table(title="refresh summary")
     table.add_column("Metric")
     table.add_column("Value")
+    table.add_row("refresh_known", str(refresh_known))
     table.add_row("dry_run", str(dry_run))
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))
@@ -436,9 +458,19 @@ def embed(
     repo: str = REPO_OPTION,
     item_type: TypeFilter = TYPE_OPTION,
     only_changed: bool = ONLY_CHANGED_OPTION,
+    provider: str | None = EMBED_PROVIDER_OPTION,
+    model: str | None = EMBED_MODEL_OPTION,
 ) -> None:
     """Embed items into pgvector."""
     settings, run_id, logger = _bootstrap("embed")
+    effective_provider = (provider or settings.embedding_provider).strip().lower()
+    if model is None:
+        effective_model = _default_embedding_model_for_provider(
+            provider=effective_provider,
+            settings=settings,
+        )
+    else:
+        effective_model = model
 
     try:
         stats = run_embed(
@@ -446,6 +478,8 @@ def embed(
             repo_value=repo,
             type_filter=item_type,
             only_changed=only_changed,
+            embedding_provider=effective_provider,
+            embedding_model=effective_model,
             console=console,
             logger=logger,
         )
@@ -459,6 +493,8 @@ def embed(
                 "repo": repo,
                 "type": item_type.value,
                 "only_changed": only_changed,
+                "provider": effective_provider,
+                "model": effective_model,
             },
         )
         logger.error(
@@ -476,6 +512,8 @@ def embed(
     table = Table(title="embed summary")
     table.add_column("Metric")
     table.add_column("Value")
+    table.add_row("provider", effective_provider)
+    table.add_row("model", effective_model)
     table.add_row("only_changed", str(only_changed))
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))

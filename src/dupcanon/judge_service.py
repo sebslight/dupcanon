@@ -1168,7 +1168,7 @@ def run_judge(
     elif normalized_provider == "openrouter":
         judge_model = "minimax/minimax-m2.5"
     elif normalized_provider == "openai-codex":
-        judge_model = "pi-default"
+        judge_model = "gpt-5.1-codex-mini"
     else:
         judge_model = settings.judge_model
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from time import perf_counter
 from typing import Any
 
@@ -9,11 +10,21 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from dupcanon.artifacts import write_artifact
 from dupcanon.config import Settings, is_postgres_dsn, postgres_dsn_help_text
 from dupcanon.database import Database, utc_now
-from dupcanon.github_client import GitHubApiError, GitHubClient, GitHubNotFoundError
+from dupcanon.github_client import GitHubClient
 from dupcanon.logging_config import BoundLogger
-from dupcanon.models import RefreshStats, RepoRef, StateFilter, SyncStats, TypeFilter, parse_since
+from dupcanon.models import (
+    ItemPayload,
+    ItemType,
+    RefreshStats,
+    RepoRef,
+    StateFilter,
+    SyncStats,
+    TypeFilter,
+    parse_since,
+)
 
 _FETCH_CHECKPOINT_INTERVAL = 500
+_REFRESH_DISCOVERY_LOOKBACK = timedelta(days=1)
 
 
 def _persist_failure_artifact(
@@ -50,6 +61,14 @@ def require_postgres_dsn(value: str | None) -> str:
         return value
     msg = postgres_dsn_help_text()
     raise ValueError(msg)
+
+
+def _item_types_for_filter(type_filter: TypeFilter) -> list[ItemType]:
+    if type_filter == TypeFilter.ALL:
+        return [ItemType.ISSUE, ItemType.PR]
+    if type_filter == TypeFilter.ISSUE:
+        return [ItemType.ISSUE]
+    return [ItemType.PR]
 
 
 def run_sync(
@@ -319,12 +338,24 @@ def run_sync(
     return stats
 
 
+def _fetch_items_for_type(
+    *,
+    gh: GitHubClient,
+    repo: RepoRef,
+    item_type: ItemType,
+    since,
+) -> list[ItemPayload]:
+    if item_type == ItemType.ISSUE:
+        return gh.fetch_issues(repo=repo, state=StateFilter.ALL, since=since)
+    return gh.fetch_pulls(repo=repo, state=StateFilter.ALL, since=since)
+
+
 def run_refresh(
     *,
     settings: Settings,
     repo_value: str,
     type_filter: TypeFilter,
-    known_only: bool,
+    refresh_known: bool,
     dry_run: bool,
     console: Console,
     logger: BoundLogger,
@@ -335,14 +366,7 @@ def run_refresh(
 
     repo = RepoRef.parse(repo_value)
     logger = logger.bind(repo=repo.full_name(), type=type_filter.value, stage="refresh")
-    logger.info("refresh.start", status="started", known_only=known_only, dry_run=dry_run)
-    if not known_only:
-        logger.warning(
-            "refresh.discovery_mode_not_implemented",
-            stage="refresh",
-            status="skip",
-            reason="refresh currently updates known items only",
-        )
+    logger.info("refresh.start", status="started", refresh_known=refresh_known, dry_run=dry_run)
 
     gh = GitHubClient()
     db = Database(db_url)
@@ -352,12 +376,23 @@ def run_refresh(
         logger.warning("refresh.repo_not_found", stage="refresh", status="skip")
         return RefreshStats()
 
-    known_items = db.list_known_items(repo_id=repo_id, type_filter=type_filter)
     synced_at = utc_now()
 
+    discovered = 0
     refreshed = 0
     missing_remote = 0
     failed = 0
+
+    item_types = _item_types_for_filter(type_filter)
+
+    known_set: set[tuple[ItemType, int]] = set()
+    known_items_count = 0
+    seen_known: set[tuple[ItemType, int]] = set()
+
+    if refresh_known:
+        known_items = db.list_known_items(repo_id=repo_id, type_filter=type_filter)
+        known_set = set(known_items)
+        known_items_count = len(known_items)
 
     refresh_stage_started = perf_counter()
     progress = Progress(
@@ -370,55 +405,24 @@ def run_refresh(
     )
 
     with progress:
-        task = progress.add_task("Refreshing known items", total=len(known_items))
+        task = progress.add_task("Refreshing from GitHub", total=len(item_types))
 
-        for item_type, number in known_items:
+        for item_type in item_types:
+            since = None
+            if not refresh_known:
+                latest_created = db.get_latest_created_at_gh(repo_id=repo_id, item_type=item_type)
+                since = (
+                    latest_created - _REFRESH_DISCOVERY_LOOKBACK
+                    if latest_created is not None
+                    else None
+                )
+
             try:
-                payload = gh.fetch_item(repo=repo, item_type=item_type, number=number)
-                if dry_run:
-                    refreshed += 1
-                else:
-                    updated = db.refresh_item_metadata(
-                        repo_id=repo_id, item=payload, synced_at=synced_at
-                    )
-                    if updated:
-                        refreshed += 1
-            except GitHubNotFoundError:
-                missing_remote += 1
-                logger.warning(
-                    "refresh.item_missing_remote",
-                    stage="refresh",
-                    item_id=number,
-                    item_type=item_type.value,
-                    status="skip",
-                )
-            except GitHubApiError as exc:
-                failed += 1
-                artifact_path = _persist_failure_artifact(
-                    settings=settings,
-                    logger=logger,
-                    command="refresh",
-                    category="item_failed",
-                    payload={
-                        "command": "refresh",
-                        "stage": "refresh",
-                        "repo": repo.full_name(),
-                        "item_id": number,
-                        "item_type": item_type.value,
-                        "known_only": known_only,
-                        "dry_run": dry_run,
-                        "error_class": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                )
-                logger.error(
-                    "refresh.item_failed",
-                    stage="refresh",
-                    item_id=number,
-                    item_type=item_type.value,
-                    status="error",
-                    error_class=type(exc).__name__,
-                    artifact_path=artifact_path,
+                fetched = _fetch_items_for_type(
+                    gh=gh,
+                    repo=repo,
+                    item_type=item_type,
+                    since=since,
                 )
             except Exception as exc:  # noqa: BLE001
                 failed += 1
@@ -426,33 +430,108 @@ def run_refresh(
                     settings=settings,
                     logger=logger,
                     command="refresh",
-                    category="item_failed",
+                    category="type_fetch_failed",
                     payload={
                         "command": "refresh",
                         "stage": "refresh",
                         "repo": repo.full_name(),
-                        "item_id": number,
                         "item_type": item_type.value,
-                        "known_only": known_only,
+                        "refresh_known": refresh_known,
                         "dry_run": dry_run,
+                        "since": since.isoformat() if since else None,
                         "error_class": type(exc).__name__,
                         "error": str(exc),
                     },
                 )
                 logger.error(
-                    "refresh.item_failed",
+                    "refresh.type_fetch_failed",
                     stage="refresh",
-                    item_id=number,
-                    item_type=item_type.value,
                     status="error",
+                    item_type=item_type.value,
                     error_class=type(exc).__name__,
                     artifact_path=artifact_path,
                 )
-            finally:
                 progress.advance(task)
+                continue
+
+            for item in fetched:
+                try:
+                    key = (item.type, item.number)
+
+                    if refresh_known and key in known_set:
+                        seen_known.add(key)
+                        if dry_run:
+                            refreshed += 1
+                        else:
+                            updated = db.refresh_item_metadata(
+                                repo_id=repo_id,
+                                item=item,
+                                synced_at=synced_at,
+                            )
+                            if updated:
+                                refreshed += 1
+                        continue
+
+                    if dry_run:
+                        inspect_result = db.inspect_item_change(repo_id=repo_id, item=item)
+                        if inspect_result.inserted:
+                            discovered += 1
+                        continue
+
+                    inspect_result = db.inspect_item_change(repo_id=repo_id, item=item)
+                    if not inspect_result.inserted:
+                        continue
+
+                    upsert_result = db.upsert_item(repo_id=repo_id, item=item, synced_at=synced_at)
+                    if upsert_result.inserted:
+                        discovered += 1
+                except Exception as exc:  # noqa: BLE001
+                    failed += 1
+                    artifact_path = _persist_failure_artifact(
+                        settings=settings,
+                        logger=logger,
+                        command="refresh",
+                        category="item_failed",
+                        payload={
+                            "command": "refresh",
+                            "stage": "refresh",
+                            "repo": repo.full_name(),
+                            "item_id": item.number,
+                            "item_type": item.type.value,
+                            "refresh_known": refresh_known,
+                            "dry_run": dry_run,
+                            "error_class": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                    )
+                    logger.error(
+                        "refresh.item_failed",
+                        stage="refresh",
+                        status="error",
+                        item_id=item.number,
+                        item_type=item.type.value,
+                        error_class=type(exc).__name__,
+                        artifact_path=artifact_path,
+                    )
+
+            logger.info(
+                "refresh.type_complete",
+                stage="refresh",
+                status="ok",
+                item_type=item_type.value,
+                fetched=len(fetched),
+                since=since.isoformat() if since else None,
+                discovered=discovered,
+                refreshed=refreshed,
+            )
+            progress.advance(task)
+
+    if refresh_known:
+        missing_remote = len(known_set - seen_known)
 
     stats = RefreshStats(
-        known_items=len(known_items),
+        known_items=known_items_count,
+        discovered=discovered,
         refreshed=refreshed,
         missing_remote=missing_remote,
         failed=failed,
@@ -469,7 +548,7 @@ def run_refresh(
         "refresh.complete",
         stage="refresh",
         status="ok",
-        known_only=known_only,
+        refresh_known=refresh_known,
         dry_run=dry_run,
         duration_ms=int((perf_counter() - command_started) * 1000),
         **stats.model_dump(),

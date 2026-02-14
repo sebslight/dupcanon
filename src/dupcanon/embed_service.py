@@ -25,6 +25,7 @@ from dupcanon.models import (
     TypeFilter,
     normalize_text,
 )
+from dupcanon.openai_embeddings import OpenAIEmbeddingsClient
 from dupcanon.sync_service import require_postgres_dsn
 
 _TITLE_MAX_CHARS = 300
@@ -84,7 +85,7 @@ def _chunked(items: list[EmbeddingItem], chunk_size: int) -> Iterable[list[Embed
 def _embed_single_item(
     *,
     db: Database,
-    client: GeminiEmbeddingsClient,
+    client: GeminiEmbeddingsClient | OpenAIEmbeddingsClient,
     item: EmbeddingItem,
     model: str,
     embedding_dim: int,
@@ -108,21 +109,46 @@ def run_embed(
     only_changed: bool,
     console: Console,
     logger: BoundLogger,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
 ) -> EmbedStats:
     command_started = perf_counter()
 
     db_url = require_postgres_dsn(settings.supabase_db_url)
-    if not settings.gemini_api_key:
-        msg = "GEMINI_API_KEY is required for embed"
-        raise ValueError(msg)
 
     repo = RepoRef.parse(repo_value)
-    model = settings.embedding_model
+    provider = (embedding_provider or settings.embedding_provider).strip().lower()
+
+    if provider not in {"gemini", "openai"}:
+        msg = "embedding provider must be one of: gemini, openai"
+        raise ValueError(msg)
+
+    if embedding_model is not None:
+        model = embedding_model
+    elif embedding_provider is not None and provider != settings.embedding_provider:
+        model = "text-embedding-3-large" if provider == "openai" else "gemini-embedding-001"
+    else:
+        model = settings.embedding_model
+
+    if provider == "openai" and model.startswith("gemini-"):
+        msg = "embedding model must be an OpenAI embedding model when provider=openai"
+        raise ValueError(msg)
+    if provider == "gemini" and model.startswith("text-embedding-"):
+        msg = "embedding model must be a Gemini embedding model when provider=gemini"
+        raise ValueError(msg)
+
+    if provider == "gemini" and not settings.gemini_api_key:
+        msg = "GEMINI_API_KEY is required for embed when provider=gemini"
+        raise ValueError(msg)
+    if provider == "openai" and not settings.openai_api_key:
+        msg = "OPENAI_API_KEY is required for embed when provider=openai"
+        raise ValueError(msg)
 
     logger = logger.bind(
         repo=repo.full_name(),
         type=type_filter.value,
         stage="embed",
+        provider=provider,
         model=model,
     )
     logger.info(
@@ -156,11 +182,21 @@ def run_embed(
     embedded = 0
     failed = 0
 
-    client = GeminiEmbeddingsClient(
-        api_key=settings.gemini_api_key,
-        model=model,
-        output_dimensionality=settings.embedding_dim,
-    )
+    if provider == "gemini":
+        client: GeminiEmbeddingsClient | OpenAIEmbeddingsClient = GeminiEmbeddingsClient(
+            api_key=settings.gemini_api_key or "",
+            model=model,
+            output_dimensionality=settings.embedding_dim,
+        )
+    elif provider == "openai":
+        client = OpenAIEmbeddingsClient(
+            api_key=settings.openai_api_key or "",
+            model=model,
+            output_dimensionality=settings.embedding_dim,
+        )
+    else:
+        msg = f"unsupported embedding provider: {provider}"
+        raise ValueError(msg)
 
     stage_started = perf_counter()
     progress = Progress(

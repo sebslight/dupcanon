@@ -28,6 +28,7 @@ from dupcanon.models import (
     RepoRef,
     normalize_text,
 )
+from dupcanon.openai_embeddings import OpenAIEmbeddingsClient
 from dupcanon.sync_service import require_postgres_dsn
 
 _PR_MAX_CHANGED_FILES = 30
@@ -57,7 +58,7 @@ def _default_judge_model(*, provider: str, settings: Settings, model: str | None
     if provider == "openrouter":
         return "minimax/minimax-m2.5"
     if provider == "openai-codex":
-        return "pi-default"
+        return "gpt-5.1-codex-mini"
     return settings.judge_model
 
 
@@ -84,6 +85,36 @@ def _judge_api_key(*, settings: Settings, provider: str) -> str:
         raise ValueError(msg)
 
     return ""
+
+
+def _embedding_client(
+    *, settings: Settings
+) -> GeminiEmbeddingsClient | OpenAIEmbeddingsClient:
+    provider = settings.embedding_provider
+    model = settings.embedding_model
+
+    if provider == "gemini":
+        if not settings.gemini_api_key:
+            msg = "GEMINI_API_KEY is required to embed source item when embedding provider=gemini"
+            raise ValueError(msg)
+        return GeminiEmbeddingsClient(
+            api_key=settings.gemini_api_key,
+            model=model,
+            output_dimensionality=settings.embedding_dim,
+        )
+
+    if provider == "openai":
+        if not settings.openai_api_key:
+            msg = "OPENAI_API_KEY is required to embed source item when embedding provider=openai"
+            raise ValueError(msg)
+        return OpenAIEmbeddingsClient(
+            api_key=settings.openai_api_key,
+            model=model,
+            output_dimensionality=settings.embedding_dim,
+        )
+
+    msg = f"unsupported embedding provider: {provider}"
+    raise ValueError(msg)
 
 
 def _validate_thresholds(
@@ -319,15 +350,7 @@ def run_detect_new(
         source_embedding_item.embedded_content_hash != source_embedding_item.content_hash
     )
     if source_needs_embedding:
-        if not settings.gemini_api_key:
-            msg = "GEMINI_API_KEY is required to embed source item for detect-new"
-            raise ValueError(msg)
-
-        embed_client = GeminiEmbeddingsClient(
-            api_key=settings.gemini_api_key,
-            model=settings.embedding_model,
-            output_dimensionality=settings.embedding_dim,
-        )
+        embed_client = _embedding_client(settings=settings)
         text = build_embedding_text(
             title=source_embedding_item.title,
             body=source_embedding_item.body,

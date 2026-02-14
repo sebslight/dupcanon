@@ -105,6 +105,7 @@ class RefreshStats(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     known_items: int = 0
+    discovered: int = 0
     refreshed: int = 0
     missing_remote: int = 0
     failed: int = 0

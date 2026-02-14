@@ -50,18 +50,49 @@ def test_sync_help_includes_dry_run() -> None:
     assert "--dry-run" in result.stdout
 
 
-def test_refresh_help_includes_dry_run() -> None:
+def test_refresh_help_includes_core_options() -> None:
     result = runner.invoke(app, ["refresh", "--help"])
 
     assert result.exit_code == 0
+    assert "--refresh-known" in result.stdout
     assert "--dry-run" in result.stdout
 
 
-def test_embed_help_includes_only_changed() -> None:
+def test_embed_help_includes_core_options() -> None:
     result = runner.invoke(app, ["embed", "--help"])
 
     assert result.exit_code == 0
     assert "--only-changed" in result.stdout
+    assert "--provider" in result.stdout
+    assert "--model" in result.stdout
+
+
+def test_embed_defaults_openai_model_when_provider_openai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_embed(**kwargs):
+        captured.update(kwargs)
+
+        class _Stats:
+            def model_dump(self):
+                return {}
+
+        return _Stats()
+
+    monkeypatch.setattr("dupcanon.cli.run_embed", fake_run_embed)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        ["embed", "--repo", "org/repo", "--type", "issue", "--provider", "openai"],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("embedding_provider") == "openai"
+    assert captured.get("embedding_model") == "text-embedding-3-large"
 
 
 def test_candidates_help_includes_core_options() -> None:
@@ -210,7 +241,7 @@ def test_judge_defaults_openai_codex_model_when_provider_openai_codex(
 
     assert result.exit_code == 0
     assert captured.get("provider") == "openai-codex"
-    assert captured.get("model") is None
+    assert captured.get("model") == "gpt-5.1-codex-mini"
 
 
 def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,7 +352,7 @@ def test_detect_new_defaults_openai_codex_model_when_provider_openai_codex(
             reasoning="No match",
             top_matches=[],
             provider=str(kwargs.get("provider", "openai-codex")),
-            model=str(kwargs.get("model") or "pi-default"),
+            model=str(kwargs.get("model") or "gpt-5.1-codex-mini"),
             run_id="run123",
             timestamp=datetime.now(tz=UTC),
         )
@@ -346,7 +377,7 @@ def test_detect_new_defaults_openai_codex_model_when_provider_openai_codex(
 
     assert result.exit_code == 0
     assert captured.get("provider") == "openai-codex"
-    assert captured.get("model") is None
+    assert captured.get("model") == "gpt-5.1-codex-mini"
 
 
 def test_detect_new_json_out_writes_file(

@@ -112,6 +112,37 @@ class Database:
             result.append((ItemType(str(row["type"])), int(row["number"])))
         return result
 
+    def get_latest_created_at_gh(
+        self,
+        *,
+        repo_id: int,
+        item_type: ItemType,
+    ) -> datetime | None:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select max(created_at_gh) as latest_created_at_gh
+                from public.items
+                where repo_id = %s and type = %s
+                """,
+                (repo_id, item_type.value),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        value = row.get("latest_created_at_gh")
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=UTC)
+            return value
+
+        msg = "invalid latest_created_at_gh value"
+        raise DatabaseError(msg)
+
     def list_items_for_embedding(
         self,
         *,

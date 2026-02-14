@@ -63,7 +63,7 @@ def _default_model_for_provider(*, provider: str, settings: Settings, model: str
     if provider == "openrouter":
         return "minimax/minimax-m2.5"
     if provider == "openai-codex":
-        return "pi-default"
+        return "gpt-5.1-codex-mini"
     return settings.judge_model
 
 
