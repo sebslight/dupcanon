@@ -7,11 +7,11 @@ This runbook describes the current end-to-end workflow for running `dupcanon` sa
 - `uv` installed
 - `gh` authenticated for the target repo
 - Supabase/Postgres reachable via DSN (`SUPABASE_DB_URL`)
-- API key for selected judge provider:
-  - `GEMINI_API_KEY` (default)
-  - `OPENAI_API_KEY` (when using `--provider openai`)
-  - `OPENROUTER_API_KEY` (when using `--provider openrouter`)
-  - `--provider openai-codex` uses local `pi` CLI RPC (`pi --mode rpc --provider openai-codex`)
+- Credentials/runtime for selected embedding/judge providers:
+  - Default embeddings use OpenAI (`DUPCANON_EMBEDDING_PROVIDER=openai`) -> requires `OPENAI_API_KEY`
+  - Default judge uses OpenAI Codex via `pi` RPC (`DUPCANON_JUDGE_PROVIDER=openai-codex`)
+  - `GEMINI_API_KEY` only when embedding/judge provider is `gemini`
+  - `OPENROUTER_API_KEY` only when judge provider is `openrouter`
 
 ## Setup
 
@@ -30,10 +30,16 @@ uv run dupcanon init
 uv run dupcanon sync --repo <org/repo> --since 3d
 ```
 
-Optional metadata refresh for known items:
+Optional incremental discovery refresh (new items only):
 
 ```bash
-uv run dupcanon refresh --repo <org/repo> --known-only
+uv run dupcanon refresh --repo <org/repo>
+```
+
+Include known-item metadata refresh in the same run:
+
+```bash
+uv run dupcanon refresh --repo <org/repo> --refresh-known
 ```
 
 ### 2) Embeddings
@@ -41,6 +47,16 @@ uv run dupcanon refresh --repo <org/repo> --known-only
 ```bash
 uv run dupcanon embed --repo <org/repo> --type issue --only-changed
 ```
+
+CLI override example (useful in production cutovers):
+
+```bash
+uv run dupcanon embed --repo <org/repo> --type issue --only-changed --provider openai --model text-embedding-3-large
+```
+
+Notes:
+- Embedding provider can be set via env (`DUPCANON_EMBEDDING_PROVIDER`) or CLI (`embed --provider ...`).
+- Keep `DUPCANON_EMBEDDING_DIM=768` to match current pgvector schema.
 
 ### 3) Candidate retrieval
 
@@ -54,10 +70,16 @@ Notes:
 
 ### 4) LLM judge
 
-Gemini default:
+Default (OpenAI Codex via `pi` RPC):
 
 ```bash
 uv run dupcanon judge --repo <org/repo> --type issue
+```
+
+Explicit OpenAI Codex model example:
+
+```bash
+uv run dupcanon judge --repo <org/repo> --type issue --provider openai-codex --model gpt-5.1-codex-mini
 ```
 
 OpenAI override example:
@@ -70,12 +92,6 @@ OpenRouter override example:
 
 ```bash
 uv run dupcanon judge --repo <org/repo> --type issue --provider openrouter --model minimax/minimax-m2.5
-```
-
-OpenAI Codex via `pi` RPC:
-
-```bash
-uv run dupcanon judge --repo <org/repo> --type issue --provider openai-codex --model gpt-5.1-mini-codex
 ```
 
 Judge guardrail:

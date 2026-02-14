@@ -32,7 +32,7 @@ We want a workflow that always converges on one canonical item per cluster, and 
 
 - Make it incremental:
   - do not re-embed or re-judge items unnecessarily
-  - support “refresh-known-only” to update state for previously-seen items
+  - support `refresh --refresh-known` to update state for previously-seen items
 
 
 ## Non-goals (v1)
@@ -108,13 +108,15 @@ Single CLI, subcommands. Example name: dupcanon.
 - dupcanon maintainers --repo org/name
   - Lists collaborator-derived maintainer logins (`admin|maintain|push`).
 
-- dupcanon refresh --repo org/name [--known-only] [--dry-run]
-  - Refreshes state and timestamps from GitHub.
-  - With --known-only: only touches items already in DB, does not discover new ones.
+- dupcanon refresh --repo org/name [--refresh-known] [--dry-run]
+  - Refreshes incrementally from GitHub.
+  - Default: discover new items only (does not update already-known item metadata).
+  - With --refresh-known: also refreshes metadata for already-known items.
   - With --dry-run: computes and prints refresh stats without DB writes.
 
-- dupcanon embed --repo org/name [--type issue|pr] [--only-changed]
+- dupcanon embed --repo org/name [--type issue|pr] [--only-changed] [--provider gemini|openai] [--model ...]
   - Embeds items missing embeddings or with content_version advanced.
+  - Embedding provider/model can be overridden per run.
 
 - dupcanon candidates --repo org/name --type issue|pr [--k 8] [--min-score 0.75] [--include open|closed|all] [--dry-run] [--workers N]
   - Creates candidate_sets and candidate_set_members.
@@ -123,7 +125,7 @@ Single CLI, subcommands. Example name: dupcanon.
 
 - dupcanon judge --repo org/name --type issue|pr [--provider gemini|openai|openrouter|openai-codex] [--model ...] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
   - Reads fresh candidate sets, calls LLM, writes judge_decisions.
-  - Default provider/model remains Gemini; OpenAI (`gpt-5-mini`), OpenRouter (`minimax/minimax-m2.5` by default), and OpenAI Codex via `pi` RPC (`openai-codex`) are available for evaluation runs.
+  - Default provider/model is OpenAI Codex via `pi` RPC (`openai-codex`, `gpt-5.1-codex-mini`). Gemini/OpenAI/OpenRouter are available as overrides.
 
 - dupcanon judge-audit --repo org/name --type issue|pr [--sample-size 100] [--seed 42] [--min-edge 0.85] [--cheap-provider ...] [--cheap-model ...] [--strong-provider ...] [--strong-model ...] [--workers N] [--verbose] [--debug-rpc]
   - Samples latest fresh candidate sets (open source items only), runs cheap and strong judges on the same sample, and records audit outcomes into `judge_audit_runs` + `judge_audit_run_items`.
@@ -142,8 +144,9 @@ Single CLI, subcommands. Example name: dupcanon.
 
 ## Locked model/provider choices (v1)
 
-- Embeddings: Gemini API `gemini-embedding-001` with output dimensionality locked to 768.
-- Duplicate judge default: Gemini API `gemini-3-flash-preview`.
+- Embeddings: provider-configurable (`gemini` or `openai`) with output dimensionality locked to 768.
+  - default model/provider is OpenAI `text-embedding-3-large`.
+- Duplicate judge default: OpenAI Codex via `pi` RPC with model `gpt-5.1-codex-mini`.
 - Optional evaluation overrides: OpenAI `gpt-5-mini` or OpenRouter `minimax/minimax-m2.5`.
 - Credentials: `.env` or environment variables for local/operator runs.
 
@@ -156,8 +159,8 @@ Everything is DB-first. Supabase hosts Postgres and pgvector.
 
 The CLI is a thin orchestrator:
 - GitHub fetch via GitHub API (gh CLI, REST, or GraphQL) depending on implementation choice.
-- Embeddings via Gemini API (`gemini-embedding-001`).
-- LLM judging via Gemini API (`gemini-3-flash-preview`) or optional OpenAI (`gpt-5-mini`) / OpenRouter (`minimax/minimax-m2.5`) using strict JSON responses.
+- Embeddings via configured provider/model (`gemini` or `openai`, 768 dimensions).
+- LLM judging default via OpenAI Codex `pi` RPC (`openai-codex`, model `gpt-5.1-codex-mini`), with optional Gemini/OpenAI/OpenRouter overrides for evaluation.
 - Python CLI stack: Typer for command surface + Rich for terminal UX/progress rendering.
 - Data/config modeling and validation: Pydantic.
 - Logging stack: Rich logger (`rich.logging.RichHandler`) with consistent key-value fields across all commands and internal pipeline steps.
@@ -214,12 +217,12 @@ Stores the latest embedding per (item, model).
 
 Important note on pgvector dimensions
 - pgvector requires a fixed dimension in the column definition.
-- v1 locks to Gemini `gemini-embedding-001` with output dimensionality 768.
-- If we switch embedding models later (dimension change), we do a migration or add a new embeddings table/column.
+- v1 locks embedding output dimensionality to 768 (provider/model may vary).
+- If we switch to a model/dimension outside 768, we do a migration or add a new embeddings table/column.
 
 - id (bigint pk)
 - item_id (fk items.id)
-- model (text not null)  -- `gemini-embedding-001` in v1
+- model (text not null)  -- embedding model used for this row (e.g. `gemini-embedding-001`, `text-embedding-3-large`)
 - dim (int not null)     -- 768 in v1
 - embedding (vector(768) not null)
 - embedded_content_hash (text not null)
@@ -453,8 +456,8 @@ Output contract (strict JSON)
 - certainty: `sure` | `unsure` (optional)
 
 Rules
-- v1 default judge model is Gemini `gemini-3-flash-preview`.
-- Optional judge provider/model overrides for evaluation: OpenAI `gpt-5-mini` or OpenRouter `minimax/minimax-m2.5`.
+- v1 default judge path is OpenAI Codex via `pi` RPC (`openai-codex`, model `gpt-5.1-codex-mini`).
+- Optional judge provider/model overrides for evaluation: Gemini, OpenAI `gpt-5-mini`, or OpenRouter `minimax/minimax-m2.5`.
 - Only accept an edge if confidence >= min_edge (default 0.85).
 - Only allow duplicate_of that is in the candidate set.
 - If model returns `certainty="unsure"` for a duplicate claim, reject via veto.
@@ -502,10 +505,10 @@ We need two kinds of update:
 - Bumps `content_version` only when that semantic hash changes.
 - Metadata-only changes (`state`, labels, assignees, timestamps, comment counters) do not bump `content_version`.
 
-2) refresh-known-only
-- Does not discover new items.
-- Only updates state/open/closed/timestamps for items already in DB.
-- Purpose: keep the DB accurate without expanding scope.
+2) refresh
+- Default (`refresh`): incremental discovery of new items only.
+- With `--refresh-known`: also updates metadata/state/timestamps for already-known items.
+- Purpose: separate scope expansion from known-item metadata maintenance while supporting both in one command.
 
 Staleness propagation
 - If content_version changes, mark embeddings stale (by comparing embedded_content_hash) and mark candidate_sets stale.
@@ -594,7 +597,7 @@ Exit criteria
 
 Phase 2: sync + refresh
 - Implement `sync` for issue/PR discovery and upsert.
-- Implement `refresh --known-only` with no new item discovery.
+- Implement `refresh` default incremental discovery and optional `--refresh-known` metadata refresh mode.
 - Implement semantic content hashing (`type`, `title`, `body`) and content_version bump logic.
 
 Exit criteria
@@ -603,7 +606,7 @@ Exit criteria
 
 Phase 3: embedding pipeline
 - Implement deterministic text construction/truncation.
-- Call Gemini embeddings (`gemini-embedding-001`) and enforce 768-dim validation.
+- Call configured embedding provider/model (`gemini` or `openai`) and enforce 768-dim validation.
 - Store embeddings with `embedded_content_hash` and skip unchanged content.
 
 Exit criteria
@@ -620,7 +623,7 @@ Exit criteria
 - No cross-type leakage.
 
 Phase 5: LLM judge + edge recording
-- Implement judge prompt/response contract using default Gemini `gemini-3-flash-preview` (with optional OpenAI `gpt-5-mini` or OpenRouter `minimax/minimax-m2.5` override for evaluation).
+- Implement judge prompt/response contract using default OpenAI Codex (`openai-codex`, `gpt-5.1-codex-mini`) with optional Gemini/OpenAI/OpenRouter overrides for evaluation.
 - Enforce strict JSON parsing, candidate-bounded target validation, and `min_edge` threshold.
 - Persist artifacts for invalid model responses under `.local/artifacts`.
 - Implement edge policy: first accepted edge wins; allow explicit `--rejudge` flow.
@@ -698,8 +701,8 @@ Recommended implementation order
 
 ## Locked v1 decisions summary
 
-- Embeddings: Gemini API `gemini-embedding-001`, dimension 768.
-- Judge default: Gemini API `gemini-3-flash-preview` (optional OpenAI `gpt-5-mini` or OpenRouter `minimax/minimax-m2.5` override for evaluation).
+- Embeddings: provider-configurable (`gemini` or `openai`) with dimension 768 (default `text-embedding-3-large` on `openai`).
+- Judge default: OpenAI Codex via `pi` RPC (`openai-codex`, `gpt-5.1-codex-mini`) with optional Gemini/OpenAI/OpenRouter overrides for evaluation.
 - Retrieval defaults: k=8, min_score=0.75, include=open.
 - Thresholds: min_edge=0.85, min_close=0.90.
 - Judge guardrail: duplicate targets must be open (`target_not_open` veto otherwise).
@@ -732,7 +735,7 @@ What we did
 - Published the initial code to: `https://github.com/sebslight/dupcanon`.
 
 What comes next
-- Begin Phase 2 (`sync` + `refresh --known-only`) with DB + GitHub integration.
+- Begin Phase 2 (`sync` + `refresh --refresh-known`) with DB + GitHub integration.
 
 ### 2026-02-13 — Entry 2 (Phase 2 first pass)
 
@@ -748,7 +751,7 @@ What we did
 - Added tests for repo parsing, semantic hashing, and `--since` parsing.
 
 What comes next
-- Clarify and document refresh semantics (`default` vs `--known-only`).
+- Clarify and document refresh semantics (`default` vs `--refresh-known`).
 - Add integration tests for content-version and metadata-only updates.
 - Add richer structured timing logs and artifact outputs.
 
@@ -950,7 +953,7 @@ What we did
 - Ran `sync` on `psf/requests` (issues, open):
   - dry-run: fetched 185, failed 0
   - write run: fetched 185, inserted 185, failed 0
-- Ran `refresh --known-only` on the same repo:
+- Ran `refresh --refresh-known` on the same repo:
   - dry-run: known 185, refreshed 185, failed 0
   - write run: known 185, refreshed 185, failed 0
 - Ran `embed --only-changed` (issues):

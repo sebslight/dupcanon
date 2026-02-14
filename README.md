@@ -57,8 +57,18 @@ uv sync
 Copy `.env.example` to `.env` and set at minimum:
 
 - `SUPABASE_DB_URL` (Postgres DSN, not Supabase HTTPS URL)
-- `GEMINI_API_KEY` (or `OPENAI_API_KEY` with `--provider openai`, or `OPENROUTER_API_KEY` with `--provider openrouter`; `--provider openai-codex` uses `pi --mode rpc --provider openai-codex` and forwards `--model`, e.g. `gpt-5.1-mini-codex`)
+- `OPENAI_API_KEY` (required for default OpenAI embeddings)
+- `GEMINI_API_KEY` (required only when embedding/judge provider is `gemini`)
+- `OPENROUTER_API_KEY` (required only when judge provider is `openrouter`)
+- default judge provider is `openai-codex` via `pi --mode rpc --provider openai-codex` (no API key in env)
 - `GITHUB_TOKEN` (optional if `gh` is already authenticated)
+
+Default model stack:
+- `DUPCANON_EMBEDDING_PROVIDER=openai`
+- `DUPCANON_EMBEDDING_MODEL=text-embedding-3-large`
+- `DUPCANON_JUDGE_PROVIDER=openai-codex`
+- `DUPCANON_JUDGE_MODEL=gpt-5.1-codex-mini`
+- keep `DUPCANON_EMBEDDING_DIM=768`
 
 ### 3) Validate runtime
 
@@ -71,6 +81,8 @@ uv run dupcanon init
 ```bash
 uv run dupcanon sync --repo openclaw/openclaw --since 3d
 uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed
+# OpenAI embeddings override example:
+# uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed --provider openai --model text-embedding-3-large
 uv run dupcanon candidates --repo openclaw/openclaw --type issue --include open
 uv run dupcanon judge --repo openclaw/openclaw --type issue
 uv run dupcanon judge-audit --repo openclaw/openclaw --type issue --sample-size 100 --seed 42 --cheap-provider gemini --strong-provider openai --workers 4
