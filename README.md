@@ -79,6 +79,10 @@ Judge model resolution (verifiable in `src/dupcanon/judge_providers.py`):
   - openai -> `gpt-5-mini`
   - openrouter -> `minimax/minimax-m2.5`
   - openai-codex -> `gpt-5.1-codex-mini`
+
+Judge-audit model resolution follows the same pattern independently for cheap and strong models:
+- cheap path uses `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER` / `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`
+- strong path uses `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER` / `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`
 - judge-audit env defaults (optional):
   - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
   - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
@@ -127,6 +131,16 @@ All LLM-using commands support explicit CLI flags and env-backed defaults.
 Thinking values: `off|minimal|low|medium|high|xhigh`.
 Gemini paths reject `xhigh`.
 
+## Runtime reliability defaults
+
+- Retry behavior for GitHub + LLM/embedding HTTP status handling is centralized in `src/dupcanon/llm_retry.py`.
+- Retryable statuses: `429`, `5xx`, and network/unknown status paths (`None`).
+- Backoff: exponential with jitter (`1, 2, 4, ...` seconds, capped at ~30s + jitter).
+- Client defaults:
+  - GitHub + most model clients: `max_attempts=5`
+  - openai-codex (`pi` RPC): `max_attempts=3`
+- Client constructors validate critical runtime inputs (`max_attempts > 0`, provider-specific dimension/timeout constraints).
+
 ## Quality gates
 
 ```bash
@@ -148,6 +162,9 @@ rg "validation_alias=\"DUPCANON_" src/dupcanon/config.py
 
 # provider/model/thinking resolution + guardrails
 rg "def default_judge_model|validate_thinking_for_provider|require_judge_api_key" src/dupcanon/judge_providers.py
+
+# retry + validation primitives shared across clients
+rg "def should_retry_http_status|def retry_delay_seconds|def validate_max_attempts" src/dupcanon/llm_retry.py
 
 # workflow online vars (shadow mode)
 rg "DUPCANON_ONLINE_" .github/workflows/detect-new-shadow.yml

@@ -134,6 +134,7 @@ Single CLI, subcommands. Example name: dupcanon.
 
 - dupcanon judge-audit --repo org/name --type issue|pr [--sample-size 100] [--seed 42] [--min-edge 0.85] [--cheap-provider ...] [--cheap-model ...] [--cheap-thinking ...] [--strong-provider ...] [--strong-model ...] [--strong-thinking ...] [--workers N] [--verbose] [--debug-rpc]
   - Samples latest fresh candidate sets (open source items only), runs cheap and strong judges on the same sample, and records audit outcomes into `judge_audit_runs` + `judge_audit_run_items`.
+  - Cheap/strong model resolution is independent per lane (`--*-model` override, otherwise lane provider-match with lane env defaults, otherwise provider defaults).
   - Produces immediate confusion-matrix style counts (`tp`, `fp`, `fn`, `tn`) plus `conflict` (both accepted, different target).
   - `--debug-rpc` prints raw `pi --mode rpc` stdout/stderr event lines for `openai-codex` troubleshooting.
   - Judge-audit defaults can be set via env:
@@ -142,6 +143,7 @@ Single CLI, subcommands. Example name: dupcanon.
 
 - dupcanon detect-new --repo org/name --type issue|pr --number N [--provider ...] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--k 8] [--min-score 0.75] [--maybe-threshold 0.85] [--duplicate-threshold 0.92] [--json-out path]
   - Runs one-item online duplicate detection using the same provider/model/thinking controls as judge.
+  - Model resolution matches judge behavior (`--model` override, otherwise configured-provider match, otherwise provider defaults).
 
 - dupcanon canonicalize --repo org/name --type issue|pr
   - Computes canonical statistics on the fly from accepted edges (no canonical table materialization in v1).
@@ -537,10 +539,12 @@ Staleness propagation
 ## Error handling and retries
 
 Retry policy (GitHub + model providers)
-- Retry on 429, 5xx, and transient network failures.
-- Retry up to 5 attempts with exponential backoff and jitter.
-- Base schedule: 1s, 2s, 4s, 8s, 16s (cap ~30s).
-- If `Retry-After` is returned, honor it.
+- Retry on 429, 5xx, and transient/unknown network failures.
+- Backoff schedule is exponential with jitter (1s, 2s, 4s, 8s, 16s; cap ~30s + jitter).
+- Default attempt counts are client-specific:
+  - GitHub + most model clients: 5 attempts
+  - openai-codex (`pi` RPC) judge: 3 attempts
+- Shared retry/backoff and max-attempt validation helpers live in `src/dupcanon/llm_retry.py`.
 
 GitHub API
 - Partial failure policy: one failed page does not corrupt DB; log and continue where possible.

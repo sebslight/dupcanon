@@ -291,6 +291,11 @@ Online detect-new inherits judge defaults when flags are omitted:
 - `DUPCANON_JUDGE_MODEL`
 - `DUPCANON_JUDGE_THINKING`
 
+Model resolution behavior for detect-new:
+- if `--model` is provided, it wins
+- else if selected provider matches configured provider, `DUPCANON_JUDGE_MODEL` is used
+- else provider defaults are used (`gemini-3-flash-preview`, `gpt-5-mini`, `minimax/minimax-m2.5`, `gpt-5.1-codex-mini`)
+
 GitHub workflow-specific tuning vars (optional, consumed by `.github/workflows/detect-new-shadow.yml`):
 - `DUPCANON_ONLINE_PROVIDER` (default in workflow: `gemini`)
 - `DUPCANON_ONLINE_MODEL` (default: empty -> command/provider default resolution)

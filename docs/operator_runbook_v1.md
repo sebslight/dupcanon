@@ -12,9 +12,13 @@ This runbook describes the current end-to-end workflow for running `dupcanon` sa
   - Default judge uses OpenAI Codex via `pi` RPC (`DUPCANON_JUDGE_PROVIDER=openai-codex`)
   - Optional global judge thinking default: `DUPCANON_JUDGE_THINKING` (`off|minimal|low|medium|high|xhigh`)
   - Provider/model fallback behavior:
-    - If command `--model` is set, it wins.
-    - Else if selected provider matches configured provider, `DUPCANON_JUDGE_MODEL` is used.
-    - Else provider defaults are used (`gemini-3-flash-preview`, `gpt-5-mini`, `minimax/minimax-m2.5`, `gpt-5.1-codex-mini`).
+    - `judge` / `detect-new`:
+      - if command `--model` is set, it wins
+      - else if selected provider matches configured provider, `DUPCANON_JUDGE_MODEL` is used
+      - else provider defaults are used (`gemini-3-flash-preview`, `gpt-5-mini`, `minimax/minimax-m2.5`, `gpt-5.1-codex-mini`)
+    - `judge-audit` applies the same rule independently to cheap and strong lanes using:
+      - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER` / `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`
+      - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER` / `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`
   - Optional judge-audit defaults:
     - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
     - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
@@ -239,6 +243,15 @@ GitHub Actions shadow workflow
   - If model returns `certainty="unsure"` for a duplicate claim, the decision is rejected (veto).
   - Follow-up/partial-overlap/scope-mismatch decisions are vetoed from acceptance.
 
+## Runtime reliability notes
+
+- Shared retry/backoff/validation primitives live in `src/dupcanon/llm_retry.py`.
+- Retryable statuses are `429` and `5xx` (plus unknown/network paths).
+- Backoff is exponential with jitter and a ~30s cap.
+- Default attempts are client-specific:
+  - GitHub + most model clients: `max_attempts=5`
+  - openai-codex (`pi` RPC): `max_attempts=3`
+
 ## Verification checklist (docs vs code)
 
 ```bash
@@ -253,6 +266,9 @@ rg "validation_alias=\"DUPCANON_" src/dupcanon/config.py
 
 # provider/model/thinking resolution logic
 rg "def default_judge_model|validate_thinking_for_provider|require_judge_api_key" src/dupcanon/judge_providers.py
+
+# retry/backoff defaults and validation helpers
+rg "def should_retry_http_status|def retry_delay_seconds|def validate_max_attempts" src/dupcanon/llm_retry.py
 
 # online workflow tuning vars
 rg "DUPCANON_ONLINE_" .github/workflows/detect-new-shadow.yml
