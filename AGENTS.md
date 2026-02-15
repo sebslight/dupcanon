@@ -13,10 +13,10 @@ When implementing behavior, schema, or defaults, follow the spec above first.
 
 ## 2) Locked v1 decisions (do not drift)
 
-- Embeddings: Gemini API `gemini-embedding-001`
+- Embeddings default: OpenAI `text-embedding-3-large` (`DUPCANON_EMBEDDING_PROVIDER=openai`)
 - Embedding dimension: `768` (pgvector column is `vector(768)`)
-- Judge model default: Gemini API `gemini-3-flash-preview`
-- Optional judge override for evaluation: OpenAI `gpt-5-mini`
+- Judge default: OpenAI Codex via `pi` RPC (`openai-codex`, model `gpt-5.1-codex-mini`)
+- Optional judge overrides for evaluation: OpenAI `gpt-5-mini`, Gemini `gemini-3-flash-preview`, OpenRouter `minimax/minimax-m2.5`
 - Retrieval defaults: `k=8`, `min_score=0.75`
 - Thresholds: `min_edge=0.85`, `min_close=0.90`
 - Input content for modeling: title + body only (no comments)
@@ -31,7 +31,7 @@ When implementing behavior, schema, or defaults, follow the spec above first.
 - Package/env management: **uv**
 - CLI framework: **Typer**
 - Terminal UX and progress bars: **Rich**
-- Logging: **Rich logging** (`rich.logging.RichHandler`) with consistent key-value fields
+- Logging: **stdlib logging** with Rich console handler + Logfire sink (`logfire.LogfireLoggingHandler`) and consistent key-value fields
 - Data/config models and validation: **Pydantic**
 - Lint/format: **ruff**
 - Type checking: **pyright**
@@ -42,7 +42,7 @@ When implementing behavior, schema, or defaults, follow the spec above first.
 - Do **not** use system `python`/`python3`; use `uv run ...`
 - Do **not** use `tqdm` in v1; use Rich progress APIs
 - Use **Pydantic whenever possible** for settings, request/response contracts, and validation at boundaries
-- Use Rich-based logging throughout command entrypoints and internal services
+- Use stdlib logging throughout command entrypoints and internal services (Rich console + Logfire sink)
 
 ## 4) Database and migrations
 
@@ -69,13 +69,14 @@ Current initial schema migration:
 
 ## 5) Logging and observability requirements
 
-Use Rich logger everywhere with consistent key-value fields.
+Use stdlib logging everywhere with consistent key-value fields (Rich console + Logfire sink).
 
 Minimum fields where applicable:
 - `run_id`, `command`, `repo`, `type`, `stage`, `item_id`, `status`, `duration_ms`, `error_class`
 
 Artifacts/debug outputs:
-- Store under `.local/artifacts/`
+- Emit failure/debug artifact payloads to Logfire (no local failure-artifact file writes)
+- Keep `.local/artifacts/` for operator-directed outputs (for example `detect-new --json-out ...`)
 
 ## 6) Development sequencing (high-level)
 
