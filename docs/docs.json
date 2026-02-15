@@ -13,7 +13,8 @@
         "group": "Overview",
         "pages": [
           "index",
-          "get-started"
+          "get-started",
+          "architecture"
         ]
       }
     ]

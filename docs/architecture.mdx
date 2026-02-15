@@ -1,0 +1,358 @@
+---
+title: Architecture
+description: End-to-end information flow, command data paths, and safety gates in dupcanon v1.
+---
+
+<Info>
+This page is the adoption-facing architecture view: what each command reads/writes, how data moves through batch vs online paths, and where deterministic safety gates apply.
+</Info>
+
+## System architecture at a glance
+
+<CardGroup cols={3}>
+  <Card title="Data plane (state)">
+    Supabase Postgres + pgvector stores items, embeddings, candidate snapshots, judge decisions, and close plans/results.
+  </Card>
+  <Card title="Decision plane">
+    Embedding retrieval narrows candidates; LLM judgment proposes duplicate targets; deterministic policy gates accept/reject.
+  </Card>
+  <Card title="Action plane">
+    Close actions are never direct from judge. They are gated through <code>plan-close</code> + explicit <code>apply-close --yes</code>.
+  </Card>
+</CardGroup>
+
+```mermaid
+flowchart LR
+  subgraph External
+    GH[GitHub API]
+    EP[Embedding Provider]
+    JP[Judge Provider]
+    LF[Logfire]
+  end
+
+  subgraph CLI[dupcanon CLI]
+    SY[sync/refresh]
+    EM[embed]
+    CA[candidates]
+    JU[judge]
+    CN[canonicalize]
+    PL[plan-close]
+    AP[apply-close]
+    DN[detect-new]
+  end
+
+  subgraph DB[Supabase Postgres + pgvector]
+    R[(repos)]
+    I[(items)]
+    E[(embeddings)]
+    CS[(candidate_sets + members)]
+    JD[(judge_decisions)]
+    CR[(close_runs + close_run_items)]
+  end
+
+  GH --> SY
+  SY --> R
+  SY --> I
+  I --> EM
+  EM --> EP
+  EP --> EM
+  EM --> E
+  E --> CA
+  I --> CA
+  CA --> CS
+  CS --> JU
+  I --> JU
+  JU --> JP
+  JP --> JU
+  JU --> JD
+  JD --> CN
+  I --> CN
+  GH --> CN
+  JD --> PL
+  I --> PL
+  GH --> PL
+  PL --> CR
+  CR --> AP
+  GH --> AP
+  AP --> GH
+  AP --> CR
+
+  GH --> DN
+  DN --> R
+  DN --> I
+  DN --> E
+  DN -.->|stale source only| EP
+  DN --> JP
+
+  CLI --> LF
+```
+
+## Two coordinated pipelines
+
+<Tabs>
+  <Tab title="Batch pipeline (many items)">
+
+The batch path processes a repo corpus and produces reviewed close actions.
+
+```mermaid
+flowchart TD
+  A[sync / refresh] --> B[embed --only-changed]
+  B --> C[candidates --include open]
+  C --> D[judge]
+  D --> F[plan-close]
+  D -.->|optional stats| E[canonicalize]
+  E -.->|informs review| F
+  F --> G{dry-run?}
+  G -- yes --> H[Review stats only]
+  G -- no --> I[Persist close_run mode=plan]
+  I --> J[Human review]
+  J --> K[apply-close --yes]
+  K --> L[GitHub close + duplicate comment]
+```
+
+<Note>
+For a batch of issues/PRs, each stage iterates over many source items. Artifacts are persisted after each stage so runs are restartable and auditable.
+</Note>
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Op as Operator/CI
+  participant CLI as dupcanon
+  participant GH as GitHub API
+  participant DB as Postgres/pgvector
+  participant LLM as Judge Provider
+
+  Op->>CLI: sync/refresh (repo)
+  CLI->>GH: fetch items
+  GH-->>CLI: issue/pr payloads
+  CLI->>DB: upsert items + content_version
+
+  Op->>CLI: embed --only-changed
+  CLI->>DB: list items needing embedding
+  CLI->>LLM: embedding requests
+  LLM-->>CLI: vectors
+  CLI->>DB: upsert embeddings
+
+  Op->>CLI: candidates
+  loop per source item
+    CLI->>DB: nearest neighbors (same repo/type/state)
+    CLI->>DB: write candidate_set + members
+  end
+
+  Op->>CLI: judge
+  loop per candidate set
+    CLI->>LLM: judge(source, candidates)
+    LLM-->>CLI: structured duplicate decision
+    CLI->>DB: write judge_decisions (accepted/rejected/skipped)
+  end
+
+  Op->>CLI: canonicalize (optional)
+  CLI->>DB: read accepted edges + item metadata
+  CLI->>GH: fetch maintainer list
+  CLI-->>Op: canonical stats summary
+
+  Op->>CLI: plan-close
+  CLI->>DB: read accepted edges + item metadata
+  CLI->>GH: fetch maintainer list
+  CLI->>DB: write close_runs(mode=plan) + close_run_items
+
+  Op->>CLI: apply-close --yes
+  CLI->>DB: create mode=apply run + copy plan rows
+  loop per planned close action
+    CLI->>GH: close as duplicate of canonical
+    GH-->>CLI: API result
+    CLI->>DB: persist per-item gh_result
+  end
+```
+  </Tab>
+
+  <Tab title="Online pipeline (detect-new)">
+
+`detect-new` classifies one newly opened issue/PR into `duplicate`, `maybe_duplicate`, or `not_duplicate`.
+
+```mermaid
+flowchart TD
+  A[GitHub issue/pr opened] --> B[detect-new --repo --type --number]
+  B --> C[fetch source item from GitHub]
+  C --> D[upsert source into items]
+  D --> E{embedding stale/missing?}
+  E -- yes --> F[embed source and upsert embedding]
+  E -- no --> G[reuse existing source embedding]
+  F --> H[retrieve open same-type neighbors]
+  G --> H
+  H --> I{no candidates?}
+  I -- yes --> J[not_duplicate: reason=no_candidates]
+  I -- no --> K[judge source vs candidates]
+  K --> L[apply strict guardrails + thresholds]
+  L --> M[duplicate | maybe_duplicate | not_duplicate]
+  M --> N[emit JSON output]
+```
+
+<AccordionGroup>
+  <Accordion title="What detect-new persists vs does not persist">
+    **Persists in v1:**
+
+    - source row in `items` (upsert)
+    - source embedding in `embeddings` when stale/missing
+
+    **Does not persist in v1:**
+
+    - no `candidate_sets` snapshot write
+    - no `judge_decisions` row write
+    - no close action
+  </Accordion>
+  <Accordion title="Strict duplicate guardrails in online mode">
+    Duplicate verdict stays strict; high-confidence model output can still downgrade to `maybe_duplicate` when:
+
+    - structural guardrails fail (`online_strict_guardrail:*`)
+    - retrieval support is weak (`duplicate_low_retrieval_support`)
+    - candidate-score gap is too small (`< 0.015`)
+  </Accordion>
+</AccordionGroup>
+
+  </Tab>
+</Tabs>
+
+## Command-by-command information flow
+
+<Warning>
+This table is the operational truth for **what each command reads and writes**.
+</Warning>
+
+| Command | Primary input | Reads | Writes | Output role |
+|---|---|---|---|---|
+| `init` | local env/runtime | env + local runtime checks | none | readiness checks only |
+| `maintainers` | `--repo` | GitHub collaborators/permissions | none | maintainer list for policy checks |
+| `sync` | repo + type/state/since | GitHub issues/PRs | `repos` (upsert), `items` (upsert + content hash/version) | corpus ingest |
+| `refresh` | repo + type | GitHub + existing `items` | `items` (discover new; optional metadata refresh) | incremental freshness |
+| `embed` | repo + type | `items` needing vectors | `embeddings` | semantic retrieval substrate |
+| `candidates` | repo + type + k/min_score | `items`, `embeddings` | `candidate_sets`, `candidate_set_members` (plus stale marking) | reproducible retrieval snapshot |
+| `judge` | repo + type + provider/model | `candidate_sets` + source/candidate item context | `judge_decisions` (`accepted/rejected/skipped`) | accepted-edge graph source |
+| `judge-audit` | sampled candidate sets | candidate sets + same judge runtime (cheap/strong lanes) | `judge_audit_runs`, `judge_audit_run_items` | evaluation + disagreement analysis |
+| `report-audit` | audit run id | `judge_audit_runs`, `judge_audit_run_items` | none | reporting/simulation only |
+| `detect-new` | single item number | GitHub item + DB corpus embeddings | `repos` (upsert), `items` (source upsert), `embeddings` (source if stale) | online JSON verdict |
+| `canonicalize` | repo + type | accepted edges + item metadata + maintainer list | none (stats output) | canonical cluster computation |
+| `plan-close` | repo + type + min_close | accepted edges + item metadata + maintainer list | `close_runs(mode=plan)`, `close_run_items` (unless dry-run) | reviewable close plan |
+| `apply-close` | `close_run_id` + `--yes` | close plan rows + GitHub | `close_runs(mode=apply)`, `close_run_items` apply results | executed mutations |
+
+## Command-to-state map (Mermaid)
+
+```mermaid
+flowchart LR
+  subgraph Cmds[Commands]
+    INIT[init]
+    MAINT[maintainers]
+    SYNC[sync]
+    REF[refresh]
+    EMB[embed]
+    CAND[candidates]
+    JUDGE[judge]
+    AUD[judge-audit]
+    RAUD[report-audit]
+    DET[detect-new]
+    CAN[canonicalize]
+    PLAN[plan-close]
+    APPLY[apply-close]
+  end
+
+  subgraph State[Persisted state]
+    REPOS[(repos)]
+    ITEMS[(items)]
+    EMBS[(embeddings)]
+    CSETS[(candidate_sets + members)]
+    JDEC[(judge_decisions)]
+    ARUN[(judge_audit_runs + items)]
+    CRUN[(close_runs + close_run_items)]
+  end
+
+  GH[GitHub API]
+  EP[Embedding provider]
+  JP[Judge provider]
+  OUT[[CLI output / artifacts]]
+
+  INIT --> OUT
+
+  MAINT --> GH
+  MAINT --> OUT
+
+  SYNC --> GH
+  SYNC --> REPOS
+  SYNC --> ITEMS
+
+  REF --> GH
+  REF --> ITEMS
+
+  EMB --> ITEMS
+  EMB --> EP
+  EMB --> EMBS
+
+  CAND --> ITEMS
+  CAND --> EMBS
+  CAND --> CSETS
+
+  JUDGE --> CSETS
+  JUDGE --> ITEMS
+  JUDGE --> JP
+  JUDGE --> JDEC
+
+  AUD --> CSETS
+  AUD --> JP
+  AUD --> ARUN
+
+  RAUD --> ARUN
+  RAUD --> OUT
+
+  DET --> GH
+  DET --> REPOS
+  DET --> ITEMS
+  DET --> EMBS
+  DET -.->|stale source only| EP
+  DET --> JP
+  DET --> OUT
+
+  CAN --> JDEC
+  CAN --> ITEMS
+  CAN --> GH
+  CAN --> OUT
+
+  PLAN --> JDEC
+  PLAN --> ITEMS
+  PLAN --> GH
+  PLAN --> CRUN
+
+  APPLY --> CRUN
+  APPLY --> GH
+  APPLY --> CRUN
+  APPLY --> OUT
+```
+
+## Where safety decisions happen
+
+<CardGroup cols={2}>
+  <Card title="Judge acceptance gate (batch)">
+    Duplicate edges require valid structured response, candidate membership, <code>confidence >= 0.85</code>, open target, and score-gap <code>>= 0.015</code>.
+  </Card>
+  <Card title="Close planning gate">
+    Close eligibility requires direct accepted edge to canonical, direct confidence <code>>= 0.90</code>, and maintainer author/assignee protections.
+  </Card>
+  <Card title="Apply mutation gate">
+    No mutation happens without persisted <code>mode=plan</code> run and explicit <code>--yes</code>.
+  </Card>
+  <Card title="Online strict mapping">
+    `detect-new` can downgrade high-confidence duplicate predictions to `maybe_duplicate` when structural/retrieval guardrails fail.
+  </Card>
+</CardGroup>
+
+## How everything is tied together
+
+The core linkage is shared state and shared decision runtime:
+
+1. **Shared corpus state** (`items` + `embeddings`) feeds both batch and online paths.
+2. **Shared duplicate reasoning runtime** powers `judge`, `judge-audit`, and `detect-new`.
+3. **Accepted-edge graph** in `judge_decisions` is the bridge from detection to canonicalization and close planning.
+4. **Close governance state** (`close_runs`) gives auditable review/apply separation.
+
+<Info>
+Operationally: run scheduled freshness (`refresh`/`embed`) so online `detect-new` stays accurate, and run batch canonicalization/plan/apply for governed close actions.
+</Info>
