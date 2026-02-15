@@ -25,6 +25,7 @@ Use commands as `uv run dupcanon ...` (or `dupcanon ...` if your venv is activat
 - `dupcanon candidates`
 - `dupcanon judge`
 - `dupcanon judge-audit`
+- `dupcanon report-audit`
 - `dupcanon detect-new`
 - `dupcanon canonicalize`
 - `dupcanon maintainers`
@@ -64,6 +65,8 @@ Copy `.env.example` to `.env` and set at minimum:
 - `OPENROUTER_API_KEY` (required only when judge provider is `openrouter`)
 - default judge provider is `openai-codex` via `pi --mode rpc --provider openai-codex` (no API key in env)
 - `GITHUB_TOKEN` (optional if `gh` is already authenticated)
+- optional Logfire remote sink:
+  - `LOGFIRE_TOKEN` (send logs to Logfire project)
 
 Default model stack:
 - `DUPCANON_EMBEDDING_PROVIDER=openai`
@@ -105,6 +108,8 @@ uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed
 uv run dupcanon candidates --repo openclaw/openclaw --type issue --include open
 uv run dupcanon judge --repo openclaw/openclaw --type issue --thinking medium
 uv run dupcanon judge-audit --repo openclaw/openclaw --type issue --sample-size 100 --seed 42 --cheap-provider gemini --cheap-thinking low --strong-provider openai --strong-thinking high --workers 4
+# print a prior audit report without re-running models:
+# uv run dupcanon report-audit --run-id 4 --disagreements-limit 30
 # debugging openai-codex RPC behavior:
 # uv run dupcanon judge-audit ... --cheap-provider openai-codex --strong-provider openai-codex --cheap-thinking medium --strong-thinking medium --debug-rpc --verbose
 uv run dupcanon detect-new --repo openclaw/openclaw --type issue --number 123 --thinking low
@@ -124,13 +129,30 @@ All LLM-using commands support explicit CLI flags and env-backed defaults.
   - flags: `--provider`, `--model`, `--thinking`
   - env defaults: `DUPCANON_JUDGE_PROVIDER`, `DUPCANON_JUDGE_MODEL`, `DUPCANON_JUDGE_THINKING`
 - `judge-audit`
-  - flags: `--cheap-provider`, `--cheap-model`, `--cheap-thinking`, `--strong-provider`, `--strong-model`, `--strong-thinking`
+  - flags: `--cheap-provider`, `--cheap-model`, `--cheap-thinking`, `--strong-provider`, `--strong-model`, `--strong-thinking`, `--show-disagreements/--no-show-disagreements`, `--disagreements-limit`
   - env defaults:
     - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
     - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
 
 Thinking values: `off|minimal|low|medium|high|xhigh`.
 Gemini paths reject `xhigh`.
+
+## Logfire behavior (token / no-token)
+
+`dupcanon` configures Logfire with `send_to_logfire="if-token-present"`.
+
+- If `LOGFIRE_TOKEN` is present:
+  - standard logging events are sent to Logfire
+  - local console output still uses Rich formatting
+- If no `LOGFIRE_TOKEN` is present:
+  - nothing is sent to Logfire
+  - console logging works exactly as normal
+
+Current wiring:
+- console: `RichHandler`
+- remote sink: `logfire.LogfireLoggingHandler`
+- artifact payloads are logged with full payload for online searchability.
+- local failure-artifact files are not written (Logfire-only artifact policy).
 
 ## Runtime reliability defaults
 
@@ -156,6 +178,7 @@ uv run pytest
 # command flags
 uv run dupcanon judge --help
 uv run dupcanon judge-audit --help
+uv run dupcanon report-audit --help
 uv run dupcanon detect-new --help
 
 # env-backed settings
@@ -169,6 +192,9 @@ rg "SYSTEM_PROMPT|def get_thread_local_judge_client|def build_user_prompt|def pa
 
 # retry + validation primitives shared across clients
 rg "def should_retry_http_status|def retry_delay_seconds|def validate_max_attempts" src/dupcanon/llm_retry.py
+
+# logging + remote sink wiring
+rg "LogfireLoggingHandler|send_to_logfire|LOGFIRE_" src/dupcanon/logging_config.py .env.example
 
 # workflow online vars (shadow mode)
 rg "DUPCANON_ONLINE_" .github/workflows/detect-new-shadow.yml

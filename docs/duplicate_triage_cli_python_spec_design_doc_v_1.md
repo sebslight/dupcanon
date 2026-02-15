@@ -3,7 +3,7 @@
 Status: Draft design doc for internal discussion
 
 Implementation status snapshot (2026-02-14)
-- Implemented commands: `init`, `sync`, `refresh`, `embed`, `candidates`, `judge`, `judge-audit`, `detect-new`, `canonicalize`, `maintainers`, `plan-close`, `apply-close`.
+- Implemented commands: `init`, `sync`, `refresh`, `embed`, `candidates`, `judge`, `judge-audit`, `report-audit`, `detect-new`, `canonicalize`, `maintainers`, `plan-close`, `apply-close`.
 - Current apply gate: reviewed persisted `close_run` + explicit `--yes` (no approval-file workflow).
 - Current canonical preference: open-first, then English-language preference, then maintainer preference.
 - Judge runtime path is centralized in `src/dupcanon/judge_runtime.py` and reused by judge/audit/online detect.
@@ -134,14 +134,19 @@ Single CLI, subcommands. Example name: dupcanon.
     - Otherwise use provider defaults (`gemini-3-flash-preview`, `gpt-5-mini`, `minimax/minimax-m2.5`, `gpt-5.1-codex-mini`).
   - Thinking defaults can be set globally via `DUPCANON_JUDGE_THINKING`.
 
-- dupcanon judge-audit --repo org/name --type issue|pr [--sample-size 100] [--seed 42] [--min-edge 0.85] [--cheap-provider ...] [--cheap-model ...] [--cheap-thinking ...] [--strong-provider ...] [--strong-model ...] [--strong-thinking ...] [--workers N] [--verbose] [--debug-rpc]
-  - Samples latest fresh candidate sets (open source items only), runs cheap and strong judges on the same sample, and records audit outcomes into `judge_audit_runs` + `judge_audit_run_items`.
+- dupcanon judge-audit --repo org/name --type issue|pr [--sample-size 100] [--seed 42] [--min-edge 0.85] [--cheap-provider ...] [--cheap-model ...] [--cheap-thinking ...] [--strong-provider ...] [--strong-model ...] [--strong-thinking ...] [--workers N] [--verbose] [--debug-rpc] [--show-disagreements/--no-show-disagreements] [--disagreements-limit N]
+  - Samples latest fresh candidate sets (open source items only) that have at least one candidate member, runs cheap and strong judges on the same sample, and records audit outcomes into `judge_audit_runs` + `judge_audit_run_items`.
   - Cheap/strong model resolution is independent per lane (`--*-model` override, otherwise lane provider-match with lane env defaults, otherwise provider defaults).
   - Produces immediate confusion-matrix style counts (`tp`, `fp`, `fn`, `tn`) plus `conflict` (both accepted, different target).
+  - By default prints a disagreement table (`fp`, `fn`, `conflict`, `incomplete`) with source + cheap/strong decision details; limit defaults to 20 rows.
   - `--debug-rpc` prints raw `pi --mode rpc` stdout/stderr event lines for `openai-codex` troubleshooting.
   - Judge-audit defaults can be set via env:
     - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
     - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
+
+- dupcanon report-audit --run-id N [--show-disagreements/--no-show-disagreements] [--disagreements-limit N]
+  - Prints a persisted judge-audit run summary from `judge_audit_runs` without re-running model calls.
+  - Optionally prints disagreement rows (`fp`, `fn`, `conflict`, `incomplete`) from `judge_audit_run_items`.
 
 - dupcanon detect-new --repo org/name --type issue|pr --number N [--provider ...] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--k 8] [--min-score 0.75] [--maybe-threshold 0.85] [--duplicate-threshold 0.92] [--json-out path]
   - Runs one-item online duplicate detection using the same provider/model/thinking controls as judge.
@@ -178,7 +183,10 @@ The CLI is a thin orchestrator:
 - LLM judging default via OpenAI Codex `pi` RPC (`openai-codex`, model `gpt-5.1-codex-mini`), with optional Gemini/OpenAI/OpenRouter overrides for evaluation.
 - Python CLI stack: Typer for command surface + Rich for terminal UX/progress rendering.
 - Data/config modeling and validation: Pydantic.
-- Logging stack: Rich logger (`rich.logging.RichHandler`) with consistent key-value fields across all commands and internal pipeline steps.
+- Logging stack: stdlib logging with Rich console handler + Logfire sink.
+  - Console remains Rich-formatted (`rich.logging.RichHandler`).
+  - Remote sink uses `logfire.LogfireLoggingHandler`.
+  - Logfire is configured with `send_to_logfire="if-token-present"` for safe token-optional local runs.
 - Progress bars: Rich progress only (do not use tqdm in v1).
 
 
@@ -479,7 +487,7 @@ Rules
 - If model returns `certainty="unsure"` for a duplicate claim, reject via veto.
 - Follow-up/partial-overlap/subset-superset and bug-vs-feature mismatches are vetoed from acceptance.
 - If the candidate target is not open, reject via veto (`target_not_open`).
-- If model output is invalid JSON, persist an artifact and a `judge_decisions` skipped row (`veto_reason=invalid_response:*`).
+- If model output is invalid JSON, persist an artifact payload to Logfire and a `judge_decisions` skipped row (`veto_reason=invalid_response:*`).
 
 
 ## Safety and guardrails (closing)
@@ -557,16 +565,18 @@ Embeddings
 
 LLM judge
 - One bad response must not abort the run.
-- If response is invalid JSON, treat as non-duplicate, record an error reason, and persist the raw response in `.local/artifacts`.
+- If response is invalid JSON, treat as non-duplicate, record an error reason, and emit full payload to Logfire.
 
 
 ## Observability and artifacts (v1)
 
-- Use Rich logger everywhere (CLI entrypoints + internal services) with consistent key-value fields.
+- Use stdlib logging everywhere (CLI entrypoints + internal services) with consistent key-value fields.
+- Keep Rich console formatting, and forward logging events to Logfire for remote search/analysis.
 - Minimum log fields: `run_id`, `command`, `repo`, `type`, `stage`, `item_id` (when relevant), `status`, `duration_ms`, `error_class` (when relevant).
 - Persist per-run counters: synced, embedded, candidate sets built, judged, accepted edges, proposed closes, applied closes, skipped, failed.
 - Track skip/failure reason categories for auditability.
-- Persist debug artifacts (invalid JSON, model/API failures, apply failures) under `.local/artifacts`.
+- Persist debug artifact payloads (invalid JSON, model/API failures, apply failures) to Logfire.
+- Keep Rich console output for operator ergonomics while sending stdlib logging events remotely.
 
 
 ## Supabase operational notes
@@ -595,10 +605,11 @@ Phase 0: project bootstrap
 - Set up Python project scaffolding (`pyproject.toml`, `uv`, pydantic, ruff, pyright, pytest).
 - Create Typer CLI skeleton with all subcommands stubbed.
 - Use `rich` for CLI output (status panels, tables) and progress bars.
-- Use Rich logger for readable console logging from the start; log every command stage and important decision point.
+- Use stdlib logging with Rich console output from the start; log every command stage and important decision point.
+- Add Logfire logging sink so command/service logs are searchable online.
 - Use Pydantic wherever possible for settings models and boundary validation.
 - Add config loading (`.env` + env vars) and run IDs.
-- Standardize local artifacts path under `.local/artifacts`.
+- Keep `.local/artifacts` for operator-directed outputs (e.g., `detect-new --json-out`); failure/debug artifact payloads are emitted to Logfire.
 
 Exit criteria
 - `uv run ruff check`, `uv run pyright`, and `uv run pytest` pass.
@@ -643,7 +654,7 @@ Exit criteria
 Phase 5: LLM judge + edge recording
 - Implement judge prompt/response contract using default OpenAI Codex (`openai-codex`, `gpt-5.1-codex-mini`) with optional Gemini/OpenAI/OpenRouter overrides for evaluation.
 - Enforce strict JSON parsing, candidate-bounded target validation, and `min_edge` threshold.
-- Persist artifacts for invalid model responses under `.local/artifacts`.
+- Persist invalid model-response payloads to Logfire (no local failure-artifact file writes).
 - Implement edge policy: first accepted edge wins; allow explicit `--rejudge` flow.
 
 Exit criteria
@@ -725,7 +736,7 @@ Recommended implementation order
 - Thresholds: min_edge=0.85, min_close=0.90.
 - Judge guardrail: duplicate targets must be open (`target_not_open` veto otherwise).
 - Inputs to model: title + body only (no comments).
-- CLI/tooling: Typer + Rich for terminal UX/progress, Rich logger for logging, and Pydantic for settings/contracts.
+- CLI/tooling: Typer + Rich for terminal UX/progress, stdlib logging with Rich console + Logfire sink, and Pydantic for settings/contracts.
 - Edge lifecycle: first accepted edge wins by default; `--rejudge` allows replacement runs.
 - Overrides: no manual override system in v1.
 - Apply gate: explicit reviewed plan close_run + `--yes`.

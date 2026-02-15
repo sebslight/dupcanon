@@ -12,6 +12,7 @@ from dupcanon.models import (
     DetectSource,
     DetectVerdict,
     ItemType,
+    JudgeAuditRunReport,
     JudgeAuditStats,
     JudgeStats,
 )
@@ -28,6 +29,7 @@ def test_cli_help_shows_core_commands() -> None:
     assert "maintainers" in result.stdout
     assert "judge" in result.stdout
     assert "judge-audit" in result.stdout
+    assert "report-audit" in result.stdout
     assert "detect-new" in result.stdout
     assert "plan-close" in result.stdout
     assert "apply-close" in result.stdout
@@ -161,6 +163,17 @@ def test_judge_audit_help_includes_core_options() -> None:
     assert "--workers" in result.stdout
     assert "--verbose" in result.stdout
     assert "--debug-rpc" in result.stdout
+    assert "show-disagreements" in result.stdout
+    assert "--disagreements-" in result.stdout
+
+
+def test_report_audit_help_includes_core_options() -> None:
+    result = runner.invoke(app, ["report-audit", "--help"])
+
+    assert result.exit_code == 0
+    assert "--run-id" in result.stdout
+    assert "show-disagreements" in result.stdout
+    assert "--disagreements-" in result.stdout
 
 
 def test_detect_new_help_includes_core_options() -> None:
@@ -333,6 +346,7 @@ def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
             "3",
             "--verbose",
             "--debug-rpc",
+            "--no-show-disagreements",
         ],
     )
 
@@ -346,6 +360,105 @@ def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured.get("worker_concurrency") == 3
     assert captured.get("verbose") is True
     assert captured.get("debug_rpc") is True
+
+
+def test_judge_audit_prints_disagreements_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_judge_audit(**kwargs):
+        captured.update(kwargs)
+        return JudgeAuditStats(audit_run_id=55, sample_size_requested=10, sample_size_actual=10)
+
+    disagreement_capture: dict[str, object] = {}
+
+    def fake_print_disagreements(**kwargs) -> None:
+        disagreement_capture.update(kwargs)
+
+    monkeypatch.setattr("dupcanon.cli.run_judge_audit", fake_run_judge_audit)
+    monkeypatch.setattr("dupcanon.cli._print_judge_audit_disagreements", fake_print_disagreements)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "judge-audit",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--disagreements-limit",
+            "11",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert disagreement_capture.get("audit_run_id") == 55
+    assert disagreement_capture.get("limit") == 11
+
+
+def test_report_audit_prints_stored_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            captured["db_url"] = db_url
+
+        def get_judge_audit_run_report(self, *, audit_run_id: int):
+            captured["audit_run_id"] = audit_run_id
+            return JudgeAuditRunReport(
+                audit_run_id=audit_run_id,
+                repo="org/repo",
+                type=ItemType.ISSUE,
+                status="completed",
+                sample_policy="random_uniform",
+                sample_seed=42,
+                sample_size_requested=100,
+                sample_size_actual=100,
+                candidate_set_status="fresh",
+                source_state_filter="open",
+                min_edge=0.92,
+                cheap_provider="openai-codex",
+                cheap_model="gpt-5.1-codex-mini",
+                strong_provider="openai-codex",
+                strong_model="gpt-5.3-codex",
+                compared_count=98,
+                tp=10,
+                fp=6,
+                fn=3,
+                tn=79,
+                conflict=1,
+                incomplete=1,
+                created_by="dupcanon/judge-audit",
+                created_at=datetime.now(tz=UTC),
+                completed_at=datetime.now(tz=UTC),
+            )
+
+    disagreement_call: dict[str, object] = {}
+
+    def fake_print_disagreements(**kwargs) -> None:
+        disagreement_call.update(kwargs)
+
+    monkeypatch.setattr("dupcanon.cli.Database", FakeDatabase)
+    monkeypatch.setattr("dupcanon.cli._print_judge_audit_disagreements", fake_print_disagreements)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "report-audit",
+            "--run-id",
+            "4",
+            "--disagreements-limit",
+            "7",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("audit_run_id") == 4
+    assert disagreement_call.get("audit_run_id") == 4
+    assert disagreement_call.get("limit") == 7
 
 
 def test_judge_audit_uses_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -366,7 +479,14 @@ def test_judge_audit_uses_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = runner.invoke(
         app,
-        ["judge-audit", "--repo", "org/repo", "--type", "issue"],
+        [
+            "judge-audit",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--no-show-disagreements",
+        ],
     )
 
     assert result.exit_code == 0

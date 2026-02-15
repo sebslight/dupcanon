@@ -24,6 +24,8 @@ This runbook describes the current end-to-end workflow for running `dupcanon` sa
     - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
   - `GEMINI_API_KEY` only when embedding/judge provider is `gemini`
   - `OPENROUTER_API_KEY` only when judge provider is `openrouter`
+- Optional Logfire sink:
+  - `LOGFIRE_TOKEN`
 
 ## LLM control mapping (verifiable)
 
@@ -34,7 +36,7 @@ This runbook describes the current end-to-end workflow for running `dupcanon` sa
   - flags: `--provider`, `--model`, `--thinking`
   - env defaults: `DUPCANON_JUDGE_PROVIDER`, `DUPCANON_JUDGE_MODEL`, `DUPCANON_JUDGE_THINKING`
 - `judge-audit`
-  - flags: `--cheap-provider`, `--cheap-model`, `--cheap-thinking`, `--strong-provider`, `--strong-model`, `--strong-thinking`
+  - flags: `--cheap-provider`, `--cheap-model`, `--cheap-thinking`, `--strong-provider`, `--strong-model`, `--strong-thinking`, `--show-disagreements/--no-show-disagreements`, `--disagreements-limit`
   - env defaults:
     - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
     - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
@@ -135,7 +137,7 @@ Judge guardrail:
 
 ### 4b) Judge audit (sampled cheap-vs-strong, optional)
 
-Run a sampled audit over latest fresh candidate sets for open items only:
+Run a sampled audit over latest fresh candidate sets for open items only, filtered to sets with at least one candidate member:
 
 ```bash
 uv run dupcanon judge-audit \
@@ -157,6 +159,21 @@ This command writes audit rows to `judge_audit_runs` and `judge_audit_run_items`
 - confusion matrix counts (`tp`, `fp`, `fn`, `tn`)
 - `conflict` count (both accepted but different duplicate target)
 - `incomplete` rows (skipped/invalid model outputs)
+- a disagreement table (`fp`, `fn`, `conflict`, `incomplete`) with source and cheap/strong decisions.
+
+Useful flags:
+- `--disagreements-limit N` (default `20`)
+- `--no-show-disagreements` to suppress the table
+
+Print a previously completed audit report (without re-running model calls):
+
+```bash
+uv run dupcanon report-audit --run-id <audit_run_id>
+```
+
+Optional:
+- `--disagreements-limit N`
+- `--no-show-disagreements`
 
 ### 5) Canonical stats (optional but recommended)
 
@@ -251,6 +268,14 @@ GitHub Actions shadow workflow
 - Default attempts are client-specific:
   - GitHub + most model clients: `max_attempts=5`
   - openai-codex (`pi` RPC): `max_attempts=3`
+- Logging pipeline:
+  - console stays Rich-formatted
+  - stdlib logging events are forwarded to Logfire via `logfire.LogfireLoggingHandler`
+  - Logfire is configured with `send_to_logfire="if-token-present"`
+    - with `LOGFIRE_TOKEN` present: events are sent online
+    - without token: no remote send; console logging still works
+  - artifact events are logged to Logfire with full payload for online searchability
+- local failure-artifact files are not written (Logfire-only artifact policy)
 
 ## Verification checklist (docs vs code)
 
@@ -259,6 +284,7 @@ GitHub Actions shadow workflow
 uv run dupcanon --help
 uv run dupcanon judge --help
 uv run dupcanon judge-audit --help
+uv run dupcanon report-audit --help
 uv run dupcanon detect-new --help
 
 # env settings source of truth
@@ -273,13 +299,16 @@ rg "SYSTEM_PROMPT|def get_thread_local_judge_client|def build_user_prompt|def pa
 # retry/backoff defaults and validation helpers
 rg "def should_retry_http_status|def retry_delay_seconds|def validate_max_attempts" src/dupcanon/llm_retry.py
 
+# logging + Logfire sink wiring
+rg "LogfireLoggingHandler|send_to_logfire|LOGFIRE_" src/dupcanon/logging_config.py .env.example
+
 # online workflow tuning vars
 rg "DUPCANON_ONLINE_" .github/workflows/detect-new-shadow.yml
 ```
 
 ## Artifacts and troubleshooting
 
-- Failure artifacts are written to `.local/artifacts/`.
+- Failure artifact payloads are emitted to Logfire (no local failure-artifact files).
 - Re-run with a smaller scope (`--since`, `--type`) when debugging.
 - Judge persistence now uses `judge_decisions` as the source-of-truth table for outcomes (accepted/rejected/skipped).
 - Use quality gates before shipping changes:

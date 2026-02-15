@@ -21,6 +21,7 @@ from dupcanon.config import (
     load_settings,
     postgres_dsn_help_text,
 )
+from dupcanon.database import Database
 from dupcanon.detect_new_service import run_detect_new
 from dupcanon.embed_service import run_embed
 from dupcanon.judge_audit_service import run_judge_audit
@@ -28,7 +29,7 @@ from dupcanon.judge_providers import default_judge_model, normalize_judge_provid
 from dupcanon.judge_service import run_judge
 from dupcanon.logging_config import BoundLogger, configure_logging, get_logger
 from dupcanon.maintainers_service import run_maintainers
-from dupcanon.models import ItemType, StateFilter, TypeFilter
+from dupcanon.models import ItemType, JudgeAuditRunReport, StateFilter, TypeFilter
 from dupcanon.plan_close_service import run_plan_close
 from dupcanon.sync_service import run_refresh, run_sync
 from dupcanon.thinking import normalize_thinking_level
@@ -98,7 +99,7 @@ JUDGE_AUDIT_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or 
 JUDGE_AUDIT_SAMPLE_SIZE_OPTION = typer.Option(
     100,
     "--sample-size",
-    help="Random uniform sample size from latest fresh candidate sets",
+    help="Random uniform sample size from latest fresh non-empty candidate sets",
 )
 JUDGE_AUDIT_SEED_OPTION = typer.Option(42, "--seed", help="Sampling seed")
 JUDGE_AUDIT_MIN_EDGE_OPTION = typer.Option(
@@ -142,6 +143,31 @@ JUDGE_AUDIT_DEBUG_RPC_OPTION = typer.Option(
     False,
     "--debug-rpc",
     help="Print raw pi RPC stdout/stderr events for openai-codex judge calls",
+)
+JUDGE_AUDIT_SHOW_DISAGREEMENTS_OPTION = typer.Option(
+    True,
+    "--show-disagreements/--no-show-disagreements",
+    help="Print disagreement rows (fp/fn/conflict/incomplete) after the summary",
+)
+JUDGE_AUDIT_DISAGREEMENTS_LIMIT_OPTION = typer.Option(
+    20,
+    "--disagreements-limit",
+    help="Maximum disagreement rows to print",
+)
+REPORT_AUDIT_RUN_ID_OPTION = typer.Option(
+    ...,
+    "--run-id",
+    help="Existing judge-audit run id from judge_audit_runs",
+)
+REPORT_AUDIT_SHOW_DISAGREEMENTS_OPTION = typer.Option(
+    True,
+    "--show-disagreements/--no-show-disagreements",
+    help="Print disagreement rows (fp/fn/conflict/incomplete) after the summary",
+)
+REPORT_AUDIT_DISAGREEMENTS_LIMIT_OPTION = typer.Option(
+    20,
+    "--disagreements-limit",
+    help="Maximum disagreement rows to print",
 )
 DETECT_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 DETECT_NUMBER_OPTION = typer.Option(..., "--number", help="Issue/PR number to evaluate")
@@ -267,7 +293,144 @@ def _persist_command_failure_artifact(
         )
         return None
 
-    return str(artifact_path)
+    return str(artifact_path) if artifact_path is not None else None
+
+
+def _format_audit_lane(
+    *,
+    status: str,
+    target_number: int | None,
+    confidence: float,
+    veto_reason: str | None,
+) -> str:
+    target_text = f"#{target_number}" if target_number is not None else "-"
+    veto_text = veto_reason or "-"
+    return f"{status} target={target_text} conf={confidence:.2f} veto={veto_text}"
+
+
+def _print_judge_audit_disagreements(
+    *,
+    settings: Settings,
+    logger: BoundLogger,
+    audit_run_id: int,
+    limit: int,
+) -> None:
+    if limit <= 0:
+        return
+
+    db_url = settings.supabase_db_url
+    if not is_postgres_dsn(db_url):
+        logger.warning(
+            "judge_audit.disagreements_skipped",
+            status="skip",
+            reason="invalid_postgres_dsn",
+        )
+        return
+
+    assert db_url is not None
+
+    try:
+        db = Database(db_url)
+        disagreements = db.list_judge_audit_disagreements(
+            audit_run_id=audit_run_id,
+            limit=limit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "judge_audit.disagreements_query_failed",
+            status="error",
+            error_class=type(exc).__name__,
+        )
+        return
+
+    if not disagreements:
+        logger.info(
+            "judge_audit.disagreements",
+            status="ok",
+            count=0,
+            audit_run_id=audit_run_id,
+        )
+        console.print("[dim]No disagreement rows in this sample.[/dim]")
+        return
+
+    table = Table(title=f"judge-audit disagreements (top {len(disagreements)})")
+    table.add_column("Outcome")
+    table.add_column("Source")
+    table.add_column("Cheap")
+    table.add_column("Strong")
+
+    for row in disagreements:
+        table.add_row(
+            row.outcome_class,
+            f"#{row.source_number}",
+            _format_audit_lane(
+                status=row.cheap_final_status,
+                target_number=row.cheap_to_number,
+                confidence=row.cheap_confidence,
+                veto_reason=row.cheap_veto_reason,
+            ),
+            _format_audit_lane(
+                status=row.strong_final_status,
+                target_number=row.strong_to_number,
+                confidence=row.strong_confidence,
+                veto_reason=row.strong_veto_reason,
+            ),
+        )
+
+    console.print(table)
+    logger.info(
+        "judge_audit.disagreements",
+        status="ok",
+        count=len(disagreements),
+        audit_run_id=audit_run_id,
+        limit=limit,
+    )
+
+
+def _print_judge_audit_report_summary(report: JudgeAuditRunReport) -> None:
+    table = Table(title=f"judge-audit report (run {report.audit_run_id})")
+    table.add_column("Metric")
+    table.add_column("Value")
+    table.add_row("repo", report.repo)
+    table.add_row("type", report.type.value)
+    table.add_row("status", report.status)
+    table.add_row("sample_policy", report.sample_policy)
+    table.add_row("seed", str(report.sample_seed))
+    table.add_row("min_edge", str(report.min_edge))
+    table.add_row("cheap_provider", report.cheap_provider)
+    table.add_row("cheap_model", report.cheap_model)
+    table.add_row("strong_provider", report.strong_provider)
+    table.add_row("strong_model", report.strong_model)
+    table.add_row("sample_size_requested", str(report.sample_size_requested))
+    table.add_row("sample_size_actual", str(report.sample_size_actual))
+    table.add_row("compared_count", str(report.compared_count))
+    table.add_row("tp", str(report.tp))
+    table.add_row("fp", str(report.fp))
+    table.add_row("fn", str(report.fn))
+    table.add_row("tn", str(report.tn))
+    table.add_row("conflict", str(report.conflict))
+    table.add_row("incomplete", str(report.incomplete))
+
+    precision_denominator = report.tp + report.fp
+    recall_denominator = report.tp + report.fn
+    if precision_denominator > 0:
+        precision = report.tp / precision_denominator
+        table.add_row("precision", f"{precision:.3f}")
+    else:
+        table.add_row("precision", "-")
+    if recall_denominator > 0:
+        recall = report.tp / recall_denominator
+        table.add_row("recall", f"{recall:.3f}")
+    else:
+        table.add_row("recall", "-")
+
+    table.add_row("created_by", report.created_by)
+    table.add_row("created_at", report.created_at.isoformat())
+    table.add_row(
+        "completed_at",
+        report.completed_at.isoformat() if report.completed_at is not None else "-",
+    )
+    console.print(table)
 
 
 def _not_implemented(command: str) -> None:
@@ -713,6 +876,8 @@ def judge_audit(
     workers: int | None = JUDGE_AUDIT_WORKERS_OPTION,
     verbose: bool = JUDGE_AUDIT_VERBOSE_OPTION,
     debug_rpc: bool = JUDGE_AUDIT_DEBUG_RPC_OPTION,
+    show_disagreements: bool = JUDGE_AUDIT_SHOW_DISAGREEMENTS_OPTION,
+    disagreements_limit: int = JUDGE_AUDIT_DISAGREEMENTS_LIMIT_OPTION,
 ) -> None:
     """Run sampled cheap-vs-strong judge audit on open items."""
     settings, run_id, logger = _bootstrap("judge-audit")
@@ -772,6 +937,8 @@ def judge_audit(
                 "workers": workers,
                 "verbose": verbose,
                 "debug_rpc": debug_rpc,
+                "show_disagreements": show_disagreements,
+                "disagreements_limit": disagreements_limit,
             },
         )
         logger.error(
@@ -801,10 +968,92 @@ def judge_audit(
     table.add_row("workers", str(workers or settings.judge_worker_concurrency))
     table.add_row("verbose", str(verbose))
     table.add_row("debug_rpc", str(debug_rpc))
+    table.add_row("show_disagreements", str(show_disagreements))
+    table.add_row("disagreements_limit", str(disagreements_limit))
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))
 
     console.print(table)
+
+    if show_disagreements and stats.audit_run_id is not None:
+        _print_judge_audit_disagreements(
+            settings=settings,
+            logger=logger,
+            audit_run_id=stats.audit_run_id,
+            limit=disagreements_limit,
+        )
+
+    console.print(f"run_id: [bold]{run_id}[/bold]")
+
+
+@app.command("report-audit")
+def report_audit(
+    audit_run_id: int = REPORT_AUDIT_RUN_ID_OPTION,
+    show_disagreements: bool = REPORT_AUDIT_SHOW_DISAGREEMENTS_OPTION,
+    disagreements_limit: int = REPORT_AUDIT_DISAGREEMENTS_LIMIT_OPTION,
+) -> None:
+    """Print a stored judge-audit report by run id."""
+    settings, run_id, logger = _bootstrap("report-audit")
+
+    db_url = settings.supabase_db_url
+    if not is_postgres_dsn(db_url):
+        msg = "SUPABASE_DB_URL must be a valid Postgres DSN to read audit reports"
+        logger.error(
+            "report_audit.failed",
+            stage="report_audit",
+            status="error",
+            error_class="ValueError",
+            reason="invalid_postgres_dsn",
+        )
+        console.print(f"[red]report-audit failed:[/red] {msg}")
+        raise typer.Exit(code=1)
+
+    assert db_url is not None
+
+    try:
+        db = Database(db_url)
+        report = db.get_judge_audit_run_report(audit_run_id=audit_run_id)
+    except Exception as exc:  # noqa: BLE001
+        artifact_path = _persist_command_failure_artifact(
+            settings=settings,
+            logger=logger,
+            command="report-audit",
+            error=exc,
+            context={
+                "audit_run_id": audit_run_id,
+                "show_disagreements": show_disagreements,
+                "disagreements_limit": disagreements_limit,
+            },
+        )
+        logger.error(
+            "report_audit.failed",
+            stage="report_audit",
+            status="error",
+            error_class=type(exc).__name__,
+            artifact_path=artifact_path,
+        )
+        console.print(f"[red]report-audit failed:[/red] {_friendly_error_message(exc)}")
+        raise typer.Exit(code=1) from exc
+
+    if report is None:
+        logger.warning(
+            "report_audit.not_found",
+            stage="report_audit",
+            status="skip",
+            audit_run_id=audit_run_id,
+        )
+        console.print(f"[yellow]No judge-audit run found for id {audit_run_id}.[/yellow]")
+        raise typer.Exit(code=1)
+
+    _print_judge_audit_report_summary(report)
+    if show_disagreements:
+        _print_judge_audit_disagreements(
+            settings=settings,
+            logger=logger,
+            audit_run_id=audit_run_id,
+            limit=disagreements_limit,
+        )
+
     console.print(f"run_id: [bold]{run_id}[/bold]")
 
 
@@ -882,11 +1131,17 @@ def detect_new(
             console.print(f"artifact: [bold]{artifact_path}[/bold]")
         raise typer.Exit(code=1) from exc
 
-    payload_json = json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True)
+    result_payload = result.model_dump(mode="json")
+    payload_json = json.dumps(result_payload, indent=2, sort_keys=True)
     if json_out is not None:
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(payload_json + "\n", encoding="utf-8")
 
+    logger.info(
+        "detect_new.result_json",
+        result=result_payload,
+        json_out=str(json_out) if json_out else None,
+    )
     console.print(payload_json)
     if json_out is not None:
         console.print(f"json_out: [bold]{json_out}[/bold]")

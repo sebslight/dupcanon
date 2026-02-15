@@ -325,7 +325,7 @@ Future (Stage 3) auto-close controls:
 - No mutation on GitHub (shadow mode): no close, no label, no comment.
 - Keep strict same-type + single-repo scoping.
 - Precision-first thresholds plus extra duplicate guardrails.
-- Persist failure artifacts under `.local/artifacts/`.
+- Persist failure artifact payloads to Logfire (no local failure-artifact file writes).
 - Return structured `error_class` and `reason` fields when inference is inconclusive.
 - Operational `reason` examples:
   - `judge_duplicate`

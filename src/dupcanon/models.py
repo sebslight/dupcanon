@@ -282,6 +282,51 @@ class JudgeAuditStats(BaseModel):
     failed: int = 0
 
 
+class JudgeAuditDisagreement(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    outcome_class: Literal["fp", "fn", "conflict", "incomplete"]
+    source_number: int
+    cheap_final_status: Literal["accepted", "rejected", "skipped"]
+    cheap_to_number: int | None = None
+    cheap_confidence: float
+    cheap_veto_reason: str | None = None
+    strong_final_status: Literal["accepted", "rejected", "skipped"]
+    strong_to_number: int | None = None
+    strong_confidence: float
+    strong_veto_reason: str | None = None
+
+
+class JudgeAuditRunReport(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    audit_run_id: int
+    repo: str
+    type: ItemType
+    status: Literal["running", "completed", "failed"]
+    sample_policy: str
+    sample_seed: int
+    sample_size_requested: int
+    sample_size_actual: int
+    candidate_set_status: str
+    source_state_filter: str
+    min_edge: float
+    cheap_provider: str
+    cheap_model: str
+    strong_provider: str
+    strong_model: str
+    compared_count: int
+    tp: int
+    fp: int
+    fn: int
+    tn: int
+    conflict: int
+    incomplete: int
+    created_by: str
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
 class CandidateItemContext(BaseModel):
     model_config = ConfigDict(frozen=True)
 

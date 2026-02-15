@@ -18,6 +18,8 @@ from dupcanon.models import (
     EmbeddingItem,
     ItemPayload,
     ItemType,
+    JudgeAuditDisagreement,
+    JudgeAuditRunReport,
     JudgeCandidate,
     JudgeWorkItem,
     PlanCloseItem,
@@ -655,6 +657,11 @@ class Database:
                     and cs.type = %s
                     and cs.status = 'fresh'
                     and src.state = 'open'
+                    and exists (
+                        select 1
+                        from public.candidate_set_members m
+                        where m.candidate_set_id = cs.id
+                    )
                 order by cs.item_id, cs.created_at desc
             ),
             sampled as (
@@ -1242,6 +1249,187 @@ class Database:
             if cur.rowcount != 1:
                 msg = f"judge_audit_run not found: {audit_run_id}"
                 raise DatabaseError(msg)
+
+    def get_judge_audit_run_report(self, *, audit_run_id: int) -> JudgeAuditRunReport | None:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select
+                    j.id as audit_run_id,
+                    r.org,
+                    r.name,
+                    j.type,
+                    j.status,
+                    j.sample_policy,
+                    j.sample_seed,
+                    j.sample_size_requested,
+                    j.sample_size_actual,
+                    j.candidate_set_status,
+                    j.source_state_filter,
+                    j.min_edge,
+                    j.cheap_llm_provider,
+                    j.cheap_llm_model,
+                    j.strong_llm_provider,
+                    j.strong_llm_model,
+                    j.compared_count,
+                    j.tp,
+                    j.fp,
+                    j.fn,
+                    j.tn,
+                    j.conflict,
+                    j.incomplete,
+                    j.created_by,
+                    j.created_at,
+                    j.completed_at
+                from public.judge_audit_runs j
+                join public.repos r
+                    on r.id = j.repo_id
+                where j.id = %s
+                limit 1
+                """,
+                (audit_run_id,),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        status = str(row["status"])
+        if status not in {"running", "completed", "failed"}:
+            msg = f"invalid judge_audit_run status: {status}"
+            raise DatabaseError(msg)
+
+        return JudgeAuditRunReport(
+            audit_run_id=int(row["audit_run_id"]),
+            repo=f"{str(row['org'])}/{str(row['name'])}",
+            type=ItemType(str(row["type"])),
+            status=cast(Literal["running", "completed", "failed"], status),
+            sample_policy=str(row["sample_policy"]),
+            sample_seed=int(row["sample_seed"]),
+            sample_size_requested=int(row["sample_size_requested"]),
+            sample_size_actual=int(row["sample_size_actual"]),
+            candidate_set_status=str(row["candidate_set_status"]),
+            source_state_filter=str(row["source_state_filter"]),
+            min_edge=float(row["min_edge"]),
+            cheap_provider=str(row["cheap_llm_provider"]),
+            cheap_model=str(row["cheap_llm_model"]),
+            strong_provider=str(row["strong_llm_provider"]),
+            strong_model=str(row["strong_llm_model"]),
+            compared_count=int(row["compared_count"]),
+            tp=int(row["tp"]),
+            fp=int(row["fp"]),
+            fn=int(row["fn"]),
+            tn=int(row["tn"]),
+            conflict=int(row["conflict"]),
+            incomplete=int(row["incomplete"]),
+            created_by=str(row["created_by"]),
+            created_at=cast(datetime, row["created_at"]),
+            completed_at=cast(datetime | None, row.get("completed_at")),
+        )
+
+    def list_judge_audit_disagreements(
+        self,
+        *,
+        audit_run_id: int,
+        limit: int,
+    ) -> list[JudgeAuditDisagreement]:
+        if limit <= 0:
+            return []
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select
+                    j.outcome_class,
+                    j.source_number,
+                    j.cheap_final_status,
+                    cheap.number as cheap_to_number,
+                    j.cheap_confidence,
+                    j.cheap_veto_reason,
+                    j.strong_final_status,
+                    strong.number as strong_to_number,
+                    j.strong_confidence,
+                    j.strong_veto_reason
+                from public.judge_audit_run_items j
+                left join public.items cheap
+                    on cheap.id = j.cheap_to_item_id
+                left join public.items strong
+                    on strong.id = j.strong_to_item_id
+                where
+                    j.audit_run_id = %s
+                    and j.outcome_class in ('fp', 'fn', 'conflict', 'incomplete')
+                order by
+                    case j.outcome_class
+                        when 'conflict' then 0
+                        when 'incomplete' then 1
+                        when 'fp' then 2
+                        when 'fn' then 3
+                        else 4
+                    end,
+                    j.source_number asc
+                limit %s
+                """,
+                (audit_run_id, limit),
+            )
+            rows = cur.fetchall()
+
+        result: list[JudgeAuditDisagreement] = []
+        for row in rows:
+            outcome_class = str(row["outcome_class"])
+            if outcome_class not in {"fp", "fn", "conflict", "incomplete"}:
+                msg = f"invalid outcome class: {outcome_class}"
+                raise DatabaseError(msg)
+
+            cheap_final_status = str(row["cheap_final_status"])
+            if cheap_final_status not in {"accepted", "rejected", "skipped"}:
+                msg = f"invalid cheap final status: {cheap_final_status}"
+                raise DatabaseError(msg)
+
+            strong_final_status = str(row["strong_final_status"])
+            if strong_final_status not in {"accepted", "rejected", "skipped"}:
+                msg = f"invalid strong final status: {strong_final_status}"
+                raise DatabaseError(msg)
+
+            result.append(
+                JudgeAuditDisagreement(
+                    outcome_class=cast(
+                        Literal["fp", "fn", "conflict", "incomplete"],
+                        outcome_class,
+                    ),
+                    source_number=int(row["source_number"]),
+                    cheap_final_status=cast(
+                        Literal["accepted", "rejected", "skipped"],
+                        cheap_final_status,
+                    ),
+                    cheap_to_number=(
+                        int(row["cheap_to_number"])
+                        if row.get("cheap_to_number") is not None
+                        else None
+                    ),
+                    cheap_confidence=float(row["cheap_confidence"]),
+                    cheap_veto_reason=(
+                        str(row["cheap_veto_reason"])
+                        if row.get("cheap_veto_reason") is not None
+                        else None
+                    ),
+                    strong_final_status=cast(
+                        Literal["accepted", "rejected", "skipped"],
+                        strong_final_status,
+                    ),
+                    strong_to_number=(
+                        int(row["strong_to_number"])
+                        if row.get("strong_to_number") is not None
+                        else None
+                    ),
+                    strong_confidence=float(row["strong_confidence"]),
+                    strong_veto_reason=(
+                        str(row["strong_veto_reason"])
+                        if row.get("strong_veto_reason") is not None
+                        else None
+                    ),
+                )
+            )
+        return result
 
     def create_close_run(
         self,
