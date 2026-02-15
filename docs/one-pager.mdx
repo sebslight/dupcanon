@@ -56,15 +56,15 @@ Two paths share one data model and one safety model.
 All key artifacts are persisted for replay, audit, and threshold tuning.
 </Note>
 
-## Deterministic gates (high level)
+## Deterministic gates (with actual thresholds)
 
 <AccordionGroup>
-  <Accordion title="Judge acceptance gates">
+  <Accordion title="Judge acceptance gates (batch judge)">
     - strict JSON parse
     - target must be in candidate set
-    - confidence threshold (`>= 0.85`)
+    - **confidence threshold:** `model_confidence >= 0.85` (`min_edge` default)
     - target must be open
-    - selected candidate score gap vs best alternate (`>= 0.015`)
+    - **candidate gap gate:** `selected_score - best_alternative_score >= 0.015`
     - mismatch vetoes (uncertain/overlap/root-cause/scope class failures)
     - one accepted outgoing edge per source unless explicit rejudge
   </Accordion>
@@ -72,9 +72,108 @@ All key artifacts are persisted for replay, audit, and threshold tuning.
     - maintainer author protection
     - maintainer assignee protection
     - direct accepted edge to canonical required
-    - higher close threshold (`>= 0.90`)
+    - **close threshold:** direct edge confidence `>= 0.90` (`min_close` default)
+  </Accordion>
+  <Accordion title="Online detect-new gates">
+    - default thresholds: `maybe=0.85`, `duplicate=0.92`
+    - strict duplicate downgrade if structural guardrails fail
+    - duplicate class also requires strong retrieval support (current floor: top match score `>= 0.90`)
+    - candidate gap gate also applies on strict duplicate path (`>= 0.015`)
   </Accordion>
 </AccordionGroup>
+
+<Info>
+**Confidence vs score (important):**
+
+- **confidence** = model's self-reported duplicate confidence in `[0,1]`
+- **score** = retrieval similarity score from vector search
+- **gap** = `selected_candidate_score - best_alternative_score`
+
+A judgment can have high confidence and still be rejected if deterministic gates fail.
+</Info>
+
+### Judge gate examples
+
+| Case | Model confidence | Selected score | Best alternate | Gap | Outcome |
+|---|---:|---:|---:|---:|---|
+| Strong accepted | 0.91 | 0.93 | 0.89 | 0.04 | accepted |
+| Rejected (below min_edge) | 0.82 | 0.95 | 0.70 | 0.25 | rejected |
+| Rejected (gap too small) | 0.95 | 0.901 | 0.893 | 0.008 | rejected |
+
+### Actual judge system prompt (current)
+
+<Accordion title="Show system prompt from `src/dupcanon/judge_runtime.py`">
+
+```text
+You are a conservative duplicate-triage judge for GitHub issues/PRs.
+
+Task:
+Given one SOURCE item and a list of CANDIDATES (same repo, same type),
+decide whether SOURCE is a duplicate of exactly one candidate.
+
+Core definition (strict):
+A duplicate means the SOURCE and chosen candidate describe the same specific
+underlying root cause/request, not just the same broad area (e.g. both about
+"exec", "auth", "performance", etc.).
+
+Hard duplicate requirements:
+- Prefer non-duplicate unless evidence is strong.
+- Mark duplicate only when there are at least TWO concrete matching facts, such as:
+  1) same/similar error text, error code, or failure signature
+  2) same config keys/values (for example ask=off, security=full)
+  3) same command/tool/path/component and same behavior
+  4) same reproduction conditions / triggering scenario
+- If SOURCE is vague/generic (very short title/body, little detail), default to non-duplicate.
+- If details conflict on root cause, expected behavior, or subsystem, return non-duplicate.
+
+Critical anti-overlap rule:
+- If items are only a subset/superset, follow-up, adjacent hardening, or partial overlap,
+  return non-duplicate unless the same underlying defect/request instance is explicit.
+- Shared subsystem/component/keywords alone are insufficient.
+
+Decision rules:
+1) You may select at most one candidate.
+2) You may only select a candidate number from ALLOWED_CANDIDATE_NUMBERS.
+3) If none clearly match, return non-duplicate.
+4) Ignore comments (title/body only).
+5) Do not use retrieval rank as duplicate evidence by itself.
+6) If you are not sure, mark certainty="unsure"; prefer non-duplicate unless
+   same-instance evidence is explicit.
+7) Output JSON only. No markdown. No extra text.
+
+Confidence rubric (self-assessed, not calibrated probability):
+- Non-duplicate: typically 0.00-0.80.
+- Duplicate 0.85-0.89: moderate evidence (minimum requirements met).
+- Duplicate 0.90-0.95: strong evidence (3+ specific aligned facts, no conflicts).
+- Duplicate 0.96-1.00: near-exact match in root cause/repro/details.
+- Do NOT use high confidence for generic or weakly-supported matches.
+
+Output JSON schema:
+{
+  "is_duplicate": boolean,
+  "duplicate_of": integer,
+  "confidence": number,
+  "reasoning": string,
+  "relation": "same_instance" | "related_followup" | "partial_overlap" | "different",
+  "root_cause_match": "same" | "adjacent" | "different",
+  "scope_relation":
+    "same_scope" | "source_subset" | "source_superset" |
+    "partial_overlap" | "different_scope",
+  "path_match": "same" | "different" | "unknown",
+  "certainty": "sure" | "unsure"
+}
+
+Output constraints:
+- If is_duplicate is false, duplicate_of must be 0.
+- If is_duplicate is true, duplicate_of must be one of the candidate numbers.
+- relation must be same_instance when is_duplicate is true.
+- If unsure, set certainty="unsure".
+- confidence must be in [0,1].
+- reasoning must be short (<= 240 chars) and mention concrete matching facts.
+- No extra keys.
+```
+
+</Accordion>
 
 ## Cost and accuracy stance
 
