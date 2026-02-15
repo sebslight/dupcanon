@@ -50,7 +50,7 @@ def _persist_failure_artifact(
         )
         return None
 
-    return str(artifact_path)
+    return str(artifact_path) if artifact_path is not None else None
 
 
 def require_postgres_dsn(value: str | None) -> str:

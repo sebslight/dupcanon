@@ -271,7 +271,7 @@ def _persist_failure_artifact(
         )
         return None
 
-    return str(artifact_path)
+    return str(artifact_path) if artifact_path is not None else None
 
 
 def _process_work_item(

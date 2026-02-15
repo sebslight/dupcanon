@@ -5,13 +5,28 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+import logfire
 from rich.logging import RichHandler
+
+_LOGFIRE_CONFIGURED = False
 
 
 def _format_value(value: Any) -> str:
     if isinstance(value, (dict, list, tuple, set)):
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     return str(value)
+
+
+def _configure_logfire_once() -> None:
+    global _LOGFIRE_CONFIGURED
+    if _LOGFIRE_CONFIGURED:
+        return
+
+    logfire.configure(
+        send_to_logfire="if-token-present",
+        console=False,
+    )
+    _LOGFIRE_CONFIGURED = True
 
 
 @dataclass(frozen=True)
@@ -42,14 +57,18 @@ class BoundLogger:
 
 
 def configure_logging(*, log_level: str) -> None:
-    """Configure Rich logging for pretty console output."""
+    """Configure Rich console logging + Logfire sink for remote observability."""
     level = getattr(logging, log_level.upper(), logging.INFO)
+    _configure_logfire_once()
 
     logging.basicConfig(
         level=level,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[RichHandler(show_path=False, rich_tracebacks=True)],
+        handlers=[
+            RichHandler(show_path=False, rich_tracebacks=True),
+            logfire.LogfireLoggingHandler(fallback=logging.NullHandler()),
+        ],
         force=True,
     )
 
