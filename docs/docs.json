@@ -16,5 +16,11 @@
         ]
       }
     ]
-  }
+  },
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/one-pager"
+    }
+  ]
 }
