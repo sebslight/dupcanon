@@ -29,6 +29,8 @@ By the end of this guide, you will:
 
 - `uv` installed
 - `gh` CLI installed and authenticated (`gh auth status`)
+- Docker Desktop / Docker Engine (for local Supabase)
+- Supabase CLI (for migrations and local DB)
 - reachable Postgres DSN (Supabase recommended)
 - API credentials for the providers you plan to use
 
@@ -51,13 +53,63 @@ By the end of this guide, you will:
     - `LOGFIRE_TOKEN` (for remote log sink)
   </Accordion>
   <Accordion title="Alternative provider requirements">
-    - If embedding/judge provider is `gemini` → `GEMINI_API_KEY`
-    - If judge provider is `openai` → `OPENAI_API_KEY`
-    - If judge provider is `openrouter` → `OPENROUTER_API_KEY`
+    - If embedding/judge provider is `gemini` -> `GEMINI_API_KEY`
+    - If judge provider is `openai` -> `OPENAI_API_KEY`
+    - If judge provider is `openrouter` -> `OPENROUTER_API_KEY`
   </Accordion>
 </AccordionGroup>
 
-## 1) Install and configure
+## 1) Set up Supabase database first (local Docker recommended)
+
+<Tabs>
+  <Tab title="Local Supabase (Docker)">
+
+Install Supabase CLI (macOS example):
+
+```bash
+brew install supabase/tap/supabase
+```
+
+Start local Supabase services from repo root:
+
+```bash
+supabase start
+```
+
+Apply and validate schema locally:
+
+```bash
+supabase db reset
+supabase db lint
+```
+
+Use local Postgres DSN in `.env`:
+
+```dotenv
+SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres
+```
+
+  </Tab>
+  <Tab title="Hosted Supabase">
+
+Use local validation first, then push migrations:
+
+```bash
+supabase db reset
+supabase db lint
+supabase db push
+```
+
+Use your hosted Postgres DSN in `.env` (prefer pooler DSN for runtime).
+
+  </Tab>
+</Tabs>
+
+<Warning>
+Do not use the Supabase project HTTPS URL as `SUPABASE_DB_URL`; use a Postgres DSN (`postgresql://...` or `postgres://...`).
+</Warning>
+
+## 2) Install and configure dupcanon
 
 ```bash
 uv sync
@@ -83,7 +135,7 @@ uv run dupcanon init
 
 You should see runtime checks with ✅/⚠️ plus DSN guidance.
 
-## 2) First successful pipeline run (Beginner track)
+## 3) First successful pipeline run (Beginner track)
 
 Use a repo you can safely test against.
 
@@ -111,7 +163,7 @@ uv run dupcanon plan-close --repo openclaw/openclaw --type issue --dry-run
 Every command prints a summary table with counters, making it easy to verify each stage before moving on.
 </Note>
 
-## 3) Safe mutation path (only when ready)
+## 4) Safe mutation path (only when ready)
 
 Persist a real plan:
 
@@ -129,7 +181,7 @@ uv run dupcanon apply-close --close-run <plan_run_id> --yes
 `apply-close` is intentionally gated: it requires an existing <code>mode=plan</code> run and explicit <code>--yes</code>.
 </Warning>
 
-## 4) Online path (entryway for automation)
+## 5) Online path (entryway for automation)
 
 `detect-new` is the online single-item entrypoint used for workflow-driven automation.
 
@@ -151,7 +203,7 @@ Current GitHub Actions shadow workflow:
 
 - `.github/workflows/detect-new-shadow.yml`
 
-## 5) Advanced track (overrides and tuning)
+## 6) Advanced track (overrides and tuning)
 
 <Tabs>
   <Tab title="Provider/model overrides">
@@ -201,6 +253,12 @@ uv run dupcanon report-audit --run-id <id> --simulate-gates --gate-gap-min 0.02
 ## Common troubleshooting
 
 <AccordionGroup>
+  <Accordion title="Supabase CLI / Docker setup issues">
+    - Ensure Docker is running before `supabase start`.
+    - If local services fail to start, restart Docker and run `supabase stop && supabase start`.
+    - Confirm CLI is installed: `supabase --version`.
+    - Rebuild local schema state with `supabase db reset`.
+  </Accordion>
   <Accordion title="init fails with DSN message">
     Use a Postgres DSN (`postgresql://...`), not Supabase HTTPS URL. Prefer Supabase IPv4 pooler DSN if direct DB is unreachable.
   </Accordion>
