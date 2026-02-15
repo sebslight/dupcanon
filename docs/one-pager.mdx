@@ -88,9 +88,13 @@ All key artifacts are persisted for replay, audit, and threshold tuning.
 - **confidence** = model's self-reported duplicate confidence in `[0,1]`
 - **score** = retrieval similarity score from vector search
 - **gap** = `selected_candidate_score - best_alternative_score`
-
-A judgment can have high confidence and still be rejected if deterministic gates fail.
 </Info>
+
+<Warning>
+**High confidence ≠ accepted edge.**
+
+A judgment can have very high model confidence and still be rejected when deterministic gates fail.
+</Warning>
 
 ### Judge gate examples
 
