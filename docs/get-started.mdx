@@ -1,0 +1,243 @@
+---
+title: Get started
+description: End-to-end setup and first run for dupcanon (beginner and advanced tracks).
+---
+
+<Info>
+This guide is written for both first-time operators and experienced engineers. If you just want a fast success path, use the <b>Beginner track</b> below.
+</Info>
+
+## What you’ll do
+
+By the end of this guide, you will:
+
+1. install and configure `dupcanon`
+2. run the full duplicate pipeline on a real repo
+3. generate a safe close plan in dry-run mode
+4. understand how to move from manual runs to workflow-driven automation
+
+<CardGroup cols={2}>
+  <Card title="Beginner track (recommended first run)">
+    Follow the exact commands in order and get a working pipeline in ~15–30 minutes.
+  </Card>
+  <Card title="Advanced track">
+    Use provider/model overrides, tune worker settings, and integrate with GitHub workflows.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+- `uv` installed
+- `gh` CLI installed and authenticated (`gh auth status`)
+- reachable Postgres DSN (Supabase recommended)
+- API credentials for the providers you plan to use
+
+<AccordionGroup>
+  <Accordion title="Required credentials by default stack">
+    Default runtime stack:
+
+    - embeddings: `openai` / `text-embedding-3-large`
+    - judge: `openai-codex` via `pi --mode rpc`
+
+    Minimum env requirements for that default:
+
+    - `SUPABASE_DB_URL`
+    - `OPENAI_API_KEY` (for embeddings)
+    - `pi` CLI on PATH (for `openai-codex` judge path)
+
+    Optional but commonly used:
+
+    - `GITHUB_TOKEN` (if not relying on existing `gh` auth)
+    - `LOGFIRE_TOKEN` (for remote log sink)
+  </Accordion>
+  <Accordion title="Alternative provider requirements">
+    - If embedding/judge provider is `gemini` → `GEMINI_API_KEY`
+    - If judge provider is `openai` → `OPENAI_API_KEY`
+    - If judge provider is `openrouter` → `OPENROUTER_API_KEY`
+  </Accordion>
+</AccordionGroup>
+
+## 1) Install and configure
+
+```bash
+uv sync
+cp .env.example .env
+```
+
+Edit `.env` and set at minimum:
+
+```dotenv
+SUPABASE_DB_URL=postgresql://...
+OPENAI_API_KEY=...
+```
+
+<Warning>
+`SUPABASE_DB_URL` must be a <b>Postgres DSN</b> (`postgresql://` or `postgres://`), not a Supabase HTTPS project URL.
+</Warning>
+
+Validate setup:
+
+```bash
+uv run dupcanon init
+```
+
+You should see runtime checks with ✅/⚠️ plus DSN guidance.
+
+## 2) First successful pipeline run (Beginner track)
+
+Use a repo you can safely test against.
+
+```bash
+# 1) ingest recent items
+uv run dupcanon sync --repo openclaw/openclaw --since 3d
+
+# 2) embed changed/new items
+uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed
+
+# 3) build candidate sets (open-only by default for operations)
+uv run dupcanon candidates --repo openclaw/openclaw --type issue --include open
+
+# 4) run duplicate judge
+uv run dupcanon judge --repo openclaw/openclaw --type issue --thinking low
+
+# 5) compute canonical stats (optional but recommended)
+uv run dupcanon canonicalize --repo openclaw/openclaw --type issue
+
+# 6) generate close plan safely (dry run)
+uv run dupcanon plan-close --repo openclaw/openclaw --type issue --dry-run
+```
+
+<Note>
+Every command prints a summary table with counters, making it easy to verify each stage before moving on.
+</Note>
+
+## 3) Safe mutation path (only when ready)
+
+Persist a real plan:
+
+```bash
+uv run dupcanon plan-close --repo openclaw/openclaw --type issue
+```
+
+Then review plan rows in DB and apply explicitly:
+
+```bash
+uv run dupcanon apply-close --close-run <plan_run_id> --yes
+```
+
+<Warning>
+`apply-close` is intentionally gated: it requires an existing <code>mode=plan</code> run and explicit <code>--yes</code>.
+</Warning>
+
+## 4) Online path (entryway for automation)
+
+`detect-new` is the online single-item entrypoint used for workflow-driven automation.
+
+```bash
+uv run dupcanon detect-new --repo openclaw/openclaw --type issue --number 123 --thinking low
+```
+
+Workflow-friendly output:
+
+```bash
+uv run dupcanon detect-new \
+  --repo openclaw/openclaw \
+  --type issue \
+  --number 123 \
+  --json-out .local/artifacts/detect-new.json
+```
+
+Current GitHub Actions shadow workflow:
+
+- `.github/workflows/detect-new-shadow.yml`
+
+## 5) Advanced track (overrides and tuning)
+
+<Tabs>
+  <Tab title="Provider/model overrides">
+
+```bash
+# OpenAI judge
+uv run dupcanon judge --repo openclaw/openclaw --type issue --provider openai --model gpt-5-mini
+
+# OpenRouter judge
+uv run dupcanon judge --repo openclaw/openclaw --type issue --provider openrouter --model minimax/minimax-m2.5
+
+# Embedding override
+uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed --provider openai --model text-embedding-3-large
+```
+
+  </Tab>
+  <Tab title="Concurrency tuning">
+
+```bash
+# candidates concurrency override
+uv run dupcanon candidates --repo openclaw/openclaw --type issue --workers 8
+
+# judge concurrency override
+uv run dupcanon judge --repo openclaw/openclaw --type issue --workers 8
+```
+
+  </Tab>
+  <Tab title="Audit and gate simulation">
+
+```bash
+# cheap-vs-strong sampled audit
+uv run dupcanon judge-audit \
+  --repo openclaw/openclaw \
+  --type issue \
+  --sample-size 100 \
+  --seed 42 \
+  --cheap-provider gemini --cheap-thinking low \
+  --strong-provider openai --strong-thinking high
+
+# report existing audit + simulate non-LLM gates
+uv run dupcanon report-audit --run-id <id> --simulate-gates --gate-gap-min 0.02
+```
+
+  </Tab>
+</Tabs>
+
+## Common troubleshooting
+
+<AccordionGroup>
+  <Accordion title="init fails with DSN message">
+    Use a Postgres DSN (`postgresql://...`), not Supabase HTTPS URL. Prefer Supabase IPv4 pooler DSN if direct DB is unreachable.
+  </Accordion>
+  <Accordion title="judge says provider key/CLI missing">
+    Ensure env matches selected provider:
+
+    - `gemini` -> `GEMINI_API_KEY`
+    - `openai` -> `OPENAI_API_KEY`
+    - `openrouter` -> `OPENROUTER_API_KEY`
+    - `openai-codex` -> `pi` CLI on PATH
+  </Accordion>
+  <Accordion title="No candidates or low yield">
+    Check that:
+
+    - sync and embed completed
+    - candidate retrieval used expected type/state filters
+    - threshold is not too strict for your corpus
+  </Accordion>
+  <Accordion title="High-confidence duplicate still rejected">
+    This is expected when deterministic gates fail (for example: target not open, score gap below `0.015`, structural mismatch vetoes).
+  </Accordion>
+</AccordionGroup>
+
+## From manual to automated operations
+
+A practical scheduled sequence is:
+
+1. `refresh --refresh-known`
+2. `embed --only-changed`
+3. `candidates --include open`
+4. `judge`
+5. `canonicalize`
+6. `plan-close` (and apply only under review policy)
+
+For event-driven online checks, trigger `detect-new` from issue/pr opened events.
+
+## Next docs to read
+
+- Overview: `/`
+- Internal runbook/specs: `docs/internal/`

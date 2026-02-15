@@ -12,7 +12,8 @@
       {
         "group": "Overview",
         "pages": [
-          "index"
+          "index",
+          "get-started"
         ]
       }
     ]
