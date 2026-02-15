@@ -113,7 +113,7 @@ Output constraints:
 """
 
 _TITLE_MAX_CHARS = 300
-_BODY_MAX_CHARS = 3000
+_BODY_MAX_CHARS = 4000
 _CREATED_BY = "dupcanon/judge"
 _THREAD_LOCAL = local()
 

@@ -458,10 +458,14 @@ Default retrieval params (v1)
 - Use title + body only for embedding and judging context.
 - Do not include comments in v1.
 - Deterministic truncation policy:
-  - title max 300 chars
-  - body max 7,700 chars
-  - combined max 8,000 chars
-- Normalize line endings and trim surrounding whitespace before hashing/embedding.
+  - Embedding text:
+    - title max 300 chars
+    - body max 7,700 chars
+    - combined max 8,000 chars
+  - Judge prompt excerpts (source + each candidate):
+    - title max 300 chars
+    - body max 4,000 chars
+- Normalize line endings and trim surrounding whitespace before hashing/embedding/prompt construction.
 
 
 ## LLM judging
