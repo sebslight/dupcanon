@@ -3,73 +3,84 @@ title: dupcanon one-pager
 description: Problem, approach, safety model, and current status.
 ---
 
-## TL;DR
+<Info>
+`dupcanon` is currently human-operated, but it is being shaped for workflow-native automation in GitHub Actions.
+</Info>
 
-`dupcanon` is a duplicate canonicalization system for GitHub issues/PRs.
+## What this is
 
-- **Current mode:** human-operated CLI
-- **Target mode:** automated, workflow-driven operation in GitHub Actions
+<CardGroup cols={2}>
+  <Card title="Primary objective">
+    Reduce duplicate noise in high-cadence repos (for example, OpenClaw) by selecting stable canonicals and closing true duplicates safely.
+  </Card>
+  <Card title="Why it exists">
+    Naive automation creates duplicate chains and unstable targets; this system adds durable state + deterministic gates.
+  </Card>
+  <Card title="Operating constraints">
+    Cheap enough to run continuously, accurate enough for guarded production use, and fully auditable.
+  </Card>
+  <Card title="Core strategy">
+    Embeddings for retrieval, LLM for semantic judgment, deterministic policy for acceptance and close safety.
+  </Card>
+</CardGroup>
 
-Primary objective: **reduce duplicate noise in high-cadence repos** (for example, OpenClaw) by consistently selecting a stable canonical and closing true duplicates safely.
+## Current vs target mode
 
-It exists to solve two painful failure modes in naive duplicate automation:
-
-1. **Duplicate chains** (`A -> B -> C`) caused by unstable targets over time.
-2. **Wrong canonical target selection** (closing against weaker or mismatched reports).
-
-The system is designed to be **cheap enough to run continuously**, **accurate enough for production guardrails**, and fully auditable.
-
-## Why this project exists
-
-High-cadence repos become unmanageable when duplicate reports pile up faster than maintainers can triage them.
-
-Most existing bot setups do one of these:
-
-- retrieve "similar" items and stop there,
-- do one-shot LLM duplicate picks without durable decision history,
-- or close too aggressively without strong deterministic gates.
-
-`dupcanon` adds durable state and a canonical graph model so decisions stay stable, reviewable, and useful over time.
+<Tabs>
+  <Tab title="Current mode">
+    - Human-operated CLI pipeline
+    - Online `detect-new` in shadow/suggest mode
+    - Close actions gated through reviewed `plan-close` + explicit `apply-close --yes`
+  </Tab>
+  <Tab title="Target mode">
+    - Workflow-driven automation in GitHub Actions
+    - `detect-new` as the online entrypoint for new issues/PRs
+    - Same deterministic guardrails, with policy-based promotion from shadow to action
+  </Tab>
+</Tabs>
 
 ## Core approach
 
-1. `sync` / `refresh`: ingest issues + PRs into Postgres
-2. `embed`: embed title/body into pgvector
-3. `candidates`: persist nearest-neighbor candidate sets
-4. `judge`: LLM picks duplicate target inside candidate set
-5. deterministic gates veto risky decisions
-6. `canonicalize`: compute cluster canonical representative
-7. `plan-close` -> reviewed `apply-close --yes`
+Two paths share one data model and one safety model.
 
-Everything important is persisted for replay, audit, and tuning.
+1. **Online entrypoint:** `detect-new` for newly opened issues/PRs
+2. `sync` / `refresh`: ingest issues + PRs into Postgres
+3. `embed`: title/body embeddings in pgvector
+4. `candidates`: persisted nearest-neighbor candidate sets
+5. `judge`: LLM chooses duplicate target inside the candidate set
+6. deterministic gates veto risky decisions
+7. `canonicalize`: compute canonical representatives
+8. `plan-close` -> reviewed `apply-close --yes`
 
-## Cost and accuracy target
+<Note>
+All key artifacts are persisted for replay, audit, and threshold tuning.
+</Note>
 
-The goal is not "perfect AI triage." The goal is practical operations:
+## Deterministic gates (high level)
 
-- **Cost:** run continuously without requiring expensive frontier-only models for every decision.
-- **Accuracy:** keep precision high enough for controlled closing workflows.
-- **Control:** use deterministic gates so bad model outputs do not silently become close actions.
+<AccordionGroup>
+  <Accordion title="Judge acceptance gates">
+    - strict JSON parse
+    - target must be in candidate set
+    - confidence threshold (`>= 0.85`)
+    - target must be open
+    - selected candidate score gap vs best alternate (`>= 0.015`)
+    - mismatch vetoes (uncertain/overlap/root-cause/scope class failures)
+    - one accepted outgoing edge per source unless explicit rejudge
+  </Accordion>
+  <Accordion title="Close planning gates">
+    - maintainer author protection
+    - maintainer assignee protection
+    - direct accepted edge to canonical required
+    - higher close threshold (`>= 0.90`)
+  </Accordion>
+</AccordionGroup>
 
-## Safety model (LLM + deterministic gates)
+## Cost and accuracy stance
 
-LLM output is necessary but not sufficient.
-
-An accepted duplicate edge must pass hard checks such as:
-
-- strict JSON parse
-- target must be in candidate set
-- confidence threshold (`>= 0.85`)
-- target must be open
-- selected candidate score gap vs best alternate (`>= 0.015`)
-- mismatch vetoes (uncertain/overlap/root-cause/scope class failures)
-- one accepted outgoing edge per source unless explicit rejudge
-
-Close planning adds more gates:
-
-- maintainer author/assignee protections
-- direct accepted edge to canonical required
-- higher close threshold (`>= 0.90`)
+<Tip>
+Goal is practical operations, not perfect AI: keep cost low enough for continuous runs, keep precision high enough for controlled close actions.
+</Tip>
 
 ## Current status
 
@@ -79,21 +90,19 @@ Implemented commands:
 - `judge-audit`, `report-audit`, `detect-new`
 - `canonicalize`, `maintainers`, `plan-close`, `apply-close`
 
-Current online flow is shadow/suggest-oriented, while close mutations remain explicitly gated through reviewed plans; next step is promoting this into a workflow-native automated pipeline under the same guardrails.
-
 ## What’s missing next
 
 - first-class evaluation command + reporting workflow for production gate decisions
 - programmatic orchestration command/workflow for unattended DB freshness updates
-- richer action surface in future (e.g., label taxonomy / tree-editing operations)
+- richer action surface in future (for example, label taxonomy / tree-editing operations)
 
-## Infra and stack
+## Stack
 
 - Python + Typer + Pydantic + Rich
 - Supabase Postgres + pgvector
 - providers: OpenAI, Gemini, OpenRouter, and `openai-codex` via `pi` RPC
 
-DB can be moved to self-hosted Postgres later with minimal architecture change.
+DB can be moved to self-hosted Postgres with minimal architecture changes.
 
 ## Internal docs
 
