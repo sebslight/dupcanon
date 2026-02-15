@@ -12,15 +12,15 @@
       {
         "group": "Overview",
         "pages": [
-          "one-pager"
+          "index"
         ]
       }
     ]
   },
   "redirects": [
     {
-      "source": "/",
-      "destination": "/one-pager"
+      "source": "/one-pager",
+      "destination": "/"
     }
   ]
 }
