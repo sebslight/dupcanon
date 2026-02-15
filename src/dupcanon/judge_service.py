@@ -24,6 +24,9 @@ from dupcanon.judge_providers import (
     require_judge_api_key,
     validate_thinking_for_provider,
 )
+from dupcanon.judge_runtime import (
+    accepted_candidate_gap_veto_reason as _accepted_candidate_gap_veto_reason,
+)
 from dupcanon.logging_config import BoundLogger
 from dupcanon.models import (
     ItemType,
@@ -423,6 +426,8 @@ def _veto_counter_key(veto_reason: str | None) -> str | None:
         return "decision_veto_invalid_response"
     if veto_reason == "target_not_open":
         return "decision_veto_target_not_open"
+    if veto_reason == "candidate_gap_too_small":
+        return "decision_veto_candidate_gap_too_small"
     return "decision_veto_other"
 
 
@@ -999,6 +1004,38 @@ def _judge_single_item(
                 decision=decision,
                 final_status="rejected",
                 veto_reason="below_min_edge",
+            )
+            return _JudgeItemResult(
+                judged=1,
+                rejected_edges=1,
+                stale_sets_used=stale_sets_used,
+                counter_updates=counter_updates,
+            )
+
+        assert duplicate_number is not None
+        gap_veto_reason = _accepted_candidate_gap_veto_reason(
+            selected_candidate_number=duplicate_number,
+            candidates=candidate_rows,
+        )
+        if gap_veto_reason is not None:
+            _record_judge_decision(
+                db=db,
+                logger=logger,
+                repo_id=repo_id,
+                item_type=item_type,
+                work_item=work_item,
+                to_item_id=to_item_id,
+                decision=decision,
+                final_status="rejected",
+                veto_reason=gap_veto_reason,
+                min_edge=min_edge,
+                normalized_provider=normalized_provider,
+                judge_model=judge_model,
+            )
+            counter_updates = _decision_counter_updates(
+                decision=decision,
+                final_status="rejected",
+                veto_reason=gap_veto_reason,
             )
             return _JudgeItemResult(
                 judged=1,

@@ -38,7 +38,9 @@ def _work_item(
     )
 
 
-def test_run_judge_audit_counts_conflict(monkeypatch) -> None:
+def test_run_judge_audit_target_disagreement_can_become_fp_with_gap_guardrail(
+    monkeypatch,
+) -> None:
     captured: dict[str, object] = {
         "rows": [],
         "completed": None,
@@ -157,14 +159,83 @@ def test_run_judge_audit_counts_conflict(monkeypatch) -> None:
 
     assert stats.audit_run_id == 123
     assert stats.sample_size_actual == 1
-    assert stats.conflict == 1
+    assert stats.conflict == 0
     assert stats.tp == 0
-    assert stats.compared_count == 0
+    assert stats.fp == 1
+    assert stats.compared_count == 1
 
     rows = captured["rows"]
     assert isinstance(rows, list)
     assert len(rows) == 1
-    assert rows[0]["outcome_class"] == "conflict"
+    assert rows[0]["outcome_class"] == "fp"
+
+
+def test_judge_audit_judge_once_vetoes_small_candidate_gap(monkeypatch) -> None:
+    work_item = JudgeWorkItem(
+        candidate_set_id=77,
+        candidate_set_status="fresh",
+        source_item_id=1001,
+        source_number=501,
+        source_type=ItemType.ISSUE,
+        source_state=StateFilter.OPEN,
+        source_title="exec approvals still required despite ask=off and security=full",
+        source_body=(
+            "Config tools.exec.security=full and tools.exec.ask=off is set. "
+            "Running `ls` still asks for approval and times out."
+        ),
+        candidates=[
+            JudgeCandidate(
+                candidate_item_id=2001,
+                number=9001,
+                state=StateFilter.OPEN,
+                title="Candidate A",
+                body="A body",
+                score=0.91,
+                rank=1,
+            ),
+            JudgeCandidate(
+                candidate_item_id=2002,
+                number=9002,
+                state=StateFilter.OPEN,
+                title="Candidate B",
+                body="B body",
+                score=0.90,
+                rank=2,
+            ),
+        ],
+    )
+
+    class FakeJudgeClient:
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            return (
+                '{"is_duplicate": true, "duplicate_of": 9001, '
+                '"confidence": 0.93, "reasoning": "Same root cause.", '
+                '"relation": "same_instance", '
+                '"root_cause_match": "same", '
+                '"scope_relation": "same_scope", '
+                '"path_match": "same", '
+                '"certainty": "sure"}'
+            )
+
+    monkeypatch.setattr(
+        judge_audit_service,
+        "_get_thread_local_judge_client",
+        lambda **kwargs: FakeJudgeClient(),
+    )
+
+    result = judge_audit_service._judge_once(
+        provider="gemini",
+        model="gemini-3-flash-preview",
+        api_key="gemini-key",
+        thinking_level=None,
+        min_edge=0.85,
+        work_item=work_item,
+        debug_rpc=False,
+        debug_rpc_sink=None,
+    )
+
+    assert result.final_status == "rejected"
+    assert result.veto_reason == "candidate_gap_too_small"
 
 
 def test_run_judge_audit_counts_tp_fp_fn_tn(monkeypatch) -> None:

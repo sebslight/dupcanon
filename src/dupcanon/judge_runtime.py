@@ -97,6 +97,8 @@ _GENERIC_SOURCE_PHRASES = (
 
 THREAD_LOCAL_JUDGE_CACHE = local()
 
+MIN_ACCEPTED_CANDIDATE_SCORE_GAP = 0.015
+
 
 def looks_too_vague(*, source_title: str, source_body: str | None) -> bool:
     title = normalize_text(source_title)
@@ -360,5 +362,42 @@ def bug_feature_veto_reason(
 
     if {source_kind, candidate_kind} == {"bug", "feature"}:
         return f"bug_feature_mismatch:{source_kind}_vs_{candidate_kind}"
+
+    return None
+
+
+def accepted_candidate_gap_veto_reason(
+    *,
+    selected_candidate_number: int,
+    candidates: list[dict[str, Any]],
+    min_gap: float = MIN_ACCEPTED_CANDIDATE_SCORE_GAP,
+) -> str | None:
+    if min_gap <= 0:
+        return None
+
+    selected_score: float | None = None
+    best_alternative_score: float | None = None
+
+    for candidate in candidates:
+        number_raw = candidate.get("number")
+        score_raw = candidate.get("score")
+        if not isinstance(number_raw, int):
+            continue
+        if not isinstance(score_raw, int | float):
+            continue
+
+        score = float(score_raw)
+        if number_raw == selected_candidate_number:
+            selected_score = score
+            continue
+
+        if best_alternative_score is None or score > best_alternative_score:
+            best_alternative_score = score
+
+    if selected_score is None or best_alternative_score is None:
+        return None
+
+    if (selected_score - best_alternative_score) < min_gap:
+        return "candidate_gap_too_small"
 
     return None

@@ -16,7 +16,13 @@ from dupcanon.judge_providers import (
     validate_thinking_for_provider,
 )
 from dupcanon.judge_runtime import (
+    MIN_ACCEPTED_CANDIDATE_SCORE_GAP as _MIN_ACCEPTED_CANDIDATE_SCORE_GAP,
+)
+from dupcanon.judge_runtime import (
     SYSTEM_PROMPT as _SYSTEM_PROMPT,
+)
+from dupcanon.judge_runtime import (
+    accepted_candidate_gap_veto_reason as _accepted_candidate_gap_veto_reason,
 )
 from dupcanon.judge_runtime import (
     bug_feature_veto_reason as _bug_feature_veto_reason,
@@ -201,6 +207,8 @@ def _online_duplicate_guardrail_reason(
     source_body: str | None,
     candidate_title: str,
     candidate_body: str | None,
+    selected_candidate_number: int,
+    candidates: list[dict[str, Any]],
 ) -> str | None:
     veto_reason = _duplicate_veto_reason(decision)
     if veto_reason is not None:
@@ -226,6 +234,14 @@ def _online_duplicate_guardrail_reason(
         missing.append("certainty")
     if missing:
         return "online_strict_guardrail:" + ",".join(missing)
+
+    gap_veto_reason = _accepted_candidate_gap_veto_reason(
+        selected_candidate_number=selected_candidate_number,
+        candidates=candidates,
+        min_gap=_MIN_ACCEPTED_CANDIDATE_SCORE_GAP,
+    )
+    if gap_veto_reason is not None:
+        return f"online_strict_guardrail:{gap_veto_reason}"
 
     return None
 
@@ -613,6 +629,8 @@ def run_detect_new(
         source_body=source_body_for_judge,
         candidate_title=target_context.title,
         candidate_body=target_context.body,
+        selected_candidate_number=duplicate_of,
+        candidates=candidate_rows,
     )
     top_retrieval_score = top_matches[0].score if top_matches else 0.0
 

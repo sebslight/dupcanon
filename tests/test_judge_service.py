@@ -566,6 +566,105 @@ def test_run_judge_rejects_closed_duplicate_targets(monkeypatch) -> None:
     assert "[veto: target_not_open]" in inserted[0]["reasoning"]
 
 
+def test_run_judge_vetoes_small_candidate_gap(monkeypatch) -> None:
+    captured: dict[str, object] = {
+        "inserted": [],
+    }
+
+    close_gap_item = _work_item().model_copy(
+        update={
+            "candidates": [
+                JudgeCandidate(
+                    candidate_item_id=2001,
+                    number=9001,
+                    state=StateFilter.OPEN,
+                    title="Candidate A",
+                    body="A body",
+                    score=0.91,
+                    rank=1,
+                ),
+                JudgeCandidate(
+                    candidate_item_id=2003,
+                    number=9003,
+                    state=StateFilter.OPEN,
+                    title="Candidate C",
+                    body="C body",
+                    score=0.90,
+                    rank=2,
+                ),
+            ]
+        }
+    )
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_candidate_sets_for_judging(
+            self, *, repo_id: int, item_type: ItemType, allow_stale: bool
+        ):
+            return [close_gap_item]
+
+        def has_accepted_duplicate_edge(
+            self, *, repo_id: int, item_type: ItemType, from_item_id: int
+        ) -> bool:
+            return False
+
+        def insert_duplicate_edge(self, **kwargs) -> None:
+            inserted = captured["inserted"]
+            assert isinstance(inserted, list)
+            inserted.append(kwargs)
+
+        def replace_accepted_duplicate_edge(self, **kwargs) -> None:
+            msg = "replace should not be called"
+            raise AssertionError(msg)
+
+    class FakeJudgeClient:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            return (
+                '{"is_duplicate": true, "duplicate_of": 9001, '
+                '"confidence": 0.93, "reasoning": "Same root cause.", '
+                '"relation": "same_instance", '
+                '"root_cause_match": "same", '
+                '"scope_relation": "same_scope", '
+                '"path_match": "same", '
+                '"certainty": "sure"}'
+            )
+
+    monkeypatch.setattr(judge_service, "Database", FakeDatabase)
+    monkeypatch.setattr(judge_service, "GeminiJudgeClient", FakeJudgeClient)
+
+    stats = judge_service.run_judge(
+        settings=Settings(supabase_db_url="postgresql://localhost/db", gemini_api_key="key"),
+        repo_value="org/repo",
+        item_type=ItemType.ISSUE,
+        provider="gemini",
+        model="gemini-2.5-flash",
+        min_edge=0.85,
+        allow_stale=False,
+        rejudge=False,
+        worker_concurrency=None,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.judged == 1
+    assert stats.accepted_edges == 0
+    assert stats.rejected_edges == 1
+
+    inserted = captured["inserted"]
+    assert isinstance(inserted, list)
+    assert len(inserted) == 1
+    assert inserted[0]["status"] == "rejected"
+    assert "[veto: candidate_gap_too_small]" in inserted[0]["reasoning"]
+
+
 def test_run_judge_skips_when_existing_edge_and_not_rejudge(monkeypatch) -> None:
     captured = {"client_calls": 0}
 

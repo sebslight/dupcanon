@@ -309,8 +309,9 @@ GitHub workflow-specific tuning vars (optional, consumed by `.github/workflows/d
 For `DUPCANON_ONLINE_THINKING`, allowed values are `off|minimal|low|medium|high|xhigh`.
 Gemini provider paths reject `xhigh`.
 
-Current hardcoded precision guardrail (non-configurable in v1 code):
+Current hardcoded precision guardrails (non-configurable in v1 code):
 - duplicate verdict additionally requires top retrieval score >= `0.90`
+- accepted duplicate target must exceed the best alternative candidate score by at least `0.015` (otherwise downgraded via `online_strict_guardrail:candidate_gap_too_small`)
 
 Future (Stage 3) auto-close controls:
 - `DUPCANON_ONLINE_AUTO_CLOSE_ENABLED`
@@ -331,7 +332,7 @@ Future (Stage 3) auto-close controls:
   - `judge_duplicate`
   - `low_confidence_duplicate`
   - `duplicate_low_retrieval_support`
-  - `online_strict_guardrail:*`
+  - `online_strict_guardrail:*` (including `online_strict_guardrail:candidate_gap_too_small`)
   - `model_not_duplicate`
   - `no_candidates`
   - `invalid_judge_response`

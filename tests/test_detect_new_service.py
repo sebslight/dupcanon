@@ -102,7 +102,7 @@ def test_run_detect_new_returns_duplicate_when_confident(monkeypatch: pytest.Mon
             self.kwargs = kwargs
 
         def embed_texts(self, texts: list[str]) -> list[list[float]]:
-            return [[0.1] * 768 for _ in texts]
+            return [[0.1] * 3072 for _ in texts]
 
     class FakeJudgeClient:
         def judge(self, *, system_prompt: str, user_prompt: str) -> str:
@@ -327,6 +327,109 @@ def test_run_detect_new_high_confidence_with_low_retrieval_score_downgrades_to_m
     assert result.is_duplicate is False
     assert result.duplicate_of == 45
     assert result.reason == "duplicate_low_retrieval_support"
+
+
+def test_run_detect_new_high_confidence_with_small_gap_downgrades_to_maybe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGitHubClient:
+        def fetch_repo_metadata(self, repo) -> RepoMetadata:
+            return RepoMetadata(github_repo_id=1, org=repo.org, name=repo.name)
+
+        def fetch_item(self, *, repo, item_type: ItemType, number: int) -> ItemPayload:
+            return _issue_payload(number=number)
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def upsert_repo(self, repo_metadata: RepoMetadata) -> int:
+            return 42
+
+        def upsert_item(self, *, repo_id: int, item: ItemPayload, synced_at) -> UpsertResult:
+            return UpsertResult(inserted=False, content_changed=False)
+
+        def get_embedding_item_by_number(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            number: int,
+            model: str,
+        ) -> EmbeddingItem | None:
+            return EmbeddingItem(
+                item_id=10,
+                type=item_type,
+                number=number,
+                title="Issue title",
+                body="Issue body",
+                content_hash="same",
+                embedded_content_hash="same",
+            )
+
+        def find_candidate_neighbors(self, **kwargs) -> list[CandidateNeighbor]:
+            return [
+                CandidateNeighbor(candidate_item_id=21, score=0.91, rank=1),
+                CandidateNeighbor(candidate_item_id=22, score=0.90, rank=2),
+            ]
+
+        def list_item_context_by_ids(self, *, item_ids: list[int]) -> list[CandidateItemContext]:
+            return [
+                CandidateItemContext(
+                    item_id=21,
+                    number=45,
+                    state=StateFilter.OPEN,
+                    title="Existing duplicate",
+                    body="duplicate body",
+                ),
+                CandidateItemContext(
+                    item_id=22,
+                    number=46,
+                    state=StateFilter.OPEN,
+                    title="Alternative",
+                    body="alternative body",
+                ),
+            ]
+
+    class FakeJudgeClient:
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            return (
+                '{"is_duplicate": true, "duplicate_of": 45, '
+                '"confidence": 0.96, "reasoning": "Same failure signature.", '
+                '"relation": "same_instance", '
+                '"root_cause_match": "same", '
+                '"scope_relation": "same_scope", '
+                '"path_match": "same", '
+                '"certainty": "sure"}'
+            )
+
+    monkeypatch.setattr(detect_new_service, "GitHubClient", FakeGitHubClient)
+    monkeypatch.setattr(detect_new_service, "Database", FakeDatabase)
+    monkeypatch.setattr(
+        detect_new_service,
+        "_get_thread_local_judge_client",
+        lambda **kwargs: FakeJudgeClient(),
+    )
+
+    result = detect_new_service.run_detect_new(
+        settings=Settings(supabase_db_url="postgresql://localhost/db", gemini_api_key="gemini-key"),
+        repo_value="org/repo",
+        item_type=ItemType.ISSUE,
+        number=77,
+        provider="gemini",
+        model="gemini-3-flash-preview",
+        k=8,
+        min_score=0.75,
+        maybe_threshold=0.85,
+        duplicate_threshold=0.92,
+        run_id="run123",
+        logger=get_logger("test"),
+    )
+
+    assert result.verdict.value == "maybe_duplicate"
+    assert result.is_duplicate is False
+    assert result.duplicate_of == 45
+    assert result.reason == "online_strict_guardrail:candidate_gap_too_small"
 
 
 def test_run_detect_new_pr_prompt_includes_changed_file_context(

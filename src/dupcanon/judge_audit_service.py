@@ -22,6 +22,9 @@ from dupcanon.judge_runtime import (
     SYSTEM_PROMPT as _SYSTEM_PROMPT,
 )
 from dupcanon.judge_runtime import (
+    accepted_candidate_gap_veto_reason as _accepted_candidate_gap_veto_reason,
+)
+from dupcanon.judge_runtime import (
     bug_feature_veto_reason as _bug_feature_veto_reason,
 )
 from dupcanon.judge_runtime import (
@@ -131,6 +134,7 @@ def _judge_once(
                 "number": candidate.number,
                 "rank": candidate.rank,
                 "state": candidate.state.value,
+                "score": candidate.score,
                 "title": candidate.title,
                 "body": candidate.body or "",
             }
@@ -236,6 +240,21 @@ def _judge_once(
             to_item_id=to_item_id,
             confidence=decision.confidence,
             veto_reason="below_min_edge",
+            reasoning=decision.reasoning,
+        )
+
+    assert duplicate_number is not None
+    gap_veto_reason = _accepted_candidate_gap_veto_reason(
+        selected_candidate_number=duplicate_number,
+        candidates=candidate_rows,
+    )
+    if gap_veto_reason is not None:
+        return _AuditDecisionResult(
+            model_is_duplicate=decision.is_duplicate,
+            final_status="rejected",
+            to_item_id=to_item_id,
+            confidence=decision.confidence,
+            veto_reason=gap_veto_reason,
             reasoning=decision.reasoning,
         )
 
