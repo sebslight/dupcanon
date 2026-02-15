@@ -238,94 +238,64 @@ This table is the operational truth for **what each command reads and writes**.
 
 ## Command-to-state map (Mermaid)
 
+<Info>
+You’re usually best served by the table above for exact read/write behavior. These diagrams are intentionally simplified for readability.
+</Info>
+
+<Tabs>
+  <Tab title="Core batch path">
+
 ```mermaid
 flowchart LR
-  subgraph Cmds[Commands]
-    INIT[init]
-    MAINT[maintainers]
-    SYNC[sync]
-    REF[refresh]
-    EMB[embed]
-    CAND[candidates]
-    JUDGE[judge]
-    AUD[judge-audit]
-    RAUD[report-audit]
-    DET[detect-new]
-    CAN[canonicalize]
-    PLAN[plan-close]
-    APPLY[apply-close]
-  end
+  SY[sync/refresh] --> REPOS[(repos)]
+  SY --> ITEMS[(items)]
 
-  subgraph State[Persisted state]
-    REPOS[(repos)]
-    ITEMS[(items)]
-    EMBS[(embeddings)]
-    CSETS[(candidate_sets + members)]
-    JDEC[(judge_decisions)]
-    ARUN[(judge_audit_runs + items)]
-    CRUN[(close_runs + close_run_items)]
-  end
+  EM[embed] --> ITEMS
+  EM --> EMBS[(embeddings)]
 
-  GH[GitHub API]
-  EP[Embedding provider]
-  JP[Judge provider]
-  OUT[[CLI output / artifacts]]
+  CA[candidates] --> ITEMS
+  CA --> EMBS
+  CA --> CSETS[(candidate_sets + members)]
 
-  INIT --> OUT
+  JU[judge] --> CSETS
+  JU --> ITEMS
+  JU --> JDEC[(judge_decisions)]
 
-  MAINT --> GH
-  MAINT --> OUT
+  PL[plan-close] --> JDEC
+  PL --> ITEMS
+  PL --> CRUN[(close_runs + close_run_items)]
 
-  SYNC --> GH
-  SYNC --> REPOS
-  SYNC --> ITEMS
+  AP[apply-close] --> CRUN
+```
 
-  REF --> GH
-  REF --> ITEMS
+  </Tab>
 
-  EMB --> ITEMS
-  EMB --> EP
-  EMB --> EMBS
+  <Tab title="Online + evaluation + integrations">
 
-  CAND --> ITEMS
-  CAND --> EMBS
-  CAND --> CSETS
+```mermaid
+flowchart LR
+  DET[detect-new] --> REPOS[(repos)]
+  DET --> ITEMS[(items)]
+  DET --> EMBS[(embeddings)]
+  DET -.->|stale source only| EP[Embedding provider]
+  DET --> JP[Judge provider]
+  DET --> GH[GitHub API]
 
-  JUDGE --> CSETS
-  JUDGE --> ITEMS
-  JUDGE --> JP
-  JUDGE --> JDEC
-
-  AUD --> CSETS
+  AUD[judge-audit] --> CSETS[(candidate_sets + members)]
+  AUD --> ARUN[(judge_audit_runs + items)]
   AUD --> JP
-  AUD --> ARUN
 
-  RAUD --> ARUN
-  RAUD --> OUT
+  RAUD[report-audit] --> ARUN
 
-  DET --> GH
-  DET --> REPOS
-  DET --> ITEMS
-  DET --> EMBS
-  DET -.->|stale source only| EP
-  DET --> JP
-  DET --> OUT
+  MAINT[maintainers] --> GH
 
-  CAN --> JDEC
+  CAN[canonicalize] --> JDEC[(judge_decisions)]
   CAN --> ITEMS
   CAN --> GH
-  CAN --> OUT
-
-  PLAN --> JDEC
-  PLAN --> ITEMS
-  PLAN --> GH
-  PLAN --> CRUN
-
-  APPLY --> CRUN
-  APPLY --> GH
-  APPLY --> CRUN
-  APPLY --> OUT
 ```
+
+  </Tab>
+</Tabs>
 
 ## Where safety decisions happen
 
