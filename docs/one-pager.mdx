@@ -5,16 +5,23 @@ description: Problem, approach, safety model, and current status.
 
 ## TL;DR
 
-`dupcanon` is a **human-operated duplicate canonicalization CLI** for GitHub issues/PRs.
+`dupcanon` is a duplicate canonicalization system for GitHub issues/PRs.
+
+- **Current mode:** human-operated CLI
+- **Target mode:** automated, workflow-driven operation in GitHub Actions
+
+Primary objective: **reduce duplicate noise in high-cadence repos** (for example, OpenClaw) by consistently selecting a stable canonical and closing true duplicates safely.
 
 It exists to solve two painful failure modes in naive duplicate automation:
 
 1. **Duplicate chains** (`A -> B -> C`) caused by unstable targets over time.
 2. **Wrong canonical target selection** (closing against weaker or mismatched reports).
 
-The system is designed for **precision-first, auditable, reproducible closes**.
+The system is designed to be **cheap enough to run continuously**, **accurate enough for production guardrails**, and fully auditable.
 
 ## Why this project exists
+
+High-cadence repos become unmanageable when duplicate reports pile up faster than maintainers can triage them.
 
 Most existing bot setups do one of these:
 
@@ -22,7 +29,7 @@ Most existing bot setups do one of these:
 - do one-shot LLM duplicate picks without durable decision history,
 - or close too aggressively without strong deterministic gates.
 
-`dupcanon` adds durable state and a canonical graph model so decisions stay stable and reviewable.
+`dupcanon` adds durable state and a canonical graph model so decisions stay stable, reviewable, and useful over time.
 
 ## Core approach
 
@@ -35,6 +42,14 @@ Most existing bot setups do one of these:
 7. `plan-close` -> reviewed `apply-close --yes`
 
 Everything important is persisted for replay, audit, and tuning.
+
+## Cost and accuracy target
+
+The goal is not "perfect AI triage." The goal is practical operations:
+
+- **Cost:** run continuously without requiring expensive frontier-only models for every decision.
+- **Accuracy:** keep precision high enough for controlled closing workflows.
+- **Control:** use deterministic gates so bad model outputs do not silently become close actions.
 
 ## Safety model (LLM + deterministic gates)
 
@@ -64,7 +79,7 @@ Implemented commands:
 - `judge-audit`, `report-audit`, `detect-new`
 - `canonicalize`, `maintainers`, `plan-close`, `apply-close`
 
-Current online flow is shadow/suggest-oriented, while close mutations remain explicitly gated through reviewed plans.
+Current online flow is shadow/suggest-oriented, while close mutations remain explicitly gated through reviewed plans; next step is promoting this into a workflow-native automated pipeline under the same guardrails.
 
 ## What’s missing next
 
