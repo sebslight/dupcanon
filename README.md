@@ -4,7 +4,9 @@ Human-operated duplicate canonicalization CLI for GitHub issues/PRs.
 
 ## What it does
 
-`dupcanon` provides a DB-first pipeline:
+`dupcanon` is a DB-first duplicate canonicalization system with two coordinated paths:
+
+### Batch canonicalization path (many items)
 
 1. `sync` / `refresh` GitHub items into Postgres
 2. `embed` title/body content into pgvector
@@ -14,7 +16,26 @@ Human-operated duplicate canonicalization CLI for GitHub issues/PRs.
 6. `plan-close` produce auditable close plans with guardrails
 7. `apply-close` execute reviewed close plans
 
+### Online path (single new item)
+
+- `detect-new` classifies one issue/PR as `duplicate`, `maybe_duplicate`, or `not_duplicate`
+- emits structured JSON for workflow integration
+- stays precision-first with deterministic downgrade guardrails
+
 Use commands as `uv run dupcanon ...` (or `dupcanon ...` if your venv is activated).
+
+## Documentation map
+
+Public docs (Mintlify):
+- Overview: `docs/index.mdx`
+- Get started: `docs/get-started.mdx`
+- Architecture: `docs/architecture.mdx`
+
+Internal deep docs:
+- Batch design/spec + journal: `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+- Online detection design/spec + journal: `docs/internal/online_duplicate_detection_pipeline_design_doc_v1.md`
+- Operator runbook: `docs/internal/operator_runbook_v1.md`
+- Full architecture review: `docs/internal/full_architecture_review.md`
 
 ## Current command surface
 
@@ -34,13 +55,15 @@ Use commands as `uv run dupcanon ...` (or `dupcanon ...` if your venv is activat
 
 ## Key current behavior
 
-- Apply gate is: reviewed persisted `close_run` + `--yes`.
-- There is **no approval-file / approve-plan flow**.
+- Batch pipeline is DB-first and auditable (`items`, `embeddings`, `candidate_sets`, `judge_decisions`, `close_runs`).
+- Apply gate is: reviewed persisted `close_run(mode=plan)` + explicit `--yes`.
+- There is **no approval-file / approve-plan flow** in v1.
 - `refresh` defaults to discovering new items only; use `refresh --refresh-known` to also update known-item metadata.
-- Operational candidate retrieval defaults to open items (`candidates --include open`) with default clustering `k=4`.
-- Judge rejects duplicate targets that are not open (`veto_reason=target_not_open`).
-- `detect-new` uses extra precision guardrails and may downgrade high-confidence model duplicates to `maybe_duplicate` when structural/retrieval support is weak.
-- Accepted duplicate decisions require a minimum candidate-score gap vs the best alternate candidate (default gap: `0.015`), reducing near-tie false positives.
+- Operational candidate retrieval defaults to open items (`candidates --include open`) with default clustering `k=4`, `min_score=0.75`.
+- Judge acceptance defaults: `min_edge=0.85`, target must be open, and selected candidate score gap vs best alternate must be `>= 0.015`.
+- `plan-close` requires a **direct accepted edge** to canonical and `min_close=0.90`, plus maintainer author/assignee protections.
+- `detect-new` is a precision-first online classifier (`duplicate` / `maybe_duplicate` / `not_duplicate`) with stricter duplicate thresholds and downgrade guardrails.
+- In v1, `detect-new` persists source/corpus state (`items`, source `embeddings` when stale) but does not persist online judge outcomes to `judge_decisions`.
 - Judge prompt/parse/veto/runtime logic is centralized in `src/dupcanon/judge_runtime.py` and reused by `judge`, `judge-audit`, and `detect-new`.
 - Canonical selection priority is:
   1. open if any open item exists
@@ -102,26 +125,41 @@ uv run dupcanon init
 ## Typical local run
 
 ```bash
+# batch freshness + duplicate edge pipeline
 uv run dupcanon sync --repo openclaw/openclaw --since 3d
+uv run dupcanon refresh --repo openclaw/openclaw --refresh-known
 uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed
-# OpenAI embeddings override example:
-# uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed --provider openai --model text-embedding-3-large
 uv run dupcanon candidates --repo openclaw/openclaw --type issue --include open
 uv run dupcanon judge --repo openclaw/openclaw --type issue --thinking medium
-uv run dupcanon judge-audit --repo openclaw/openclaw --type issue --sample-size 100 --seed 42 --cheap-provider gemini --cheap-thinking low --strong-provider openai --strong-thinking high --workers 4
-# print a prior audit report without re-running models:
-# uv run dupcanon report-audit --run-id 4 --disagreements-limit 30
-# simulate non-LLM gates on stored audit rows:
-# uv run dupcanon report-audit --run-id 4 --simulate-gates --gate-rank-max 3 --gate-score-min 0.88 --gate-gap-min 0.02
-# sweep gap gate for tuning:
-# uv run dupcanon report-audit --run-id 4 --simulate-sweep gap --sweep-from 0.00 --sweep-to 0.04 --sweep-step 0.005
-# debugging openai-codex RPC behavior:
-# uv run dupcanon judge-audit ... --cheap-provider openai-codex --strong-provider openai-codex --cheap-thinking medium --strong-thinking medium --debug-rpc --verbose
-uv run dupcanon detect-new --repo openclaw/openclaw --type issue --number 123 --thinking low
+uv run dupcanon canonicalize --repo openclaw/openclaw --type issue
+
+# safe close planning/apply
 uv run dupcanon plan-close --repo openclaw/openclaw --type issue --dry-run
-# review plan output in DB, then:
-uv run dupcanon apply-close --close-run <id> --yes
+# persist a reviewable plan when ready:
+# uv run dupcanon plan-close --repo openclaw/openclaw --type issue
+# then apply only after review:
+# uv run dupcanon apply-close --close-run <id> --yes
+
+# online single-item path (shadow/suggest)
+uv run dupcanon detect-new --repo openclaw/openclaw --type issue --number 123 --thinking low \
+  --json-out .local/artifacts/detect-new-123.json
+
+# optional sampled cheap-vs-strong audit
+# uv run dupcanon judge-audit --repo openclaw/openclaw --type issue --sample-size 100 --seed 42 \
+#   --cheap-provider gemini --cheap-thinking low --strong-provider openai --strong-thinking high --workers 4
+# uv run dupcanon report-audit --run-id 4 --simulate-gates --gate-gap-min 0.02
 ```
+
+## GitHub Actions online shadow workflow
+
+Current workflow file:
+- `.github/workflows/detect-new-shadow.yml`
+
+It triggers on:
+- `issues.opened`
+- `pull_request.opened`
+
+It runs `dupcanon detect-new` and uploads JSON artifacts (no mutation).
 
 ## LLM controls matrix (CLI flags + env defaults)
 
@@ -208,11 +246,7 @@ rg "LogfireLoggingHandler|send_to_logfire|LOGFIRE_" src/dupcanon/logging_config.
 rg "DUPCANON_ONLINE_" .github/workflows/detect-new-shadow.yml
 ```
 
-## Docs
+## Additional references
 
-- One-pager (quick overview): `docs/index.mdx`
-- Batch design/spec + journal: `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
-- Online detection design/spec + journal: `docs/internal/online_duplicate_detection_pipeline_design_doc_v1.md`
-- Operator runbook: `docs/internal/operator_runbook_v1.md`
-- Full architecture review: `docs/internal/full_architecture_review.md`
 - Agent operating guide: `AGENTS.md`
+- Public docs navigation config: `docs/docs.json`
