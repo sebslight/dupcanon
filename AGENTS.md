@@ -14,10 +14,12 @@ When implementing behavior, schema, or defaults, follow the spec above first.
 ## 2) Locked v1 decisions (do not drift)
 
 - Embeddings default: OpenAI `text-embedding-3-large` (`DUPCANON_EMBEDDING_PROVIDER=openai`)
-- Embedding dimension: `768` (pgvector column is `vector(768)`)
+- Embedding dimension: `3072` (pgvector column is `vector(3072)`)
 - Judge default: OpenAI Codex via `pi` RPC (`openai-codex`, model `gpt-5.1-codex-mini`)
 - Optional judge overrides for evaluation: OpenAI `gpt-5-mini`, Gemini `gemini-3-flash-preview`, OpenRouter `minimax/minimax-m2.5`
-- Retrieval defaults: `k=8`, `min_score=0.75`
+- Retrieval defaults:
+  - candidates `k=4` (clustering), `min_score=0.75`
+  - detect-new `k=8`, `min_score=0.75`
 - Thresholds: `min_edge=0.85`, `min_close=0.90`
 - Input content for modeling: title + body only (no comments)
 - Edge policy: first accepted edge wins unless explicit `--rejudge`
@@ -100,6 +102,7 @@ Never implement `apply-close` before guardrails and planning exist.
 - Assignee protection on close actions
 - Skip uncertain maintainer identity cases
 - Require open canonical if any open item exists in cluster
+- Judge acceptance guardrails: target must be open; selected candidate score gap vs best alternative must be >= 0.015
 - Close comment template (v1):
   - `Closing as duplicate of #{}. If this is incorrect, please contact us.`
 

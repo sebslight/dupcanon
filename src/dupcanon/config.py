@@ -24,7 +24,7 @@ class Settings(BaseSettings):
         default="text-embedding-3-large",
         validation_alias="DUPCANON_EMBEDDING_MODEL",
     )
-    embedding_dim: int = Field(default=768, validation_alias="DUPCANON_EMBEDDING_DIM")
+    embedding_dim: int = Field(default=3072, validation_alias="DUPCANON_EMBEDDING_DIM")
     embed_batch_size: int = Field(default=32, validation_alias="DUPCANON_EMBED_BATCH_SIZE")
     embed_worker_concurrency: int = Field(
         default=2,
@@ -91,8 +91,8 @@ class Settings(BaseSettings):
     @field_validator("embedding_dim")
     @classmethod
     def validate_embedding_dim(cls, value: int) -> int:
-        if value != 768:
-            msg = "DUPCANON_EMBEDDING_DIM must be 768 in v1"
+        if value != 3072:
+            msg = "DUPCANON_EMBEDDING_DIM must be 3072 in v1"
             raise ValueError(msg)
         return value
 

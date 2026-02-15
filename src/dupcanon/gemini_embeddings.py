@@ -23,7 +23,7 @@ class GeminiEmbeddingsClient:
         *,
         api_key: str,
         model: str = "gemini-embedding-001",
-        output_dimensionality: int = 768,
+        output_dimensionality: int = 3072,
         max_attempts: int = 5,
         timeout_seconds: float = 60.0,
     ) -> None:

@@ -18,7 +18,7 @@ def test_load_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setenv("DUPCANON_LOG_LEVEL", "debug")
     monkeypatch.setenv("DUPCANON_EMBEDDING_PROVIDER", "gemini")
     monkeypatch.setenv("DUPCANON_EMBEDDING_MODEL", "gemini-embedding-001")
-    monkeypatch.setenv("DUPCANON_EMBEDDING_DIM", "768")
+    monkeypatch.setenv("DUPCANON_EMBEDDING_DIM", "3072")
     monkeypatch.setenv("DUPCANON_EMBED_BATCH_SIZE", "64")
     monkeypatch.setenv("DUPCANON_EMBED_WORKER_CONCURRENCY", "3")
     monkeypatch.setenv("DUPCANON_JUDGE_PROVIDER", "GEMINI")
@@ -44,7 +44,7 @@ def test_load_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert settings.log_level == "DEBUG"
     assert settings.embedding_provider == "gemini"
     assert settings.embedding_model == "gemini-embedding-001"
-    assert settings.embedding_dim == 768
+    assert settings.embedding_dim == 3072
     assert settings.embed_batch_size == 64
     assert settings.embed_worker_concurrency == 3
     assert settings.judge_provider == "gemini"
@@ -96,7 +96,7 @@ def test_load_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert settings.log_level == "INFO"
     assert settings.embedding_provider == "openai"
     assert settings.embedding_model == "text-embedding-3-large"
-    assert settings.embedding_dim == 768
+    assert settings.embedding_dim == 3072
     assert settings.embed_batch_size == 32
     assert settings.embed_worker_concurrency == 2
     assert settings.judge_provider == "openai-codex"

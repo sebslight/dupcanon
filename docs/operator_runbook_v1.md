@@ -40,6 +40,9 @@ This runbook describes the current end-to-end workflow for running `dupcanon` sa
   - env defaults:
     - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
     - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
+- `report-audit`
+  - flags: `--run-id`, `--show-disagreements/--no-show-disagreements`, `--disagreements-limit`, `--simulate-gates`, `--gate-rank-max`, `--gate-score-min`, `--gate-gap-min`, `--simulate-sweep gap`, `--sweep-from`, `--sweep-to`, `--sweep-step`
+  - reads persisted audit tables only (no model calls)
 
 ## Setup
 
@@ -84,12 +87,12 @@ uv run dupcanon embed --repo <org/repo> --type issue --only-changed --provider o
 
 Notes:
 - Embedding provider can be set via env (`DUPCANON_EMBEDDING_PROVIDER`) or CLI (`embed --provider ...`).
-- Keep `DUPCANON_EMBEDDING_DIM=768` to match current pgvector schema.
+- Keep `DUPCANON_EMBEDDING_DIM=3072` to match current pgvector schema.
 
 ### 3) Candidate retrieval
 
 ```bash
-uv run dupcanon candidates --repo <org/repo> --type issue --k 8 --min-score 0.75 --include open
+uv run dupcanon candidates --repo <org/repo> --type issue --k 4 --min-score 0.75 --include open
 ```
 
 Notes:
@@ -132,8 +135,9 @@ Thinking levels:
 - `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
 - `xhigh` is rejected for Gemini provider paths.
 
-Judge guardrail:
+Judge guardrails:
 - Duplicate targets that are not open are rejected (`veto_reason=target_not_open`).
+- Accepted duplicates must clear a minimum selected-candidate score gap vs the best alternate candidate (default `0.015`; veto reason `candidate_gap_too_small`).
 
 ### 4b) Judge audit (sampled cheap-vs-strong, optional)
 
@@ -174,6 +178,11 @@ uv run dupcanon report-audit --run-id <audit_run_id>
 Optional:
 - `--disagreements-limit N`
 - `--no-show-disagreements`
+- `--simulate-gates` with one or more gates:
+  - `--gate-rank-max N`
+  - `--gate-score-min X`
+  - `--gate-gap-min X`
+- `--simulate-sweep gap --sweep-from A --sweep-to B --sweep-step C`
 
 ### 5) Canonical stats (optional but recommended)
 

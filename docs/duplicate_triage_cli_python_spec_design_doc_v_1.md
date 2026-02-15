@@ -120,10 +120,10 @@ Single CLI, subcommands. Example name: dupcanon.
   - Embeds items missing embeddings or with content_version advanced.
   - Embedding provider/model can be overridden per run.
 
-- dupcanon candidates --repo org/name --type issue|pr [--k 8] [--min-score 0.75] [--include open|closed|all] [--dry-run] [--workers N]
+- dupcanon candidates --repo org/name --type issue|pr [--k 4] [--min-score 0.75] [--include open|closed|all] [--dry-run] [--workers N]
   - Creates candidate_sets and candidate_set_members.
   - With --dry-run: computes candidate stats without DB writes.
-  - v1 default retrieval is k=8 with `--include open` (configurable).
+  - v1 default clustering retrieval is k=4 with `--include open` (configurable).
 
 - dupcanon judge --repo org/name --type issue|pr [--provider gemini|openai|openrouter|openai-codex] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
   - Reads fresh candidate sets, calls LLM, writes judge_decisions.
@@ -144,9 +144,12 @@ Single CLI, subcommands. Example name: dupcanon.
     - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
     - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
 
-- dupcanon report-audit --run-id N [--show-disagreements/--no-show-disagreements] [--disagreements-limit N]
+- dupcanon report-audit --run-id N [--show-disagreements/--no-show-disagreements] [--disagreements-limit N] [--simulate-gates --gate-rank-max N --gate-score-min X --gate-gap-min X] [--simulate-sweep gap --sweep-from A --sweep-to B --sweep-step C]
   - Prints a persisted judge-audit run summary from `judge_audit_runs` without re-running model calls.
   - Optionally prints disagreement rows (`fp`, `fn`, `conflict`, `incomplete`) from `judge_audit_run_items`.
+  - Optional non-LLM simulation modes let operators estimate precision/recall tradeoffs from stored rows:
+    - single scenario (`--simulate-gates` + gate values)
+    - sweep mode (`--simulate-sweep gap ...`) for threshold tuning.
 
 - dupcanon detect-new --repo org/name --type issue|pr --number N [--provider ...] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--k 8] [--min-score 0.75] [--maybe-threshold 0.85] [--duplicate-threshold 0.92] [--json-out path]
   - Runs one-item online duplicate detection using the same provider/model/thinking controls as judge.
@@ -164,7 +167,7 @@ Single CLI, subcommands. Example name: dupcanon.
 
 ## Locked model/provider choices (v1)
 
-- Embeddings: provider-configurable (`gemini` or `openai`) with output dimensionality locked to 768.
+- Embeddings: provider-configurable (`gemini` or `openai`) with output dimensionality locked to 3072.
   - default model/provider is OpenAI `text-embedding-3-large`.
 - Duplicate judge default: OpenAI Codex via `pi` RPC with model `gpt-5.1-codex-mini`.
 - Optional evaluation overrides: OpenAI `gpt-5-mini` or OpenRouter `minimax/minimax-m2.5`.
@@ -179,7 +182,7 @@ Everything is DB-first. Supabase hosts Postgres and pgvector.
 
 The CLI is a thin orchestrator:
 - GitHub fetch via GitHub API (gh CLI, REST, or GraphQL) depending on implementation choice.
-- Embeddings via configured provider/model (`gemini` or `openai`, 768 dimensions).
+- Embeddings via configured provider/model (`gemini` or `openai`, 3072 dimensions).
 - LLM judging default via OpenAI Codex `pi` RPC (`openai-codex`, model `gpt-5.1-codex-mini`), with optional Gemini/OpenAI/OpenRouter overrides for evaluation.
 - Python CLI stack: Typer for command surface + Rich for terminal UX/progress rendering.
 - Data/config modeling and validation: Pydantic.
@@ -240,14 +243,14 @@ Stores the latest embedding per (item, model).
 
 Important note on pgvector dimensions
 - pgvector requires a fixed dimension in the column definition.
-- v1 locks embedding output dimensionality to 768 (provider/model may vary).
-- If we switch to a model/dimension outside 768, we do a migration or add a new embeddings table/column.
+- v1 locks embedding output dimensionality to 3072 (provider/model may vary).
+- If we switch to a model/dimension outside 3072, we do a migration or add a new embeddings table/column.
 
 - id (bigint pk)
 - item_id (fk items.id)
 - model (text not null)  -- embedding model used for this row (e.g. `gemini-embedding-001`, `text-embedding-3-large`)
-- dim (int not null)     -- 768 in v1
-- embedding (vector(768) not null)
+- dim (int not null)     -- 3072 in v1
+- embedding (vector(3072) not null)
 - embedded_content_hash (text not null)
 - created_at (timestamptz)
 
@@ -255,7 +258,7 @@ Constraints
 - unique (item_id, model)
 
 Indexes
-- vector index on embedding (ivfflat or hnsw depending on preference)
+- note: with 3072-dimensional vectors on current pgvector host limits (>2000 dims), ANN indexes (`ivfflat`/`hnsw`) are unavailable; retrieval currently uses exact distance scan.
 
 ### candidate_sets
 
@@ -487,6 +490,7 @@ Rules
 - If model returns `certainty="unsure"` for a duplicate claim, reject via veto.
 - Follow-up/partial-overlap/subset-superset and bug-vs-feature mismatches are vetoed from acceptance.
 - If the candidate target is not open, reject via veto (`target_not_open`).
+- If selected duplicate candidate score is too close to the best alternative (default min gap `0.015`), reject via veto (`candidate_gap_too_small`).
 - If model output is invalid JSON, persist an artifact payload to Logfire and a `judge_decisions` skipped row (`veto_reason=invalid_response:*`).
 
 
@@ -617,8 +621,8 @@ Exit criteria
 
 Phase 1: schema and migrations
 - Implement Supabase SQL migrations for all v1 tables and constraints.
-- Enable pgvector and create `vector(768)` embedding column.
-- Add indexes (including vector index) and edge cardinality constraints.
+- Enable pgvector and create `vector(3072)` embedding column.
+- Add indexes and edge cardinality constraints (vector ANN index intentionally omitted at 3072 dims due pgvector host limits).
 
 Exit criteria
 - Fresh database can be migrated from zero.
@@ -635,7 +639,7 @@ Exit criteria
 
 Phase 3: embedding pipeline
 - Implement deterministic text construction/truncation.
-- Call configured embedding provider/model (`gemini` or `openai`) and enforce 768-dim validation.
+- Call configured embedding provider/model (`gemini` or `openai`) and enforce 3072-dim validation.
 - Store embeddings with `embedded_content_hash` and skip unchanged content.
 
 Exit criteria
@@ -730,11 +734,15 @@ Recommended implementation order
 
 ## Locked v1 decisions summary
 
-- Embeddings: provider-configurable (`gemini` or `openai`) with dimension 768 (default `text-embedding-3-large` on `openai`).
+- Embeddings: provider-configurable (`gemini` or `openai`) with dimension 3072 (default `text-embedding-3-large` on `openai`).
 - Judge default: OpenAI Codex via `pi` RPC (`openai-codex`, `gpt-5.1-codex-mini`) with optional Gemini/OpenAI/OpenRouter overrides for evaluation.
-- Retrieval defaults: k=8, min_score=0.75, include=open.
+- Retrieval defaults:
+  - candidates k=4 (clustering), min_score=0.75, include=open.
+  - detect-new k=8, min_score=0.75.
 - Thresholds: min_edge=0.85, min_close=0.90.
-- Judge guardrail: duplicate targets must be open (`target_not_open` veto otherwise).
+- Judge guardrails:
+  - duplicate targets must be open (`target_not_open` veto otherwise)
+  - selected duplicate candidate score must exceed best alternative by >= `0.015` (`candidate_gap_too_small` veto otherwise)
 - Inputs to model: title + body only (no comments).
 - CLI/tooling: Typer + Rich for terminal UX/progress, stdlib logging with Rich console + Logfire sink, and Pydantic for settings/contracts.
 - Edge lifecycle: first accepted edge wins by default; `--rejudge` allows replacement runs.
@@ -964,7 +972,7 @@ What we did
   - unchanged-skip mode (`--only-changed`)
   - batch embedding with per-item fallback on batch failures
   - Rich progress and Rich logging
-- Added embedding-related config defaults/validation (model, dim=768, batch size, concurrency).
+- Added embedding-related config defaults/validation (model, dim lock, batch size, concurrency).
 - Added tests for embedding text limits, embedding flow behavior, batch fallback behavior, and Gemini response parsing.
 
 What comes next

@@ -23,7 +23,7 @@ class OpenAIEmbeddingsClient:
         *,
         api_key: str,
         model: str = "text-embedding-3-large",
-        output_dimensionality: int = 768,
+        output_dimensionality: int = 3072,
         max_attempts: int = 5,
     ) -> None:
         if output_dimensionality <= 0:

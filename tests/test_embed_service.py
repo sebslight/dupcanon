@@ -66,7 +66,7 @@ def test_run_embed_only_changed_skips_unchanged(
 
         def embed_texts(self, texts: list[str]) -> list[list[float]]:
             captured["embedded_texts"].extend(texts)
-            return [[0.1] * 768 for _ in texts]
+            return [[0.1] * 3072 for _ in texts]
 
     monkeypatch.setattr(embed_service, "Database", FakeDatabase)
     monkeypatch.setattr(embed_service, "GeminiEmbeddingsClient", FakeClient)
@@ -141,7 +141,7 @@ def test_run_embed_batch_failure_falls_back_to_single_items(
                 raise RuntimeError("batch failed")
 
             captured["single_calls"] += 1
-            return [[0.1] * 768]
+            return [[0.1] * 3072]
 
     monkeypatch.setattr(embed_service, "Database", FakeDatabase)
     monkeypatch.setattr(embed_service, "GeminiEmbeddingsClient", FakeClient)
@@ -201,7 +201,7 @@ def test_run_embed_openai_provider_works(monkeypatch: pytest.MonkeyPatch, tmp_pa
             inits.append(kwargs)
 
         def embed_texts(self, texts: list[str]) -> list[list[float]]:
-            return [[0.1] * 768 for _ in texts]
+            return [[0.1] * 3072 for _ in texts]
 
     monkeypatch.setattr(embed_service, "Database", FakeDatabase)
     monkeypatch.setattr(embed_service, "OpenAIEmbeddingsClient", FakeOpenAIClient)

@@ -37,9 +37,10 @@ Use commands as `uv run dupcanon ...` (or `dupcanon ...` if your venv is activat
 - Apply gate is: reviewed persisted `close_run` + `--yes`.
 - There is **no approval-file / approve-plan flow**.
 - `refresh` defaults to discovering new items only; use `refresh --refresh-known` to also update known-item metadata.
-- Operational candidate retrieval defaults to open items (`candidates --include open`).
+- Operational candidate retrieval defaults to open items (`candidates --include open`) with default clustering `k=4`.
 - Judge rejects duplicate targets that are not open (`veto_reason=target_not_open`).
 - `detect-new` uses extra precision guardrails and may downgrade high-confidence model duplicates to `maybe_duplicate` when structural/retrieval support is weak.
+- Accepted duplicate decisions require a minimum candidate-score gap vs the best alternate candidate (default gap: `0.015`), reducing near-tie false positives.
 - Judge prompt/parse/veto/runtime logic is centralized in `src/dupcanon/judge_runtime.py` and reused by `judge`, `judge-audit`, and `detect-new`.
 - Canonical selection priority is:
   1. open if any open item exists
@@ -90,7 +91,7 @@ Judge-audit model resolution follows the same pattern independently for cheap an
 - judge-audit env defaults (optional):
   - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
   - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
-- keep `DUPCANON_EMBEDDING_DIM=768`
+- keep `DUPCANON_EMBEDDING_DIM=3072`
 
 ### 3) Validate runtime
 
@@ -110,6 +111,10 @@ uv run dupcanon judge --repo openclaw/openclaw --type issue --thinking medium
 uv run dupcanon judge-audit --repo openclaw/openclaw --type issue --sample-size 100 --seed 42 --cheap-provider gemini --cheap-thinking low --strong-provider openai --strong-thinking high --workers 4
 # print a prior audit report without re-running models:
 # uv run dupcanon report-audit --run-id 4 --disagreements-limit 30
+# simulate non-LLM gates on stored audit rows:
+# uv run dupcanon report-audit --run-id 4 --simulate-gates --gate-rank-max 3 --gate-score-min 0.88 --gate-gap-min 0.02
+# sweep gap gate for tuning:
+# uv run dupcanon report-audit --run-id 4 --simulate-sweep gap --sweep-from 0.00 --sweep-to 0.04 --sweep-step 0.005
 # debugging openai-codex RPC behavior:
 # uv run dupcanon judge-audit ... --cheap-provider openai-codex --strong-provider openai-codex --cheap-thinking medium --strong-thinking medium --debug-rpc --verbose
 uv run dupcanon detect-new --repo openclaw/openclaw --type issue --number 123 --thinking low
@@ -133,6 +138,9 @@ All LLM-using commands support explicit CLI flags and env-backed defaults.
   - env defaults:
     - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
     - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
+- `report-audit`
+  - flags: `--run-id`, `--show-disagreements/--no-show-disagreements`, `--disagreements-limit`, `--simulate-gates`, `--gate-rank-max`, `--gate-score-min`, `--gate-gap-min`, `--simulate-sweep gap`, `--sweep-from`, `--sweep-to`, `--sweep-step`
+  - uses persisted `judge_audit_runs` + `judge_audit_run_items` data only (no LLM calls)
 
 Thinking values: `off|minimal|low|medium|high|xhigh`.
 Gemini paths reject `xhigh`.
