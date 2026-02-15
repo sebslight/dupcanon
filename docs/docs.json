@@ -18,6 +18,14 @@
       }
     ]
   },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/sebslight/dupcanon"
+      }
+    ]
+  },
   "redirects": [
     {
       "source": "/one-pager",
