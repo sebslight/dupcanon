@@ -1,0 +1,20 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "dupcanon",
+  "theme": "mint",
+  "colors": {
+    "primary": "#0F766E",
+    "light": "#0F766E",
+    "dark": "#2DD4BF"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Overview",
+        "pages": [
+          "docs/one-pager"
+        ]
+      }
+    ]
+  }
+}

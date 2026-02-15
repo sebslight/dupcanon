@@ -7,7 +7,7 @@ Project operating guide for coding agents working in this repository.
 We are building a **human-operated duplicate canonicalization CLI** for GitHub issues/PRs.
 
 Primary spec:
-- `docs/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+- `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
 
 When implementing behavior, schema, or defaults, follow the spec above first.
 

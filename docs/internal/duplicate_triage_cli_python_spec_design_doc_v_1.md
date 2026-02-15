@@ -710,7 +710,7 @@ Exit criteria
 
 Phase 10: hardening and operator readiness
 - Improve operator UX (Rich progress bars and summaries, categorized failures; no tqdm).
-- Finalize runbooks and troubleshooting docs (`docs/operator_runbook_v1.md` is the current baseline).
+- Finalize runbooks and troubleshooting docs (`docs/internal/operator_runbook_v1.md` is the current baseline).
 - Validate end-to-end operation from clean setup.
 
 Exit criteria
@@ -1520,7 +1520,7 @@ What we changed
   - close comment template documented as `Closing as duplicate of #{}...`
 - Marked superseded approval-flow journal entries as historical and added a journal note clarifying that current behavior is defined by top-level sections.
 - Added `README.md` for quickstart and current command surface.
-- Added `docs/operator_runbook_v1.md` as the baseline end-to-end operator procedure.
+- Added `docs/internal/operator_runbook_v1.md` as the baseline end-to-end operator procedure.
 
 Validation
 - Verified docs against current command/service behavior.

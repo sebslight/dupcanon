@@ -356,7 +356,7 @@ So: **related, but architecturally a separate project**.
 
 The following gaps are important to make the system fully operational at scale:
 
-### A) Current mode is still shadow-oriented in external operations (e.g., DubsKit Neo)
+### A) Current mode is still shadow-oriented in external operations
 
 - Today, online flow is strong for **detection + JSON output**, but mutation in external runtime contexts is still effectively conservative/shadow-first.
 - This is good for precision safety, but limits autonomous impact.

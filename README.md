@@ -210,7 +210,9 @@ rg "DUPCANON_ONLINE_" .github/workflows/detect-new-shadow.yml
 
 ## Docs
 
-- Batch design/spec + journal: `docs/duplicate_triage_cli_python_spec_design_doc_v_1.md`
-- Online detection design/spec + journal: `docs/online_duplicate_detection_pipeline_design_doc_v1.md`
-- Operator runbook: `docs/operator_runbook_v1.md`
+- One-pager (quick overview): `docs/one-pager.mdx`
+- Batch design/spec + journal: `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+- Online detection design/spec + journal: `docs/internal/online_duplicate_detection_pipeline_design_doc_v1.md`
+- Operator runbook: `docs/internal/operator_runbook_v1.md`
+- Full architecture review: `docs/internal/full_architecture_review.md`
 - Agent operating guide: `AGENTS.md`

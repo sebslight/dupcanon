@@ -1,0 +1,85 @@
+---
+title: dupcanon one-pager
+description: Problem, approach, safety model, and current status.
+---
+
+## TL;DR
+
+`dupcanon` is a **human-operated duplicate canonicalization CLI** for GitHub issues/PRs.
+
+It exists to solve two painful failure modes in naive duplicate automation:
+
+1. **Duplicate chains** (`A -> B -> C`) caused by unstable targets over time.
+2. **Wrong canonical target selection** (closing against weaker or mismatched reports).
+
+The system is designed for **precision-first, auditable, reproducible closes**.
+
+## Why this project exists
+
+Most existing bot setups do one of these:
+
+- retrieve "similar" items and stop there,
+- do one-shot LLM duplicate picks without durable decision history,
+- or close too aggressively without strong deterministic gates.
+
+`dupcanon` adds durable state and a canonical graph model so decisions stay stable and reviewable.
+
+## Core approach
+
+1. `sync` / `refresh`: ingest issues + PRs into Postgres
+2. `embed`: embed title/body into pgvector
+3. `candidates`: persist nearest-neighbor candidate sets
+4. `judge`: LLM picks duplicate target inside candidate set
+5. deterministic gates veto risky decisions
+6. `canonicalize`: compute cluster canonical representative
+7. `plan-close` -> reviewed `apply-close --yes`
+
+Everything important is persisted for replay, audit, and tuning.
+
+## Safety model (LLM + deterministic gates)
+
+LLM output is necessary but not sufficient.
+
+An accepted duplicate edge must pass hard checks such as:
+
+- strict JSON parse
+- target must be in candidate set
+- confidence threshold (`>= 0.85`)
+- target must be open
+- selected candidate score gap vs best alternate (`>= 0.015`)
+- mismatch vetoes (uncertain/overlap/root-cause/scope class failures)
+- one accepted outgoing edge per source unless explicit rejudge
+
+Close planning adds more gates:
+
+- maintainer author/assignee protections
+- direct accepted edge to canonical required
+- higher close threshold (`>= 0.90`)
+
+## Current status
+
+Implemented commands:
+
+- `init`, `sync`, `refresh`, `embed`, `candidates`, `judge`
+- `judge-audit`, `report-audit`, `detect-new`
+- `canonicalize`, `maintainers`, `plan-close`, `apply-close`
+
+Current online flow is shadow/suggest-oriented, while close mutations remain explicitly gated through reviewed plans.
+
+## What’s missing next
+
+- first-class evaluation command + reporting workflow for production gate decisions
+- programmatic orchestration command/workflow for unattended DB freshness updates
+- richer action surface in future (e.g., label taxonomy / tree-editing operations)
+
+## Infra and stack
+
+- Python + Typer + Pydantic + Rich
+- Supabase Postgres + pgvector
+- providers: OpenAI, Gemini, OpenRouter, and `openai-codex` via `pi` RPC
+
+DB can be moved to self-hosted Postgres later with minimal architecture change.
+
+## Internal docs
+
+Deep design and runbook docs are in `docs/internal/`.

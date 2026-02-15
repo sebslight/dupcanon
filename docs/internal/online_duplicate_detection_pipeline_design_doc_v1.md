@@ -549,7 +549,7 @@ Done
   - preflight secret/provider checks
   - shadow-mode only (no mutation step)
 - Updated operator docs:
-  - `docs/operator_runbook_v1.md` now includes online `detect-new` usage and workflow secrets/vars
+  - `docs/internal/operator_runbook_v1.md` now includes online `detect-new` usage and workflow secrets/vars
 - Updated README command surface/docs links for `detect-new`
 
 Validation
