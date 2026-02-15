@@ -20,6 +20,7 @@ from dupcanon.models import (
     ItemType,
     JudgeAuditDisagreement,
     JudgeAuditRunReport,
+    JudgeAuditSimulationRow,
     JudgeCandidate,
     JudgeWorkItem,
     PlanCloseItem,
@@ -1326,6 +1327,114 @@ class Database:
             created_at=cast(datetime, row["created_at"]),
             completed_at=cast(datetime | None, row.get("completed_at")),
         )
+
+    def list_judge_audit_simulation_rows(
+        self,
+        *,
+        audit_run_id: int,
+    ) -> list[JudgeAuditSimulationRow]:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select
+                    j.source_number,
+                    j.candidate_set_id,
+                    j.cheap_final_status,
+                    j.cheap_to_item_id,
+                    j.strong_final_status,
+                    j.strong_to_item_id,
+                    j.cheap_confidence,
+                    j.strong_confidence,
+                    (
+                        select m.rank
+                        from public.candidate_set_members m
+                        where
+                            m.candidate_set_id = j.candidate_set_id
+                            and m.candidate_item_id = j.cheap_to_item_id
+                        limit 1
+                    ) as cheap_target_rank,
+                    (
+                        select m.score
+                        from public.candidate_set_members m
+                        where
+                            m.candidate_set_id = j.candidate_set_id
+                            and m.candidate_item_id = j.cheap_to_item_id
+                        limit 1
+                    ) as cheap_target_score,
+                    (
+                        select m.score
+                        from public.candidate_set_members m
+                        where
+                            m.candidate_set_id = j.candidate_set_id
+                            and (
+                                j.cheap_to_item_id is null
+                                or m.candidate_item_id <> j.cheap_to_item_id
+                            )
+                        order by m.rank asc
+                        limit 1
+                    ) as cheap_best_alternative_score
+                from public.judge_audit_run_items j
+                where j.audit_run_id = %s
+                order by j.source_number asc
+                """,
+                (audit_run_id,),
+            )
+            rows = cur.fetchall()
+
+        result: list[JudgeAuditSimulationRow] = []
+        for row in rows:
+            cheap_final_status = str(row["cheap_final_status"])
+            if cheap_final_status not in {"accepted", "rejected", "skipped"}:
+                msg = f"invalid cheap final status: {cheap_final_status}"
+                raise DatabaseError(msg)
+
+            strong_final_status = str(row["strong_final_status"])
+            if strong_final_status not in {"accepted", "rejected", "skipped"}:
+                msg = f"invalid strong final status: {strong_final_status}"
+                raise DatabaseError(msg)
+
+            result.append(
+                JudgeAuditSimulationRow(
+                    source_number=int(row["source_number"]),
+                    candidate_set_id=int(row["candidate_set_id"]),
+                    cheap_final_status=cast(
+                        Literal["accepted", "rejected", "skipped"],
+                        cheap_final_status,
+                    ),
+                    cheap_to_item_id=(
+                        int(row["cheap_to_item_id"])
+                        if row.get("cheap_to_item_id") is not None
+                        else None
+                    ),
+                    strong_final_status=cast(
+                        Literal["accepted", "rejected", "skipped"],
+                        strong_final_status,
+                    ),
+                    strong_to_item_id=(
+                        int(row["strong_to_item_id"])
+                        if row.get("strong_to_item_id") is not None
+                        else None
+                    ),
+                    cheap_confidence=float(row["cheap_confidence"]),
+                    strong_confidence=float(row["strong_confidence"]),
+                    cheap_target_rank=(
+                        int(row["cheap_target_rank"])
+                        if row.get("cheap_target_rank") is not None
+                        else None
+                    ),
+                    cheap_target_score=(
+                        float(row["cheap_target_score"])
+                        if row.get("cheap_target_score") is not None
+                        else None
+                    ),
+                    cheap_best_alternative_score=(
+                        float(row["cheap_best_alternative_score"])
+                        if row.get("cheap_best_alternative_score") is not None
+                        else None
+                    ),
+                )
+            )
+        return result
 
     def list_judge_audit_disagreements(
         self,

@@ -13,6 +13,7 @@ from dupcanon.models import (
     DetectVerdict,
     ItemType,
     JudgeAuditRunReport,
+    JudgeAuditSimulationRow,
     JudgeAuditStats,
     JudgeStats,
 )
@@ -174,6 +175,14 @@ def test_report_audit_help_includes_core_options() -> None:
     assert "--run-id" in result.stdout
     assert "show-disagreements" in result.stdout
     assert "--disagreements-" in result.stdout
+    assert "--simulate-gates" in result.stdout
+    assert "--gate-rank-max" in result.stdout
+    assert "--gate-score-min" in result.stdout
+    assert "--gate-gap-min" in result.stdout
+    assert "--simulate-sweep" in result.stdout
+    assert "--sweep-from" in result.stdout
+    assert "--sweep-to" in result.stdout
+    assert "--sweep-step" in result.stdout
 
 
 def test_detect_new_help_includes_core_options() -> None:
@@ -459,6 +468,160 @@ def test_report_audit_prints_stored_run(monkeypatch: pytest.MonkeyPatch) -> None
     assert captured.get("audit_run_id") == 4
     assert disagreement_call.get("audit_run_id") == 4
     assert disagreement_call.get("limit") == 7
+
+
+def test_report_audit_simulate_gates_invokes_simulation(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_judge_audit_run_report(self, *, audit_run_id: int):
+            return JudgeAuditRunReport(
+                audit_run_id=audit_run_id,
+                repo="org/repo",
+                type=ItemType.ISSUE,
+                status="completed",
+                sample_policy="random_uniform",
+                sample_seed=42,
+                sample_size_requested=100,
+                sample_size_actual=100,
+                candidate_set_status="fresh",
+                source_state_filter="open",
+                min_edge=0.92,
+                cheap_provider="openai-codex",
+                cheap_model="gpt-5.1-codex-mini",
+                strong_provider="openai-codex",
+                strong_model="gpt-5.3-codex",
+                compared_count=98,
+                tp=10,
+                fp=6,
+                fn=3,
+                tn=79,
+                conflict=1,
+                incomplete=1,
+                created_by="dupcanon/judge-audit",
+                created_at=datetime.now(tz=UTC),
+                completed_at=datetime.now(tz=UTC),
+            )
+
+        def list_judge_audit_simulation_rows(self, *, audit_run_id: int):
+            return [
+                JudgeAuditSimulationRow(
+                    source_number=100,
+                    candidate_set_id=200,
+                    cheap_final_status="accepted",
+                    cheap_to_item_id=300,
+                    strong_final_status="accepted",
+                    strong_to_item_id=300,
+                    cheap_confidence=0.92,
+                    strong_confidence=0.93,
+                    cheap_target_rank=1,
+                    cheap_target_score=0.91,
+                    cheap_best_alternative_score=0.88,
+                )
+            ]
+
+    simulation_call: dict[str, object] = {}
+
+    def fake_simulation(**kwargs) -> None:
+        simulation_call.update(kwargs)
+
+    monkeypatch.setattr("dupcanon.cli.Database", FakeDatabase)
+    monkeypatch.setattr("dupcanon.cli._print_judge_audit_gate_simulation", fake_simulation)
+    monkeypatch.setattr("dupcanon.cli._print_judge_audit_disagreements", lambda **kwargs: None)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "report-audit",
+            "--run-id",
+            "5",
+            "--simulate-gates",
+            "--gate-rank-max",
+            "3",
+            "--gate-score-min",
+            "0.88",
+            "--gate-gap-min",
+            "0.02",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert simulation_call.get("gate_rank_max") == 3
+    assert simulation_call.get("gate_score_min") == 0.88
+    assert simulation_call.get("gate_gap_min") == 0.02
+
+
+def test_report_audit_simulate_sweep_invokes_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_judge_audit_run_report(self, *, audit_run_id: int):
+            return JudgeAuditRunReport(
+                audit_run_id=audit_run_id,
+                repo="org/repo",
+                type=ItemType.ISSUE,
+                status="completed",
+                sample_policy="random_uniform",
+                sample_seed=42,
+                sample_size_requested=100,
+                sample_size_actual=100,
+                candidate_set_status="fresh",
+                source_state_filter="open",
+                min_edge=0.92,
+                cheap_provider="openai-codex",
+                cheap_model="gpt-5.1-codex-mini",
+                strong_provider="openai-codex",
+                strong_model="gpt-5.3-codex",
+                compared_count=98,
+                tp=10,
+                fp=6,
+                fn=3,
+                tn=79,
+                conflict=1,
+                incomplete=1,
+                created_by="dupcanon/judge-audit",
+                created_at=datetime.now(tz=UTC),
+                completed_at=datetime.now(tz=UTC),
+            )
+
+        def list_judge_audit_simulation_rows(self, *, audit_run_id: int):
+            return []
+
+    sweep_call: dict[str, object] = {}
+
+    def fake_sweep(**kwargs) -> None:
+        sweep_call.update(kwargs)
+
+    monkeypatch.setattr("dupcanon.cli.Database", FakeDatabase)
+    monkeypatch.setattr("dupcanon.cli._print_judge_audit_gate_sweep", fake_sweep)
+    monkeypatch.setattr("dupcanon.cli._print_judge_audit_disagreements", lambda **kwargs: None)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "report-audit",
+            "--run-id",
+            "5",
+            "--simulate-sweep",
+            "gap",
+            "--sweep-from",
+            "0.00",
+            "--sweep-to",
+            "0.04",
+            "--sweep-step",
+            "0.005",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert sweep_call.get("sweep") == "gap"
+    assert sweep_call.get("sweep_from") == 0.0
+    assert sweep_call.get("sweep_to") == 0.04
+    assert sweep_call.get("sweep_step") == 0.005
 
 
 def test_judge_audit_uses_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

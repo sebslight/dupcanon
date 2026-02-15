@@ -327,6 +327,22 @@ class JudgeAuditRunReport(BaseModel):
     completed_at: datetime | None = None
 
 
+class JudgeAuditSimulationRow(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    source_number: int
+    candidate_set_id: int
+    cheap_final_status: Literal["accepted", "rejected", "skipped"]
+    cheap_to_item_id: int | None = None
+    strong_final_status: Literal["accepted", "rejected", "skipped"]
+    strong_to_item_id: int | None = None
+    cheap_confidence: float
+    strong_confidence: float
+    cheap_target_rank: int | None = None
+    cheap_target_score: float | None = None
+    cheap_best_alternative_score: float | None = None
+
+
 class CandidateItemContext(BaseModel):
     model_config = ConfigDict(frozen=True)
 

@@ -29,7 +29,13 @@ from dupcanon.judge_providers import default_judge_model, normalize_judge_provid
 from dupcanon.judge_service import run_judge
 from dupcanon.logging_config import BoundLogger, configure_logging, get_logger
 from dupcanon.maintainers_service import run_maintainers
-from dupcanon.models import ItemType, JudgeAuditRunReport, StateFilter, TypeFilter
+from dupcanon.models import (
+    ItemType,
+    JudgeAuditRunReport,
+    JudgeAuditSimulationRow,
+    StateFilter,
+    TypeFilter,
+)
 from dupcanon.plan_close_service import run_plan_close
 from dupcanon.sync_service import run_refresh, run_sync
 from dupcanon.thinking import normalize_thinking_level
@@ -59,7 +65,7 @@ EMBED_PROVIDER_OPTION = typer.Option(
 )
 EMBED_MODEL_OPTION = typer.Option(None, "--model", help="Embedding model override")
 CANDIDATE_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
-K_OPTION = typer.Option(8, "--k", help="Number of nearest neighbors to retrieve")
+K_OPTION = typer.Option(4, "--k", help="Number of nearest neighbors to retrieve")
 MIN_SCORE_OPTION = typer.Option(0.75, "--min-score", help="Minimum similarity score")
 INCLUDE_OPTION = typer.Option(
     StateFilter.OPEN,
@@ -168,6 +174,46 @@ REPORT_AUDIT_DISAGREEMENTS_LIMIT_OPTION = typer.Option(
     20,
     "--disagreements-limit",
     help="Maximum disagreement rows to print",
+)
+REPORT_AUDIT_SIMULATE_GATES_OPTION = typer.Option(
+    False,
+    "--simulate-gates",
+    help="Run non-LLM gate simulation over stored audit rows",
+)
+REPORT_AUDIT_GATE_RANK_MAX_OPTION = typer.Option(
+    None,
+    "--gate-rank-max",
+    help="Gate simulation: require cheap target rank <= N",
+)
+REPORT_AUDIT_GATE_SCORE_MIN_OPTION = typer.Option(
+    None,
+    "--gate-score-min",
+    help="Gate simulation: require cheap target score >= X",
+)
+REPORT_AUDIT_GATE_GAP_MIN_OPTION = typer.Option(
+    None,
+    "--gate-gap-min",
+    help="Gate simulation: require cheap target score minus best alternate >= X",
+)
+REPORT_AUDIT_SIMULATE_SWEEP_OPTION = typer.Option(
+    None,
+    "--simulate-sweep",
+    help="Sweep one gate over a range (currently: gap)",
+)
+REPORT_AUDIT_SWEEP_FROM_OPTION = typer.Option(
+    0.0,
+    "--sweep-from",
+    help="Sweep start value",
+)
+REPORT_AUDIT_SWEEP_TO_OPTION = typer.Option(
+    0.04,
+    "--sweep-to",
+    help="Sweep end value",
+)
+REPORT_AUDIT_SWEEP_STEP_OPTION = typer.Option(
+    0.005,
+    "--sweep-step",
+    help="Sweep step value",
 )
 DETECT_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 DETECT_NUMBER_OPTION = typer.Option(..., "--number", help="Issue/PR number to evaluate")
@@ -430,6 +476,276 @@ def _print_judge_audit_report_summary(report: JudgeAuditRunReport) -> None:
         "completed_at",
         report.completed_at.isoformat() if report.completed_at is not None else "-",
     )
+    console.print(table)
+
+
+def _run_audit_simulation(
+    *,
+    rows: list[JudgeAuditSimulationRow],
+    gate_rank_max: int | None = None,
+    gate_score_min: float | None = None,
+    gate_gap_min: float | None = None,
+) -> dict[str, Any]:
+    counts: dict[str, int] = {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 0,
+        "conflict": 0,
+        "incomplete": 0,
+    }
+    demotion_reasons: dict[str, int] = {
+        "rank": 0,
+        "score": 0,
+        "gap": 0,
+    }
+    demoted_count = 0
+
+    for row in rows:
+        cheap_status = row.cheap_final_status
+        cheap_to_item_id = row.cheap_to_item_id
+
+        if cheap_status == "accepted":
+            failed_reasons: list[str] = []
+
+            if gate_rank_max is not None and (
+                row.cheap_target_rank is None or row.cheap_target_rank > gate_rank_max
+            ):
+                failed_reasons.append("rank")
+
+            if gate_score_min is not None and (
+                row.cheap_target_score is None or row.cheap_target_score < gate_score_min
+            ):
+                failed_reasons.append("score")
+
+            if gate_gap_min is not None:
+                gap = None
+                if (
+                    row.cheap_target_score is not None
+                    and row.cheap_best_alternative_score is not None
+                ):
+                    gap = row.cheap_target_score - row.cheap_best_alternative_score
+                if gap is not None and gap < gate_gap_min:
+                    failed_reasons.append("gap")
+
+            if failed_reasons:
+                cheap_status = "rejected"
+                cheap_to_item_id = None
+                demoted_count += 1
+                for reason in failed_reasons:
+                    demotion_reasons[reason] += 1
+
+        if cheap_status == "skipped" or row.strong_final_status == "skipped":
+            counts["incomplete"] += 1
+            continue
+
+        cheap_positive = cheap_status == "accepted"
+        strong_positive = row.strong_final_status == "accepted"
+
+        if cheap_positive and strong_positive:
+            if cheap_to_item_id != row.strong_to_item_id:
+                counts["conflict"] += 1
+            else:
+                counts["tp"] += 1
+        elif cheap_positive and not strong_positive:
+            counts["fp"] += 1
+        elif (not cheap_positive) and strong_positive:
+            counts["fn"] += 1
+        else:
+            counts["tn"] += 1
+
+    compared_count = counts["tp"] + counts["fp"] + counts["fn"] + counts["tn"]
+
+    precision_denominator = counts["tp"] + counts["fp"]
+    recall_denominator = counts["tp"] + counts["fn"]
+    target_precision_denominator = counts["tp"] + counts["fp"] + counts["conflict"]
+
+    precision = (
+        counts["tp"] / precision_denominator if precision_denominator > 0 else None
+    )
+    recall = counts["tp"] / recall_denominator if recall_denominator > 0 else None
+    target_precision = (
+        counts["tp"] / target_precision_denominator
+        if target_precision_denominator > 0
+        else None
+    )
+
+    return {
+        **counts,
+        "compared_count": compared_count,
+        "precision": precision,
+        "recall": recall,
+        "target_precision": target_precision,
+        "demoted": demoted_count,
+        "demotion_reasons": demotion_reasons,
+    }
+
+
+def _format_optional_metric(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.3f}"
+
+
+def _print_judge_audit_gate_simulation(
+    *,
+    report: JudgeAuditRunReport,
+    rows: list[JudgeAuditSimulationRow],
+    gate_rank_max: int | None,
+    gate_score_min: float | None,
+    gate_gap_min: float | None,
+) -> None:
+    if gate_rank_max is None and gate_score_min is None and gate_gap_min is None:
+        msg = "--simulate-gates requires at least one gate option"
+        raise ValueError(msg)
+
+    baseline = _run_audit_simulation(rows=rows)
+    simulated = _run_audit_simulation(
+        rows=rows,
+        gate_rank_max=gate_rank_max,
+        gate_score_min=gate_score_min,
+        gate_gap_min=gate_gap_min,
+    )
+
+    table = Table(title=f"judge-audit gate simulation (run {report.audit_run_id})")
+    table.add_column("Metric")
+    table.add_column("Baseline")
+    table.add_column("Simulated")
+    table.add_column("Delta")
+
+    metric_keys = [
+        "tp",
+        "fp",
+        "fn",
+        "tn",
+        "conflict",
+        "incomplete",
+        "compared_count",
+        "precision",
+        "recall",
+        "target_precision",
+        "demoted",
+    ]
+
+    float_metric_keys = {"precision", "recall", "target_precision"}
+
+    for key in metric_keys:
+        base_value = baseline.get(key)
+        sim_value = simulated.get(key)
+
+        if key in float_metric_keys:
+            base_float = base_value if isinstance(base_value, float) else None
+            sim_float = sim_value if isinstance(sim_value, float) else None
+            base_text = _format_optional_metric(base_float)
+            sim_text = _format_optional_metric(sim_float)
+            if base_float is None or sim_float is None:
+                delta_text = "-"
+            else:
+                delta_text = f"{(sim_float - base_float):+.3f}"
+        else:
+            base_int = int(base_value or 0)
+            sim_int = int(sim_value or 0)
+            base_text = str(base_int)
+            sim_text = str(sim_int)
+            delta_text = f"{(sim_int - base_int):+d}"
+
+        table.add_row(key, base_text, sim_text, delta_text)
+
+    table.add_row(
+        "gate_rank_max",
+        "-",
+        str(gate_rank_max) if gate_rank_max is not None else "-",
+        "-",
+    )
+    table.add_row(
+        "gate_score_min",
+        "-",
+        str(gate_score_min) if gate_score_min is not None else "-",
+        "-",
+    )
+    table.add_row(
+        "gate_gap_min",
+        "-",
+        str(gate_gap_min) if gate_gap_min is not None else "-",
+        "-",
+    )
+    console.print(table)
+
+    demotion_reasons = simulated["demotion_reasons"]
+    if isinstance(demotion_reasons, dict):
+        reason_table = Table(title="gate simulation demotion reasons")
+        reason_table.add_column("Reason")
+        reason_table.add_column("Count")
+        for reason in ["rank", "score", "gap"]:
+            reason_table.add_row(reason, str(int(demotion_reasons.get(reason, 0))))
+        console.print(reason_table)
+
+
+def _sweep_values(*, start: float, end: float, step: float) -> list[float]:
+    values: list[float] = []
+    current = start
+    max_steps = 10000
+    steps = 0
+    while current <= end + 1e-12 and steps < max_steps:
+        values.append(round(current, 12))
+        current += step
+        steps += 1
+    return values
+
+
+def _print_judge_audit_gate_sweep(
+    *,
+    report: JudgeAuditRunReport,
+    rows: list[JudgeAuditSimulationRow],
+    sweep: str,
+    sweep_from: float,
+    sweep_to: float,
+    sweep_step: float,
+) -> None:
+    if sweep.strip().lower() != "gap":
+        msg = "--simulate-sweep currently only supports: gap"
+        raise ValueError(msg)
+    if sweep_step <= 0:
+        msg = "--sweep-step must be > 0"
+        raise ValueError(msg)
+    if sweep_to < sweep_from:
+        msg = "--sweep-to must be >= --sweep-from"
+        raise ValueError(msg)
+
+    baseline = _run_audit_simulation(rows=rows)
+    console.print(
+        f"[dim]Baseline precision={_format_optional_metric(baseline['precision'])} "
+        f"recall={_format_optional_metric(baseline['recall'])} "
+        f"target_precision={_format_optional_metric(baseline['target_precision'])}[/dim]"
+    )
+
+    table = Table(title=f"judge-audit gate sweep ({sweep}, run {report.audit_run_id})")
+    table.add_column("threshold")
+    table.add_column("tp")
+    table.add_column("fp")
+    table.add_column("fn")
+    table.add_column("tn")
+    table.add_column("conflict")
+    table.add_column("precision")
+    table.add_column("recall")
+    table.add_column("target_precision")
+    table.add_column("demoted")
+
+    for value in _sweep_values(start=sweep_from, end=sweep_to, step=sweep_step):
+        metrics = _run_audit_simulation(rows=rows, gate_gap_min=value)
+        table.add_row(
+            f"{value:.6f}",
+            str(metrics["tp"]),
+            str(metrics["fp"]),
+            str(metrics["fn"]),
+            str(metrics["tn"]),
+            str(metrics["conflict"]),
+            _format_optional_metric(metrics["precision"]),
+            _format_optional_metric(metrics["recall"]),
+            _format_optional_metric(metrics["target_precision"]),
+            str(metrics["demoted"]),
+        )
+
     console.print(table)
 
 
@@ -991,9 +1307,27 @@ def report_audit(
     audit_run_id: int = REPORT_AUDIT_RUN_ID_OPTION,
     show_disagreements: bool = REPORT_AUDIT_SHOW_DISAGREEMENTS_OPTION,
     disagreements_limit: int = REPORT_AUDIT_DISAGREEMENTS_LIMIT_OPTION,
+    simulate_gates: bool = REPORT_AUDIT_SIMULATE_GATES_OPTION,
+    gate_rank_max: int | None = REPORT_AUDIT_GATE_RANK_MAX_OPTION,
+    gate_score_min: float | None = REPORT_AUDIT_GATE_SCORE_MIN_OPTION,
+    gate_gap_min: float | None = REPORT_AUDIT_GATE_GAP_MIN_OPTION,
+    simulate_sweep: str | None = REPORT_AUDIT_SIMULATE_SWEEP_OPTION,
+    sweep_from: float = REPORT_AUDIT_SWEEP_FROM_OPTION,
+    sweep_to: float = REPORT_AUDIT_SWEEP_TO_OPTION,
+    sweep_step: float = REPORT_AUDIT_SWEEP_STEP_OPTION,
 ) -> None:
     """Print a stored judge-audit report by run id."""
     settings, run_id, logger = _bootstrap("report-audit")
+
+    if simulate_gates and simulate_sweep is not None:
+        msg = "--simulate-gates and --simulate-sweep are mutually exclusive"
+        console.print(f"[red]report-audit failed:[/red] {msg}")
+        raise typer.Exit(code=1)
+
+    if gate_rank_max is not None and gate_rank_max <= 0:
+        msg = "--gate-rank-max must be > 0"
+        console.print(f"[red]report-audit failed:[/red] {msg}")
+        raise typer.Exit(code=1)
 
     db_url = settings.supabase_db_url
     if not is_postgres_dsn(db_url):
@@ -1023,6 +1357,14 @@ def report_audit(
                 "audit_run_id": audit_run_id,
                 "show_disagreements": show_disagreements,
                 "disagreements_limit": disagreements_limit,
+                "simulate_gates": simulate_gates,
+                "gate_rank_max": gate_rank_max,
+                "gate_score_min": gate_score_min,
+                "gate_gap_min": gate_gap_min,
+                "simulate_sweep": simulate_sweep,
+                "sweep_from": sweep_from,
+                "sweep_to": sweep_to,
+                "sweep_step": sweep_step,
             },
         )
         logger.error(
@@ -1053,6 +1395,40 @@ def report_audit(
             audit_run_id=audit_run_id,
             limit=disagreements_limit,
         )
+
+    if simulate_gates or simulate_sweep is not None:
+        try:
+            simulation_rows = db.list_judge_audit_simulation_rows(audit_run_id=audit_run_id)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]report-audit failed:[/red] {_friendly_error_message(exc)}")
+            raise typer.Exit(code=1) from exc
+
+        if simulate_gates:
+            try:
+                _print_judge_audit_gate_simulation(
+                    report=report,
+                    rows=simulation_rows,
+                    gate_rank_max=gate_rank_max,
+                    gate_score_min=gate_score_min,
+                    gate_gap_min=gate_gap_min,
+                )
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"[red]report-audit failed:[/red] {_friendly_error_message(exc)}")
+                raise typer.Exit(code=1) from exc
+
+        if simulate_sweep is not None:
+            try:
+                _print_judge_audit_gate_sweep(
+                    report=report,
+                    rows=simulation_rows,
+                    sweep=simulate_sweep,
+                    sweep_from=sweep_from,
+                    sweep_to=sweep_to,
+                    sweep_step=sweep_step,
+                )
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"[red]report-audit failed:[/red] {_friendly_error_message(exc)}")
+                raise typer.Exit(code=1) from exc
 
     console.print(f"run_id: [bold]{run_id}[/bold]")
 

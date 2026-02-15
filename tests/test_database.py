@@ -196,3 +196,62 @@ def test_get_judge_audit_run_report_returns_row(monkeypatch) -> None:
 
     query = str(captured.get("query") or "")
     assert "from public.judge_audit_runs" in query
+
+
+def test_list_judge_audit_simulation_rows_returns_rows(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "source_number": 123,
+                    "candidate_set_id": 456,
+                    "cheap_final_status": "accepted",
+                    "cheap_to_item_id": 99,
+                    "strong_final_status": "rejected",
+                    "strong_to_item_id": None,
+                    "cheap_confidence": 0.92,
+                    "strong_confidence": 0.84,
+                    "cheap_target_rank": 1,
+                    "cheap_target_score": 0.91,
+                    "cheap_best_alternative_score": 0.89,
+                }
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    rows = db.list_judge_audit_simulation_rows(audit_run_id=5)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.source_number == 123
+    assert row.candidate_set_id == 456
+    assert row.cheap_final_status == "accepted"
+    assert row.cheap_target_rank == 1
+    assert row.cheap_target_score == 0.91
+
+    query = str(captured.get("query") or "")
+    assert "from public.judge_audit_run_items" in query
+    assert "from public.candidate_set_members" in query
