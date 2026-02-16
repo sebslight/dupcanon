@@ -33,8 +33,10 @@ Public docs (Mintlify):
 - Evaluation flow (issues + PRs): `docs/evaluation.mdx`
 
 Internal deep docs:
-- Batch design/spec + journal: `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+- Batch design/spec: `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
 - Online detection design/spec + journal: `docs/internal/online_duplicate_detection_pipeline_design_doc_v1.md`
+- Intent-card representation proposal + phased rollout: `docs/internal/intent_card_pipeline_design_doc_v1.md`
+- Central implementation journal (all new entries): `docs/internal/journal.md`
 - Operator runbook: `docs/internal/operator_runbook_v1.md`
 - Full architecture review: `docs/internal/full_architecture_review.md`
 

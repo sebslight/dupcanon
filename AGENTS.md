@@ -113,6 +113,10 @@ Before considering work complete:
 - `uv run pyright`
 - `uv run pytest`
 - Update docs/spec if behavior or defaults changed
+- Add/update a journal entry in `docs/internal/journal.md` after each completed phase or meaningful block of work, including:
+  - what was done
+  - validation performed (if any)
+  - what should come next
 - Keep changes minimal and aligned with v1 scope (no overengineering)
 
 ## 9) Scope constraints
