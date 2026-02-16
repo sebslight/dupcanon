@@ -33,7 +33,7 @@ def test_load_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setenv("DUPCANON_JUDGE_WORKER_CONCURRENCY", "5")
     monkeypatch.setenv("DUPCANON_CANDIDATE_WORKER_CONCURRENCY", "6")
 
-    settings = load_settings()
+    settings = load_settings(dotenv_path=tmp_path / "no-default.env")
 
     assert settings.supabase_db_url == "postgresql://localhost/test"
     assert settings.gemini_api_key == "gemini-key"
@@ -112,6 +112,19 @@ def test_load_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert settings.candidate_worker_concurrency == 4
 
 
+def test_dotenv_overrides_environment_for_conflicting_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dotenv_path = tmp_path / "override.env"
+    dotenv_path.write_text("OPENAI_API_KEY=from-dotenv\n", encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "from-env")
+
+    settings = load_settings(dotenv_path=dotenv_path)
+
+    assert settings.openai_api_key == "from-dotenv"
+
+
 def test_is_postgres_dsn() -> None:
     assert is_postgres_dsn("postgresql://localhost/db")
     assert is_postgres_dsn("postgres://localhost/db")
@@ -119,30 +132,33 @@ def test_is_postgres_dsn() -> None:
     assert not is_postgres_dsn("https://example.supabase.co")
 
 
-def test_embedding_dim_locked_to_v1(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_embedding_dim_locked_to_v1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DUPCANON_EMBEDDING_DIM", "1024")
 
     with pytest.raises(ValueError):
-        load_settings()
+        load_settings(dotenv_path=tmp_path / "no-default.env")
 
 
-def test_embedding_provider_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_embedding_provider_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DUPCANON_EMBEDDING_PROVIDER", "invalid")
 
     with pytest.raises(ValueError):
-        load_settings()
+        load_settings(dotenv_path=tmp_path / "no-default.env")
 
 
-def test_openai_embedding_provider_requires_openai_model(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_openai_embedding_provider_requires_openai_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setenv("DUPCANON_EMBEDDING_PROVIDER", "openai")
     monkeypatch.setenv("DUPCANON_EMBEDDING_MODEL", "gemini-embedding-001")
 
     with pytest.raises(ValueError):
-        load_settings()
+        load_settings(dotenv_path=tmp_path / "no-default.env")
 
 
-def test_judge_thinking_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_judge_thinking_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DUPCANON_JUDGE_THINKING", "turbo")
 
     with pytest.raises(ValueError):
-        load_settings()
+        load_settings(dotenv_path=tmp_path / "no-default.env")
