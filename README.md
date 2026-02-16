@@ -68,6 +68,7 @@ Internal deep docs:
 - `plan-close` requires a **direct accepted edge** to canonical and `min_close=0.90`, plus maintainer author/assignee protections.
 - `detect-new` is a precision-first online classifier (`duplicate` / `maybe_duplicate` / `not_duplicate`) with stricter duplicate thresholds and downgrade guardrails.
 - In v1, `detect-new` persists source/corpus state (`items`, source `embeddings` when stale) but does not persist online judge outcomes to `judge_decisions`.
+- Intent sidecar foundations are available in shadow mode: `analyze-intent` persists `intent_cards`, and `embed --source intent` writes `intent_embeddings` while raw retrieval remains default.
 - Judge prompt/parse/veto/runtime logic is centralized in `src/dupcanon/judge_runtime.py` and reused by `judge`, `judge-audit`, and `detect-new`.
 - Canonical selection priority is:
   1. open if any open item exists

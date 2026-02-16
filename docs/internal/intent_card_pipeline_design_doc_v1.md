@@ -1,6 +1,6 @@
 # Intent-Card Representation Pipeline (v1 Proposal)
 
-Status: Phase 2 extraction foundation complete (ready for Phase 3 implementation)
+Status: Phase 3 embedding foundation complete (ready for Phase 4 implementation)
 Owner: dupcanon
 Date: 2026-02-15
 
@@ -367,6 +367,8 @@ Implementation notes (2026-02-16)
 
 ### Phase 3 — Intent embedding path
 
+Status: Complete (2026-02-16)
+
 **Goal**
 - Produce embeddings from `card_text_for_embedding`.
 
@@ -377,6 +379,15 @@ Implementation notes (2026-02-16)
 **Exit criteria**
 - Embedding coverage for fresh cards is stable.
 - No regressions in existing `embed --source raw` behavior.
+
+Implementation notes (2026-02-16)
+- Extended `embed` command with `--source raw|intent` in `src/dupcanon/cli.py`.
+- Added intent embedding execution path in `src/dupcanon/embed_service.py`:
+  - reads latest fresh intent cards,
+  - computes incremental freshness via `embedded_card_hash` vs rendered text hash,
+  - writes to `intent_embeddings`.
+- Kept raw embedding path as default and behavior-compatible.
+- Added regression coverage in `tests/test_embed_service.py` and `tests/test_cli.py` for intent source behavior.
 
 ### Phase 4 — Retrieval A/B (raw vs intent)
 

@@ -960,3 +960,29 @@ What comes next
 2. Keep raw retrieval as default; no behavior switch before A/B retrieval in Phase 4.
 3. Add representation-aware retrieval plumbing needed for raw vs intent comparison.
 
+### 2026-02-16 — Entry 39 (intent-card Phase 3 embedding foundation complete)
+
+Today we completed Phase 3 for the intent-card sidecar initiative by enabling intent-source embedding while preserving raw defaults.
+
+What we changed
+- Extended `embed` command with `--source raw|intent` in `src/dupcanon/cli.py`.
+- Added intent embedding execution path in `src/dupcanon/embed_service.py`:
+  - reads latest fresh cards from `intent_cards`
+  - computes incremental skip via `embedded_card_hash` vs current rendered text hash
+  - writes vectors to `intent_embeddings`
+- Kept existing raw embedding path behavior-compatible and default (`--source raw`).
+- Added tests:
+  - `tests/test_embed_service.py` (intent-source embedding + only-changed skip behavior)
+  - `tests/test_cli.py` (`embed --source intent` propagation + help surface)
+- Updated docs for phase status and command behavior (`README.md`, intent-card design doc).
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest` (279 passed)
+
+What comes next
+1. Start Phase 4: retrieval A/B support (`candidates --source raw|intent`).
+2. Ensure candidate-set provenance is used consistently for representation-aware comparisons.
+3. Add comparison/report workflow to quantify raw vs intent retrieval deltas before judge-path changes.
+
