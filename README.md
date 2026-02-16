@@ -45,6 +45,7 @@ Internal deep docs:
 - `dupcanon init`
 - `dupcanon sync`
 - `dupcanon refresh`
+- `dupcanon analyze-intent` (sidecar, shadow-mode foundation)
 - `dupcanon embed`
 - `dupcanon candidates`
 - `dupcanon judge`

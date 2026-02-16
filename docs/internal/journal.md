@@ -933,3 +933,30 @@ What comes next
 2. Persist extraction failures/status cleanly and keep raw path as default.
 3. Keep all behavior switches behind explicit flags until Phase 4/5 evaluation.
 
+### 2026-02-16 — Entry 38 (intent-card Phase 2 extraction foundation complete)
+
+Today we completed Phase 2 for the intent-card sidecar initiative by implementing extraction in shadow mode.
+
+What we changed
+- Added `analyze-intent` CLI command (`src/dupcanon/cli.py`) with provider/model/thinking and `--only-changed` controls.
+- Added extraction service `src/dupcanon/intent_card_service.py`:
+  - issue + PR intent-card extraction via LLM
+  - bounded PR changed-file + patch-excerpt prompt context
+  - strict schema parsing into `IntentCard`
+  - deterministic rendering to `card_text_for_embedding`
+  - failure handling with fallback `status=failed` sidecar rows and artifact payloads
+- Extended DB access usage for extraction flow (`list_items_for_intent_card_extraction`, `upsert_intent_card`).
+- Added test coverage:
+  - `tests/test_intent_card_service.py`
+  - CLI tests for `analyze-intent` command/help/default model resolution
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest` (277 passed)
+
+What comes next
+1. Start Phase 3: intent embedding path (`embed --source intent`) using `intent_embeddings`.
+2. Keep raw retrieval as default; no behavior switch before A/B retrieval in Phase 4.
+3. Add representation-aware retrieval plumbing needed for raw vs intent comparison.
+

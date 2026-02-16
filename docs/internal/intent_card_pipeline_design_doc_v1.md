@@ -1,6 +1,6 @@
 # Intent-Card Representation Pipeline (v1 Proposal)
 
-Status: Phase 1 storage foundation complete (ready for Phase 2 implementation)
+Status: Phase 2 extraction foundation complete (ready for Phase 3 implementation)
 Owner: dupcanon
 Date: 2026-02-15
 
@@ -343,6 +343,8 @@ Implementation notes (2026-02-15)
 
 ### Phase 2 — Intent extraction (shadow)
 
+Status: Complete (2026-02-16)
+
 **Goal**
 - Generate and persist intent cards without changing retrieval/judging defaults.
 
@@ -355,6 +357,13 @@ Implementation notes (2026-02-15)
 - High schema-valid output rate.
 - Extraction failures are classified and auditable.
 - Existing raw pipeline remains unchanged.
+
+Implementation notes (2026-02-16)
+- Added `analyze-intent` CLI command in `src/dupcanon/cli.py`.
+- Added extraction service `src/dupcanon/intent_card_service.py` for issue/PR intent-card generation.
+- Added bounded PR changed-file/patch context in extraction prompts.
+- Added extractor failure persistence with `status=failed` sidecar rows + artifacts.
+- Added regression tests in `tests/test_intent_card_service.py` and CLI coverage for `analyze-intent`.
 
 ### Phase 3 — Intent embedding path
 
