@@ -46,7 +46,7 @@ For each item we ingest:
 ### Issue vs PR differences
 
 - Issues use `comments` as `comment_count`.
-- PRs use both `comments` and `review_comment_count`.
+- PRs use `comments` as `comment_count`; `review_comment_count` is populated when PR-specific review counts are available from the fetch path.
 - PR online detection only (`detect-new`) additionally fetches changed files + bounded patch excerpts for judge context.
 - Modeling for retrieval and batch judge is based on `title + body`. Comments are intentionally not part of semantic modeling in v1.
 
@@ -79,9 +79,9 @@ The system also persists/uses:
 
 ### Processing
 
-- Upsert repo in `repos`
-- Upsert item rows in `items`
-- Recompute `content_hash` on every upsert
+- `sync` upserts repo metadata in `repos` (while `refresh` expects the repo to already exist in DB)
+- `sync` upserts full item rows in `items`; `refresh` discovers new items and optionally refreshes known-item metadata
+- Recompute `content_hash` on upsert paths that include title/body
 - Increment `content_version` only on semantic content change (title/body)
 - On content change, mark existing fresh candidate sets for that item as `stale`
 
@@ -155,7 +155,7 @@ This means every judge run has an explicit retrieval snapshot to audit against.
 
 ### Inputs
 
-- latest candidate set per source item (fresh by default)
+- latest candidate set per **open** source item (fresh by default; stale only if `--allow-stale`)
 - source and candidate title/body context
 - provider/model/thinking settings
 
@@ -361,7 +361,7 @@ It does **not** persist:
 | Corpus type partitioning | issue-only | pr-only |
 | Base modeled content | title + body | title + body |
 | Extra online context | none | changed files + patch excerpts in detect-new |
-| Activity signal in canonical tie-break | comment_count | comment_count + review_comment_count |
+| Activity signal in canonical tie-break | comment_count | comment_count + review_comment_count (as stored; review count can be 0 when unavailable from fetch path) |
 | Close execution command | `gh issue close` | `gh pr close` |
 
 Everything else (retrieval/judge/gate/policy) is intentionally symmetric across types.
@@ -396,7 +396,8 @@ This is the real-time operational signal.
 
 - cheap lane (cost-optimized profile)
 - strong lane (higher-quality reference profile)
-- both run through same deterministic gates
+- both lanes run through the same **audit** gates (vague-source skip, structural vetoes, bug/feature veto, `min_edge`, score-gap)
+- note: `judge-audit` is close to, but not identical with, operational `judge` gating (for example, it does not enforce the `target must be open` veto)
 
 ### Outcome classes
 
