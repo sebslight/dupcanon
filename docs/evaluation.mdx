@@ -45,13 +45,10 @@ For each item we ingest:
 
 ### Issue vs PR differences
 
-- **Issues** use `comments` as `comment_count`
-- **PRs** use both `comments` and `review_comment_count`
-- **PR online detection only** (`detect-new`) additionally fetches changed files + bounded patch excerpts for judge context
-
-<Warning>
-Modeling for retrieval and batch judge is based on **title + body**. Comments are intentionally not part of semantic modeling in v1.
-</Warning>
+- Issues use `comments` as `comment_count`.
+- PRs use both `comments` and `review_comment_count`.
+- PR online detection only (`detect-new`) additionally fetches changed files + bounded patch excerpts for judge context.
+- Modeling for retrieval and batch judge is based on `title + body`. Comments are intentionally not part of semantic modeling in v1.
 
 ## 2) Derived modeling data
 
