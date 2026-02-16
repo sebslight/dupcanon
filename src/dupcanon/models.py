@@ -27,6 +27,76 @@ class StateFilter(StrEnum):
     ALL = "all"
 
 
+class RepresentationSource(StrEnum):
+    RAW = "raw"
+    INTENT = "intent"
+
+
+class IntentCardStatus(StrEnum):
+    FRESH = "fresh"
+    STALE = "stale"
+    FAILED = "failed"
+
+
+class IntentFactSource(StrEnum):
+    TITLE = "title"
+    BODY = "body"
+    DIFF = "diff"
+    FILE_CONTEXT = "file_context"
+
+
+_CARD_BLANK_LINES_RE = re.compile(r"\n{3,}")
+
+
+def _truncate_with_ellipsis(value: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(value) <= max_chars:
+        return value
+    if max_chars == 1:
+        return "…"
+    return value[: max_chars - 1] + "…"
+
+
+def _normalize_card_text_value(value: str, *, max_chars: int) -> str:
+    text = normalize_text(value)
+    text = _CARD_BLANK_LINES_RE.sub("\n\n", text)
+    text = text.strip()
+    if not text:
+        msg = "value cannot be blank"
+        raise ValueError(msg)
+    return _truncate_with_ellipsis(text, max_chars)
+
+
+def _normalize_card_text_list(
+    values: list[str],
+    *,
+    max_items: int,
+    max_item_chars: int,
+) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+
+    for value in values:
+        text = normalize_text(value)
+        text = _CARD_BLANK_LINES_RE.sub("\n\n", text)
+        text = text.strip()
+        if not text:
+            continue
+
+        text = _truncate_with_ellipsis(text, max_item_chars)
+        key = text.casefold()
+        if key in seen:
+            continue
+
+        seen.add(key)
+        deduped.append(text)
+        if len(deduped) >= max_items:
+            break
+
+    return deduped
+
+
 class RepoRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -131,6 +201,189 @@ class EmbeddingItem(BaseModel):
     body: str | None = None
     content_hash: str
     embedded_content_hash: str | None = None
+
+
+class IntentFactProvenance(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    fact: str
+    source: IntentFactSource
+
+    @field_validator("fact")
+    @classmethod
+    def validate_fact(cls, value: str) -> str:
+        return _normalize_card_text_value(value, max_chars=260)
+
+
+class IntentCard(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["v1"] = "v1"
+    item_type: ItemType
+    problem_statement: str
+    desired_outcome: str
+    important_signals: list[str] = Field(default_factory=list)
+    scope_boundaries: list[str] = Field(default_factory=list)
+    unknowns_and_ambiguities: list[str] = Field(default_factory=list)
+    evidence_facts: list[str] = Field(default_factory=list)
+    fact_provenance: list[IntentFactProvenance] = Field(default_factory=list)
+    reported_claims: list[str] = Field(default_factory=list)
+    extractor_inference: list[str] = Field(default_factory=list)
+    insufficient_context: bool = False
+    missing_info: list[str] = Field(default_factory=list)
+    extraction_confidence: float
+    key_changed_components: list[str] = Field(default_factory=list)
+    behavioral_intent: str | None = None
+    change_summary: str | None = None
+    risk_notes: list[str] = Field(default_factory=list)
+
+    @field_validator("problem_statement")
+    @classmethod
+    def validate_problem_statement(cls, value: str) -> str:
+        return _normalize_card_text_value(value, max_chars=500)
+
+    @field_validator("desired_outcome")
+    @classmethod
+    def validate_desired_outcome(cls, value: str) -> str:
+        return _normalize_card_text_value(value, max_chars=500)
+
+    @field_validator("behavioral_intent")
+    @classmethod
+    def validate_behavioral_intent(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_card_text_value(value, max_chars=500)
+
+    @field_validator("change_summary")
+    @classmethod
+    def validate_change_summary(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_card_text_value(value, max_chars=700)
+
+    @field_validator("important_signals")
+    @classmethod
+    def validate_important_signals(cls, value: list[str]) -> list[str]:
+        return _normalize_card_text_list(value, max_items=12, max_item_chars=220)
+
+    @field_validator("scope_boundaries")
+    @classmethod
+    def validate_scope_boundaries(cls, value: list[str]) -> list[str]:
+        return _normalize_card_text_list(value, max_items=10, max_item_chars=220)
+
+    @field_validator("unknowns_and_ambiguities")
+    @classmethod
+    def validate_unknowns_and_ambiguities(cls, value: list[str]) -> list[str]:
+        return _normalize_card_text_list(value, max_items=10, max_item_chars=220)
+
+    @field_validator("evidence_facts")
+    @classmethod
+    def validate_evidence_facts(cls, value: list[str]) -> list[str]:
+        return _normalize_card_text_list(value, max_items=15, max_item_chars=260)
+
+    @field_validator("reported_claims")
+    @classmethod
+    def validate_reported_claims(cls, value: list[str]) -> list[str]:
+        return _normalize_card_text_list(value, max_items=10, max_item_chars=260)
+
+    @field_validator("extractor_inference")
+    @classmethod
+    def validate_extractor_inference(cls, value: list[str]) -> list[str]:
+        return _normalize_card_text_list(value, max_items=10, max_item_chars=260)
+
+    @field_validator("missing_info")
+    @classmethod
+    def validate_missing_info(cls, value: list[str]) -> list[str]:
+        return _normalize_card_text_list(value, max_items=10, max_item_chars=220)
+
+    @field_validator("key_changed_components")
+    @classmethod
+    def validate_key_changed_components(cls, value: list[str]) -> list[str]:
+        return _normalize_card_text_list(value, max_items=60, max_item_chars=260)
+
+    @field_validator("risk_notes")
+    @classmethod
+    def validate_risk_notes(cls, value: list[str]) -> list[str]:
+        return _normalize_card_text_list(value, max_items=10, max_item_chars=220)
+
+    @field_validator("fact_provenance")
+    @classmethod
+    def validate_fact_provenance_length(
+        cls,
+        value: list[IntentFactProvenance],
+    ) -> list[IntentFactProvenance]:
+        return value[:15]
+
+    @field_validator("extraction_confidence")
+    @classmethod
+    def validate_extraction_confidence(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            msg = "extraction_confidence must be between 0 and 1"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def validate_model_consistency(self) -> IntentCard:
+        evidence_keys = {fact.casefold() for fact in self.evidence_facts}
+        for provenance in self.fact_provenance:
+            if provenance.fact.casefold() not in evidence_keys:
+                msg = "fact_provenance facts must map to evidence_facts"
+                raise ValueError(msg)
+
+        if self.item_type == ItemType.PR:
+            if not self.behavioral_intent:
+                msg = "behavioral_intent is required for PR intent cards"
+                raise ValueError(msg)
+            if not self.change_summary:
+                msg = "change_summary is required for PR intent cards"
+                raise ValueError(msg)
+
+        return self
+
+
+class IntentCardSourceItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    item_id: int
+    type: ItemType
+    number: int
+    title: str
+    body: str | None = None
+    content_hash: str
+    latest_source_content_hash: str | None = None
+    latest_status: IntentCardStatus | None = None
+
+
+class IntentCardRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    intent_card_id: int
+    item_id: int
+    source_content_hash: str
+    schema_version: str
+    extractor_provider: str
+    extractor_model: str
+    prompt_version: str
+    card_json: IntentCard
+    card_text_for_embedding: str
+    embedding_render_version: str
+    status: IntentCardStatus
+    insufficient_context: bool
+    error_class: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class IntentEmbeddingItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    intent_card_id: int
+    item_id: int
+    type: ItemType
+    number: int
+    card_text_for_embedding: str
+    embedded_card_hash: str | None = None
 
 
 class CandidateSourceItem(BaseModel):
@@ -561,6 +814,61 @@ def semantic_content_hash(*, item_type: ItemType, title: str, body: str | None) 
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def render_intent_card_text_for_embedding(card: IntentCard) -> str:
+    lines: list[str] = [
+        f"TYPE: {card.item_type.value}",
+        f"PROBLEM: {card.problem_statement}",
+        f"DESIRED_OUTCOME: {card.desired_outcome}",
+        "",
+        "IMPORTANT_SIGNALS:",
+    ]
+
+    lines.extend(f"- {signal}" for signal in card.important_signals)
+
+    lines.extend(
+        [
+            "",
+            "SCOPE_BOUNDARIES:",
+        ]
+    )
+    lines.extend(f"- {scope}" for scope in card.scope_boundaries)
+
+    lines.extend(
+        [
+            "",
+            "EVIDENCE_FACTS:",
+        ]
+    )
+    lines.extend(f"- {fact}" for fact in card.evidence_facts)
+
+    if card.item_type == ItemType.PR:
+        lines.extend(
+            [
+                "",
+                "PR_KEY_CHANGED_COMPONENTS:",
+            ]
+        )
+        lines.extend(f"- {path}" for path in card.key_changed_components)
+        lines.extend(
+            [
+                "",
+                "PR_BEHAVIORAL_INTENT:",
+                card.behavioral_intent or "",
+                "",
+                "PR_CHANGE_SUMMARY:",
+                card.change_summary or "",
+            ]
+        )
+
+    rendered = "\n".join(lines).strip()
+    return _truncate_with_ellipsis(rendered, 4000)
+
+
+def intent_card_text_hash(value: str) -> str:
+    normalized = normalize_text(value)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 _DAYS_RE = re.compile(r"^(?P<days>\d+)d$")

@@ -8,10 +8,14 @@ from dupcanon.models import (
     DetectNewResult,
     DetectSource,
     DetectVerdict,
+    IntentCard,
+    IntentFactProvenance,
+    IntentFactSource,
     ItemType,
     JudgeDecision,
     RepoRef,
     parse_since,
+    render_intent_card_text_for_embedding,
     semantic_content_hash,
 )
 
@@ -172,3 +176,92 @@ def test_detect_new_result_not_duplicate_rejects_duplicate_target() -> None:
             run_id="run123",
             timestamp=datetime.now(tz=UTC),
         )
+
+
+def test_intent_card_normalizes_and_deduplicates_list_fields() -> None:
+    card = IntentCard(
+        item_type=ItemType.ISSUE,
+        problem_statement="  Sync stalls behind proxy  ",
+        desired_outcome="Fail fast with actionable guidance",
+        important_signals=["No logs", "no logs", "   ", "Only on corp VPN"],
+        scope_boundaries=["network path", "Network Path"],
+        unknowns_and_ambiguities=["Depends on TLS config"],
+        evidence_facts=["Observed in v0.1.0", "observed in v0.1.0", "Proxy set"],
+        fact_provenance=[
+            IntentFactProvenance(fact="Observed in v0.1.0", source=IntentFactSource.BODY),
+            IntentFactProvenance(fact="Proxy set", source=IntentFactSource.BODY),
+        ],
+        reported_claims=["Root cause is rate limits"],
+        extractor_inference=["Likely proxy/TLS handshake path"],
+        missing_info=["debug logs"],
+        extraction_confidence=0.82,
+    )
+
+    assert card.important_signals == ["No logs", "Only on corp VPN"]
+    assert card.scope_boundaries == ["network path"]
+    assert card.evidence_facts == ["Observed in v0.1.0", "Proxy set"]
+
+
+def test_intent_card_pr_requires_pr_specific_fields() -> None:
+    with pytest.raises(ValueError):
+        IntentCard(
+            item_type=ItemType.PR,
+            problem_statement="Auth token remains valid after logout",
+            desired_outcome="Token invalid after logout",
+            evidence_facts=["Changed auth middleware"],
+            fact_provenance=[
+                IntentFactProvenance(
+                    fact="Changed auth middleware",
+                    source=IntentFactSource.DIFF,
+                )
+            ],
+            extraction_confidence=0.9,
+        )
+
+
+def test_intent_card_fact_provenance_requires_fact_membership() -> None:
+    with pytest.raises(ValueError):
+        IntentCard(
+            item_type=ItemType.ISSUE,
+            problem_statement="CLI freeze",
+            desired_outcome="No freeze",
+            evidence_facts=["Happens on startup"],
+            fact_provenance=[
+                IntentFactProvenance(
+                    fact="Different fact",
+                    source=IntentFactSource.BODY,
+                )
+            ],
+            extraction_confidence=0.5,
+        )
+
+
+def test_render_intent_card_text_for_embedding_uses_locked_sections() -> None:
+    card = IntentCard(
+        item_type=ItemType.PR,
+        problem_statement="Token reuse after logout",
+        desired_outcome="Invalidate tokens cluster-wide",
+        important_signals=["Affects /api/auth/refresh"],
+        scope_boundaries=["Auth/session only"],
+        evidence_facts=["Changed auth/session_store.py revocation check"],
+        fact_provenance=[
+            IntentFactProvenance(
+                fact="Changed auth/session_store.py revocation check",
+                source=IntentFactSource.DIFF,
+            )
+        ],
+        extraction_confidence=0.88,
+        key_changed_components=["auth/session_store.py"],
+        behavioral_intent="Logout should invalidate token acceptance",
+        change_summary="Adds revocation timestamp checks",
+        risk_notes=["Adds lookup per request"],
+    )
+
+    rendered = render_intent_card_text_for_embedding(card)
+
+    assert "TYPE: pr" in rendered
+    assert "PROBLEM: Token reuse after logout" in rendered
+    assert "PR_KEY_CHANGED_COMPONENTS:" in rendered
+    assert "PR_BEHAVIORAL_INTENT:" in rendered
+    assert "PR_CHANGE_SUMMARY:" in rendered
+    assert "risk" not in rendered.lower()

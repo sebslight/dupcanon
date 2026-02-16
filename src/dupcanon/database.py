@@ -16,6 +16,11 @@ from dupcanon.models import (
     ClosePlanEntry,
     CloseRunRecord,
     EmbeddingItem,
+    IntentCard,
+    IntentCardRecord,
+    IntentCardSourceItem,
+    IntentCardStatus,
+    IntentEmbeddingItem,
     ItemPayload,
     ItemType,
     JudgeAuditDisagreement,
@@ -26,6 +31,7 @@ from dupcanon.models import (
     PlanCloseItem,
     RepoMetadata,
     RepoRef,
+    RepresentationSource,
     StateFilter,
     TypeFilter,
     UpsertResult,
@@ -323,6 +329,353 @@ class Database:
                 ),
             )
 
+    def upsert_intent_card(
+        self,
+        *,
+        item_id: int,
+        source_content_hash: str,
+        schema_version: str,
+        extractor_provider: str,
+        extractor_model: str,
+        prompt_version: str,
+        card_json: IntentCard,
+        card_text_for_embedding: str,
+        embedding_render_version: str,
+        status: IntentCardStatus,
+        insufficient_context: bool,
+        error_class: str | None,
+        error_message: str | None,
+        created_at: datetime,
+    ) -> int:
+        payload = Json(card_json.model_dump(mode="json"))
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                insert into public.intent_cards (
+                    item_id,
+                    source_content_hash,
+                    schema_version,
+                    extractor_provider,
+                    extractor_model,
+                    prompt_version,
+                    card_json,
+                    card_text_for_embedding,
+                    embedding_render_version,
+                    status,
+                    insufficient_context,
+                    error_class,
+                    error_message,
+                    created_at,
+                    updated_at
+                ) values (
+                    %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                on conflict (item_id, source_content_hash, schema_version, prompt_version)
+                do update set
+                    extractor_provider = excluded.extractor_provider,
+                    extractor_model = excluded.extractor_model,
+                    card_json = excluded.card_json,
+                    card_text_for_embedding = excluded.card_text_for_embedding,
+                    embedding_render_version = excluded.embedding_render_version,
+                    status = excluded.status,
+                    insufficient_context = excluded.insufficient_context,
+                    error_class = excluded.error_class,
+                    error_message = excluded.error_message,
+                    updated_at = excluded.updated_at
+                returning id
+                """,
+                (
+                    item_id,
+                    source_content_hash,
+                    schema_version,
+                    extractor_provider,
+                    extractor_model,
+                    prompt_version,
+                    payload,
+                    card_text_for_embedding,
+                    embedding_render_version,
+                    status.value,
+                    insufficient_context,
+                    error_class,
+                    error_message,
+                    created_at,
+                    created_at,
+                ),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            msg = "failed to upsert intent card"
+            raise DatabaseError(msg)
+
+        return int(row["id"])
+
+    def get_latest_intent_card(
+        self,
+        *,
+        item_id: int,
+        schema_version: str,
+        prompt_version: str,
+        status: IntentCardStatus | None = None,
+    ) -> IntentCardRecord | None:
+        query = """
+            select
+                ic.id,
+                ic.item_id,
+                ic.source_content_hash,
+                ic.schema_version,
+                ic.extractor_provider,
+                ic.extractor_model,
+                ic.prompt_version,
+                ic.card_json,
+                ic.card_text_for_embedding,
+                ic.embedding_render_version,
+                ic.status,
+                ic.insufficient_context,
+                ic.error_class,
+                ic.error_message,
+                ic.created_at,
+                ic.updated_at
+            from public.intent_cards ic
+            where
+                ic.item_id = %s
+                and ic.schema_version = %s
+                and ic.prompt_version = %s
+        """
+        params: list[Any] = [item_id, schema_version, prompt_version]
+        if status is not None:
+            query += " and ic.status = %s"
+            params.append(status.value)
+
+        query += " order by ic.created_at desc, ic.id desc limit 1"
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, tuple(params))
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        card_payload = row.get("card_json")
+        if not isinstance(card_payload, dict):
+            msg = "invalid intent_cards.card_json payload"
+            raise DatabaseError(msg)
+
+        return IntentCardRecord(
+            intent_card_id=int(row["id"]),
+            item_id=int(row["item_id"]),
+            source_content_hash=str(row["source_content_hash"]),
+            schema_version=str(row["schema_version"]),
+            extractor_provider=str(row["extractor_provider"]),
+            extractor_model=str(row["extractor_model"]),
+            prompt_version=str(row["prompt_version"]),
+            card_json=IntentCard.model_validate(card_payload),
+            card_text_for_embedding=str(row["card_text_for_embedding"]),
+            embedding_render_version=str(row["embedding_render_version"]),
+            status=IntentCardStatus(str(row["status"])),
+            insufficient_context=bool(row["insufficient_context"]),
+            error_class=(
+                str(row["error_class"])
+                if row.get("error_class") is not None
+                else None
+            ),
+            error_message=(
+                str(row["error_message"])
+                if row.get("error_message") is not None
+                else None
+            ),
+            created_at=cast(datetime, row["created_at"]),
+            updated_at=cast(datetime, row["updated_at"]),
+        )
+
+    def list_items_for_intent_card_extraction(
+        self,
+        *,
+        repo_id: int,
+        type_filter: TypeFilter,
+        schema_version: str,
+        prompt_version: str,
+    ) -> list[IntentCardSourceItem]:
+        query = """
+            select
+                i.id as item_id,
+                i.type,
+                i.number,
+                i.title,
+                i.body,
+                i.content_hash,
+                latest.source_content_hash as latest_source_content_hash,
+                latest.status as latest_status
+            from public.items i
+            left join lateral (
+                select
+                    ic.source_content_hash,
+                    ic.status
+                from public.intent_cards ic
+                where
+                    ic.item_id = i.id
+                    and ic.schema_version = %s
+                    and ic.prompt_version = %s
+                order by ic.created_at desc, ic.id desc
+                limit 1
+            ) latest on true
+            where
+                i.repo_id = %s
+        """
+        params: list[Any] = [schema_version, prompt_version, repo_id]
+
+        if type_filter != TypeFilter.ALL:
+            query += " and i.type = %s"
+            params.append(type_filter.value)
+
+        query += """
+            and (
+                latest.source_content_hash is null
+                or latest.source_content_hash <> i.content_hash
+                or latest.status <> 'fresh'
+            )
+            order by i.id asc
+        """
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, tuple(params))
+            rows = cur.fetchall()
+
+        result: list[IntentCardSourceItem] = []
+        for row in rows:
+            latest_status_raw = row.get("latest_status")
+            result.append(
+                IntentCardSourceItem(
+                    item_id=int(row["item_id"]),
+                    type=ItemType(str(row["type"])),
+                    number=int(row["number"]),
+                    title=str(row["title"]),
+                    body=row.get("body"),
+                    content_hash=str(row["content_hash"]),
+                    latest_source_content_hash=(
+                        str(row["latest_source_content_hash"])
+                        if row.get("latest_source_content_hash") is not None
+                        else None
+                    ),
+                    latest_status=(
+                        IntentCardStatus(str(latest_status_raw))
+                        if latest_status_raw is not None
+                        else None
+                    ),
+                )
+            )
+
+        return result
+
+    def list_intent_cards_for_embedding(
+        self,
+        *,
+        repo_id: int,
+        type_filter: TypeFilter,
+        schema_version: str,
+        prompt_version: str,
+        model: str,
+    ) -> list[IntentEmbeddingItem]:
+        query = """
+            with latest_fresh as (
+                select distinct on (ic.item_id)
+                    ic.id,
+                    ic.item_id,
+                    ic.card_text_for_embedding
+                from public.intent_cards ic
+                where
+                    ic.schema_version = %s
+                    and ic.prompt_version = %s
+                    and ic.status = 'fresh'
+                order by ic.item_id, ic.created_at desc, ic.id desc
+            )
+            select
+                lf.id as intent_card_id,
+                i.id as item_id,
+                i.type,
+                i.number,
+                lf.card_text_for_embedding,
+                ie.embedded_card_hash
+            from latest_fresh lf
+            join public.items i on i.id = lf.item_id
+            left join public.intent_embeddings ie
+                on ie.intent_card_id = lf.id and ie.model = %s
+            where i.repo_id = %s
+        """
+        params: list[Any] = [schema_version, prompt_version, model, repo_id]
+
+        if type_filter != TypeFilter.ALL:
+            query += " and i.type = %s"
+            params.append(type_filter.value)
+
+        query += " order by i.id asc"
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, tuple(params))
+            rows = cur.fetchall()
+
+        result: list[IntentEmbeddingItem] = []
+        for row in rows:
+            result.append(
+                IntentEmbeddingItem(
+                    intent_card_id=int(row["intent_card_id"]),
+                    item_id=int(row["item_id"]),
+                    type=ItemType(str(row["type"])),
+                    number=int(row["number"]),
+                    card_text_for_embedding=str(row["card_text_for_embedding"]),
+                    embedded_card_hash=(
+                        str(row["embedded_card_hash"])
+                        if row.get("embedded_card_hash") is not None
+                        else None
+                    ),
+                )
+            )
+
+        return result
+
+    def upsert_intent_embedding(
+        self,
+        *,
+        intent_card_id: int,
+        model: str,
+        dim: int,
+        embedding: list[float],
+        embedded_card_hash: str,
+        created_at: datetime,
+    ) -> None:
+        vector_literal = _vector_literal(embedding)
+
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into public.intent_embeddings (
+                    intent_card_id,
+                    model,
+                    dim,
+                    embedding,
+                    embedded_card_hash,
+                    created_at
+                ) values (
+                    %s, %s, %s, %s::vector, %s, %s
+                )
+                on conflict (intent_card_id, model)
+                do update set
+                    dim = excluded.dim,
+                    embedding = excluded.embedding,
+                    embedded_card_hash = excluded.embedded_card_hash,
+                    created_at = excluded.created_at
+                """,
+                (
+                    intent_card_id,
+                    model,
+                    dim,
+                    vector_literal,
+                    embedded_card_hash,
+                    created_at,
+                ),
+            )
+
     def list_candidate_source_items(
         self,
         *,
@@ -405,6 +758,8 @@ class Database:
         include_states: list[str],
         item_content_version: int,
         created_at: datetime,
+        representation: RepresentationSource = RepresentationSource.RAW,
+        representation_version: str | None = None,
     ) -> int:
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -419,9 +774,11 @@ class Database:
                     include_states,
                     created_at,
                     status,
-                    item_content_version
+                    item_content_version,
+                    representation,
+                    representation_version
                 ) values (
-                    %s, %s, %s, %s, %s, %s, %s::text[], %s, 'fresh', %s
+                    %s, %s, %s, %s, %s, %s, %s::text[], %s, 'fresh', %s, %s, %s
                 )
                 returning id
                 """,
@@ -435,6 +792,8 @@ class Database:
                     include_states,
                     created_at,
                     item_content_version,
+                    representation.value,
+                    representation_version,
                 ),
             )
             row = cur.fetchone()

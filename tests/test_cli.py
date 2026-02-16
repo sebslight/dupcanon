@@ -933,7 +933,11 @@ def test_maintainers_help_includes_repo() -> None:
     assert "--repo" in result.stdout
 
 
-def test_sync_fails_fast_for_non_postgres_supabase_url(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sync_fails_fast_for_non_postgres_supabase_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SUPABASE_DB_URL", "https://example.supabase.co")
 
     result = runner.invoke(app, ["sync", "--repo", "org/repo", "--dry-run"])
