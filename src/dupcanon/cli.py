@@ -34,6 +34,7 @@ from dupcanon.models import (
     ItemType,
     JudgeAuditRunReport,
     JudgeAuditSimulationRow,
+    RepresentationSource,
     StateFilter,
     TypeFilter,
 )
@@ -76,6 +77,11 @@ EMBED_PROVIDER_OPTION = typer.Option(
     help="Embedding provider override (gemini or openai)",
 )
 EMBED_MODEL_OPTION = typer.Option(None, "--model", help="Embedding model override")
+EMBED_SOURCE_OPTION = typer.Option(
+    RepresentationSource.RAW,
+    "--source",
+    help="Embedding source representation (raw or intent)",
+)
 CANDIDATE_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 K_OPTION = typer.Option(4, "--k", help="Number of nearest neighbors to retrieve")
 MIN_SCORE_OPTION = typer.Option(0.75, "--min-score", help="Minimum similarity score")
@@ -1043,6 +1049,7 @@ def embed(
     only_changed: bool = ONLY_CHANGED_OPTION,
     provider: str | None = EMBED_PROVIDER_OPTION,
     model: str | None = EMBED_MODEL_OPTION,
+    source: RepresentationSource = EMBED_SOURCE_OPTION,
 ) -> None:
     """Embed items into pgvector."""
     settings, run_id, logger = _bootstrap("embed")
@@ -1063,6 +1070,7 @@ def embed(
             only_changed=only_changed,
             embedding_provider=effective_provider,
             embedding_model=effective_model,
+            source=source,
             console=console,
             logger=logger,
         )
@@ -1078,6 +1086,7 @@ def embed(
                 "only_changed": only_changed,
                 "provider": effective_provider,
                 "model": effective_model,
+                "source": source.value,
             },
         )
         logger.error(
@@ -1097,6 +1106,7 @@ def embed(
     table.add_column("Value")
     table.add_row("provider", effective_provider)
     table.add_row("model", effective_model)
+    table.add_row("source", source.value)
     table.add_row("only_changed", str(only_changed))
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))

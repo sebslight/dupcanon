@@ -6,7 +6,13 @@ from rich.console import Console
 import dupcanon.embed_service as embed_service
 from dupcanon.config import load_settings
 from dupcanon.logging_config import get_logger
-from dupcanon.models import EmbeddingItem, ItemType, TypeFilter
+from dupcanon.models import (
+    EmbeddingItem,
+    IntentEmbeddingItem,
+    ItemType,
+    RepresentationSource,
+    TypeFilter,
+)
 
 
 def test_build_embedding_text_applies_v1_limits() -> None:
@@ -245,3 +251,84 @@ def test_run_embed_openai_provider_requires_api_key(
             console=Console(),
             logger=get_logger("test"),
         )
+
+
+def test_run_embed_intent_source_only_changed_skips_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    captured = {"upserts": 0, "embedded_texts": []}
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo):
+            return 42
+
+        def list_intent_cards_for_embedding(
+            self,
+            *,
+            repo_id: int,
+            type_filter: TypeFilter,
+            schema_version: str,
+            prompt_version: str,
+            model: str,
+        ):
+            return [
+                IntentEmbeddingItem(
+                    intent_card_id=100,
+                    item_id=1,
+                    type=ItemType.ISSUE,
+                    number=1,
+                    card_text_for_embedding="TYPE: issue\nPROBLEM: unchanged",
+                    embedded_card_hash=embed_service.intent_card_text_hash(
+                        "TYPE: issue\nPROBLEM: unchanged"
+                    ),
+                ),
+                IntentEmbeddingItem(
+                    intent_card_id=101,
+                    item_id=2,
+                    type=ItemType.ISSUE,
+                    number=2,
+                    card_text_for_embedding="TYPE: issue\nPROBLEM: changed",
+                    embedded_card_hash="old-hash",
+                ),
+            ]
+
+        def upsert_intent_embedding(self, **kwargs):
+            captured["upserts"] += 1
+            captured["last_upsert"] = kwargs
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            captured["embedded_texts"].extend(texts)
+            return [[0.1] * 3072 for _ in texts]
+
+    monkeypatch.setattr(embed_service, "Database", FakeDatabase)
+    monkeypatch.setattr(embed_service, "OpenAIEmbeddingsClient", FakeClient)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("DUPCANON_EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("DUPCANON_EMBEDDING_MODEL", "text-embedding-3-large")
+
+    stats = embed_service.run_embed(
+        settings=load_settings(dotenv_path=tmp_path / "no-default.env"),
+        repo_value="org/repo",
+        type_filter=TypeFilter.ISSUE,
+        only_changed=True,
+        source=RepresentationSource.INTENT,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.discovered == 2
+    assert stats.queued == 1
+    assert stats.embedded == 1
+    assert stats.skipped_unchanged == 1
+    assert stats.failed == 0
+    assert captured["upserts"] == 1
+    assert len(captured["embedded_texts"]) == 1

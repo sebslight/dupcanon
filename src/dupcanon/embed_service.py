@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
 
@@ -22,7 +23,9 @@ from dupcanon.models import (
     EmbeddingItem,
     EmbedStats,
     RepoRef,
+    RepresentationSource,
     TypeFilter,
+    intent_card_text_hash,
     normalize_text,
 )
 from dupcanon.openai_embeddings import OpenAIEmbeddingsClient
@@ -31,6 +34,18 @@ from dupcanon.sync_service import require_postgres_dsn
 _TITLE_MAX_CHARS = 300
 _BODY_MAX_CHARS = 7700
 _COMBINED_MAX_CHARS = 8000
+
+_INTENT_SCHEMA_VERSION = "v1"
+_INTENT_PROMPT_VERSION = "intent-card-v1"
+
+
+@dataclass(frozen=True)
+class _IntentEmbeddingQueueItem:
+    intent_card_id: int
+    item_number: int
+    item_type: str
+    card_text_for_embedding: str
+    embedded_card_hash: str | None
 
 
 def _persist_failure_artifact(
@@ -77,7 +92,7 @@ def build_embedding_text(*, title: str, body: str | None) -> str:
     return f"{title_text}\n\n{trimmed_body}" if trimmed_body else title_text
 
 
-def _chunked(items: list[EmbeddingItem], chunk_size: int) -> Iterable[list[EmbeddingItem]]:
+def _chunked[T](items: list[T], chunk_size: int) -> Iterable[list[T]]:
     for index in range(0, len(items), chunk_size):
         yield items[index : index + chunk_size]
 
@@ -101,6 +116,25 @@ def _embed_single_item(
     )
 
 
+def _embed_single_intent_card(
+    *,
+    db: Database,
+    client: GeminiEmbeddingsClient | OpenAIEmbeddingsClient,
+    item: _IntentEmbeddingQueueItem,
+    model: str,
+    embedding_dim: int,
+) -> None:
+    vector = client.embed_texts([item.card_text_for_embedding])[0]
+    db.upsert_intent_embedding(
+        intent_card_id=item.intent_card_id,
+        model=model,
+        dim=embedding_dim,
+        embedding=vector,
+        embedded_card_hash=intent_card_text_hash(item.card_text_for_embedding),
+        created_at=utc_now(),
+    )
+
+
 def run_embed(
     *,
     settings: Settings,
@@ -111,6 +145,7 @@ def run_embed(
     logger: BoundLogger,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    source: RepresentationSource = RepresentationSource.RAW,
 ) -> EmbedStats:
     command_started = perf_counter()
 
@@ -150,6 +185,7 @@ def run_embed(
         stage="embed",
         provider=provider,
         model=model,
+        source=source.value,
     )
     logger.info(
         "embed.start",
@@ -165,20 +201,7 @@ def run_embed(
         logger.warning("embed.repo_not_found", status="skip")
         return EmbedStats()
 
-    discovered_items = db.list_items_for_embedding(
-        repo_id=repo_id,
-        type_filter=type_filter,
-        model=model,
-    )
-
-    queue: list[EmbeddingItem] = []
     skipped_unchanged = 0
-    for item in discovered_items:
-        if only_changed and item.embedded_content_hash == item.content_hash:
-            skipped_unchanged += 1
-            continue
-        queue.append(item)
-
     embedded = 0
     failed = 0
 
@@ -198,6 +221,9 @@ def run_embed(
         msg = f"unsupported embedding provider: {provider}"
         raise ValueError(msg)
 
+    discovered_count = 0
+    queued_count = 0
+
     stage_started = perf_counter()
     progress = Progress(
         SpinnerColumn(),
@@ -208,49 +234,106 @@ def run_embed(
         console=console,
     )
 
-    with progress:
-        task = progress.add_task("Embedding items", total=len(queue))
+    if source == RepresentationSource.RAW:
+        discovered_items = db.list_items_for_embedding(
+            repo_id=repo_id,
+            type_filter=type_filter,
+            model=model,
+        )
+        discovered_count = len(discovered_items)
 
-        for batch in _chunked(queue, settings.embed_batch_size):
-            texts = [build_embedding_text(title=item.title, body=item.body) for item in batch]
+        queue: list[EmbeddingItem] = []
+        for item in discovered_items:
+            if only_changed and item.embedded_content_hash == item.content_hash:
+                skipped_unchanged += 1
+                continue
+            queue.append(item)
+        queued_count = len(queue)
 
-            try:
-                vectors = client.embed_texts(texts)
-            except Exception as exc:  # noqa: BLE001
-                artifact_path = _persist_failure_artifact(
-                    settings=settings,
-                    logger=logger,
-                    category="batch_failed",
-                    payload={
-                        "command": "embed",
-                        "stage": "embed",
-                        "repo": repo.full_name(),
-                        "type": type_filter.value,
-                        "batch_size": len(batch),
-                        "item_ids": [item.number for item in batch],
-                        "error_class": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                )
-                logger.warning(
-                    "embed.batch_failed",
-                    status="retry",
-                    batch_size=len(batch),
-                    error_class=type(exc).__name__,
-                    artifact_path=artifact_path,
-                )
+        with progress:
+            task = progress.add_task("Embedding raw items", total=len(queue))
 
-                for item in batch:
+            for batch in _chunked(queue, settings.embed_batch_size):
+                texts = [build_embedding_text(title=item.title, body=item.body) for item in batch]
+
+                try:
+                    vectors = client.embed_texts(texts)
+                except Exception as exc:  # noqa: BLE001
+                    artifact_path = _persist_failure_artifact(
+                        settings=settings,
+                        logger=logger,
+                        category="batch_failed",
+                        payload={
+                            "command": "embed",
+                            "stage": "embed",
+                            "repo": repo.full_name(),
+                            "type": type_filter.value,
+                            "source": source.value,
+                            "batch_size": len(batch),
+                            "item_ids": [item.number for item in batch],
+                            "error_class": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                    )
+                    logger.warning(
+                        "embed.batch_failed",
+                        status="retry",
+                        batch_size=len(batch),
+                        error_class=type(exc).__name__,
+                        artifact_path=artifact_path,
+                    )
+
+                    for item in batch:
+                        try:
+                            _embed_single_item(
+                                db=db,
+                                client=client,
+                                item=item,
+                                model=model,
+                                embedding_dim=settings.embedding_dim,
+                            )
+                            embedded += 1
+                        except Exception as single_exc:  # noqa: BLE001
+                            failed += 1
+                            artifact_path = _persist_failure_artifact(
+                                settings=settings,
+                                logger=logger,
+                                category="item_failed",
+                                payload={
+                                    "command": "embed",
+                                    "stage": "embed",
+                                    "repo": repo.full_name(),
+                                    "source": source.value,
+                                    "item_id": item.number,
+                                    "item_type": item.type.value,
+                                    "error_class": type(single_exc).__name__,
+                                    "error": str(single_exc),
+                                },
+                            )
+                            logger.error(
+                                "embed.item_failed",
+                                status="error",
+                                item_id=item.number,
+                                item_type=item.type.value,
+                                error_class=type(single_exc).__name__,
+                                artifact_path=artifact_path,
+                            )
+                        finally:
+                            progress.advance(task)
+                    continue
+
+                for item, vector in zip(batch, vectors, strict=True):
                     try:
-                        _embed_single_item(
-                            db=db,
-                            client=client,
-                            item=item,
+                        db.upsert_embedding(
+                            item_id=item.item_id,
                             model=model,
-                            embedding_dim=settings.embedding_dim,
+                            dim=settings.embedding_dim,
+                            embedding=vector,
+                            embedded_content_hash=item.content_hash,
+                            created_at=utc_now(),
                         )
                         embedded += 1
-                    except Exception as single_exc:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         failed += 1
                         artifact_path = _persist_failure_artifact(
                             settings=settings,
@@ -260,10 +343,11 @@ def run_embed(
                                 "command": "embed",
                                 "stage": "embed",
                                 "repo": repo.full_name(),
+                                "source": source.value,
                                 "item_id": item.number,
                                 "item_type": item.type.value,
-                                "error_class": type(single_exc).__name__,
-                                "error": str(single_exc),
+                                "error_class": type(exc).__name__,
+                                "error": str(exc),
                             },
                         )
                         logger.error(
@@ -271,54 +355,152 @@ def run_embed(
                             status="error",
                             item_id=item.number,
                             item_type=item.type.value,
-                            error_class=type(single_exc).__name__,
+                            error_class=type(exc).__name__,
                             artifact_path=artifact_path,
                         )
                     finally:
                         progress.advance(task)
-                continue
+    else:
+        discovered_cards = db.list_intent_cards_for_embedding(
+            repo_id=repo_id,
+            type_filter=type_filter,
+            schema_version=_INTENT_SCHEMA_VERSION,
+            prompt_version=_INTENT_PROMPT_VERSION,
+            model=model,
+        )
+        discovered_count = len(discovered_cards)
 
-            for item, vector in zip(batch, vectors, strict=True):
+        intent_queue: list[_IntentEmbeddingQueueItem] = []
+        for card in discovered_cards:
+            next_hash = intent_card_text_hash(card.card_text_for_embedding)
+            if only_changed and card.embedded_card_hash == next_hash:
+                skipped_unchanged += 1
+                continue
+            intent_queue.append(
+                _IntentEmbeddingQueueItem(
+                    intent_card_id=card.intent_card_id,
+                    item_number=card.number,
+                    item_type=card.type.value,
+                    card_text_for_embedding=card.card_text_for_embedding,
+                    embedded_card_hash=card.embedded_card_hash,
+                )
+            )
+        queued_count = len(intent_queue)
+
+        with progress:
+            task = progress.add_task("Embedding intent cards", total=len(intent_queue))
+
+            for batch in _chunked(intent_queue, settings.embed_batch_size):
+                texts = [item.card_text_for_embedding for item in batch]
+
                 try:
-                    db.upsert_embedding(
-                        item_id=item.item_id,
-                        model=model,
-                        dim=settings.embedding_dim,
-                        embedding=vector,
-                        embedded_content_hash=item.content_hash,
-                        created_at=utc_now(),
-                    )
-                    embedded += 1
+                    vectors = client.embed_texts(texts)
                 except Exception as exc:  # noqa: BLE001
-                    failed += 1
                     artifact_path = _persist_failure_artifact(
                         settings=settings,
                         logger=logger,
-                        category="item_failed",
+                        category="batch_failed",
                         payload={
                             "command": "embed",
                             "stage": "embed",
                             "repo": repo.full_name(),
-                            "item_id": item.number,
-                            "item_type": item.type.value,
+                            "type": type_filter.value,
+                            "source": source.value,
+                            "batch_size": len(batch),
+                            "item_ids": [item.item_number for item in batch],
                             "error_class": type(exc).__name__,
                             "error": str(exc),
                         },
                     )
-                    logger.error(
-                        "embed.item_failed",
-                        status="error",
-                        item_id=item.number,
-                        item_type=item.type.value,
+                    logger.warning(
+                        "embed.batch_failed",
+                        status="retry",
+                        batch_size=len(batch),
                         error_class=type(exc).__name__,
                         artifact_path=artifact_path,
                     )
-                finally:
-                    progress.advance(task)
+
+                    for item in batch:
+                        try:
+                            _embed_single_intent_card(
+                                db=db,
+                                client=client,
+                                item=item,
+                                model=model,
+                                embedding_dim=settings.embedding_dim,
+                            )
+                            embedded += 1
+                        except Exception as single_exc:  # noqa: BLE001
+                            failed += 1
+                            artifact_path = _persist_failure_artifact(
+                                settings=settings,
+                                logger=logger,
+                                category="item_failed",
+                                payload={
+                                    "command": "embed",
+                                    "stage": "embed",
+                                    "repo": repo.full_name(),
+                                    "source": source.value,
+                                    "item_id": item.item_number,
+                                    "item_type": item.item_type,
+                                    "error_class": type(single_exc).__name__,
+                                    "error": str(single_exc),
+                                },
+                            )
+                            logger.error(
+                                "embed.item_failed",
+                                status="error",
+                                item_id=item.item_number,
+                                item_type=item.item_type,
+                                error_class=type(single_exc).__name__,
+                                artifact_path=artifact_path,
+                            )
+                        finally:
+                            progress.advance(task)
+                    continue
+
+                for item, vector in zip(batch, vectors, strict=True):
+                    try:
+                        db.upsert_intent_embedding(
+                            intent_card_id=item.intent_card_id,
+                            model=model,
+                            dim=settings.embedding_dim,
+                            embedding=vector,
+                            embedded_card_hash=intent_card_text_hash(item.card_text_for_embedding),
+                            created_at=utc_now(),
+                        )
+                        embedded += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed += 1
+                        artifact_path = _persist_failure_artifact(
+                            settings=settings,
+                            logger=logger,
+                            category="item_failed",
+                            payload={
+                                "command": "embed",
+                                "stage": "embed",
+                                "repo": repo.full_name(),
+                                "source": source.value,
+                                "item_id": item.item_number,
+                                "item_type": item.item_type,
+                                "error_class": type(exc).__name__,
+                                "error": str(exc),
+                            },
+                        )
+                        logger.error(
+                            "embed.item_failed",
+                            status="error",
+                            item_id=item.item_number,
+                            item_type=item.item_type,
+                            error_class=type(exc).__name__,
+                            artifact_path=artifact_path,
+                        )
+                    finally:
+                        progress.advance(task)
 
     stats = EmbedStats(
-        discovered=len(discovered_items),
-        queued=len(queue),
+        discovered=discovered_count,
+        queued=queued_count,
         embedded=embedded,
         skipped_unchanged=skipped_unchanged,
         failed=failed,

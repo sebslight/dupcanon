@@ -79,6 +79,7 @@ def test_embed_help_includes_core_options() -> None:
     assert "--only-changed" in result.stdout
     assert "--provider" in result.stdout
     assert "--model" in result.stdout
+    assert "--source" in result.stdout
 
 
 def test_analyze_intent_defaults_openai_model_when_provider_openai(
@@ -143,6 +144,43 @@ def test_embed_defaults_openai_model_when_provider_openai(
     assert result.exit_code == 0
     assert captured.get("embedding_provider") == "openai"
     assert captured.get("embedding_model") == "text-embedding-3-large"
+
+
+def test_embed_passes_intent_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_embed(**kwargs):
+        captured.update(kwargs)
+
+        class _Stats:
+            def model_dump(self):
+                return {}
+
+        return _Stats()
+
+    monkeypatch.setattr("dupcanon.cli.run_embed", fake_run_embed)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "embed",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--provider",
+            "openai",
+            "--source",
+            "intent",
+        ],
+    )
+
+    assert result.exit_code == 0
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "intent"
 
 
 def test_candidates_help_includes_core_options() -> None:
