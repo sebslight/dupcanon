@@ -24,6 +24,7 @@ from dupcanon.config import (
 from dupcanon.database import Database
 from dupcanon.detect_new_service import run_detect_new
 from dupcanon.embed_service import run_embed
+from dupcanon.intent_card_service import run_analyze_intent
 from dupcanon.judge_audit_service import run_judge_audit
 from dupcanon.judge_providers import default_judge_model, normalize_judge_provider
 from dupcanon.judge_service import run_judge
@@ -57,6 +58,17 @@ ONLY_CHANGED_OPTION = typer.Option(
     False,
     "--only-changed",
     help="Embed only items missing embeddings or with changed content",
+)
+ANALYZE_INTENT_PROVIDER_OPTION = typer.Option(
+    None,
+    "--provider",
+    help="Extractor provider override (gemini, openai, openrouter, or openai-codex)",
+)
+ANALYZE_INTENT_MODEL_OPTION = typer.Option(None, "--model", help="Extractor model override")
+ANALYZE_INTENT_THINKING_OPTION = typer.Option(
+    None,
+    "--thinking",
+    help="Extractor thinking level override (off, minimal, low, medium, high, xhigh)",
 )
 EMBED_PROVIDER_OPTION = typer.Option(
     None,
@@ -945,6 +957,78 @@ def refresh(
     table.add_column("Value")
     table.add_row("refresh_known", str(refresh_known))
     table.add_row("dry_run", str(dry_run))
+    for key, value in stats.model_dump().items():
+        table.add_row(key, str(value))
+
+    console.print(table)
+    console.print(f"run_id: [bold]{run_id}[/bold]")
+
+
+@app.command()
+def analyze_intent(
+    repo: str = REPO_OPTION,
+    item_type: TypeFilter = TYPE_OPTION,
+    only_changed: bool = ONLY_CHANGED_OPTION,
+    provider: str | None = ANALYZE_INTENT_PROVIDER_OPTION,
+    model: str | None = ANALYZE_INTENT_MODEL_OPTION,
+    thinking: str | None = ANALYZE_INTENT_THINKING_OPTION,
+) -> None:
+    """Extract and persist intent cards for issues/PRs."""
+    settings, run_id, logger = _bootstrap("analyze-intent")
+    effective_provider = normalize_judge_provider(
+        provider or settings.judge_provider,
+        label="--provider",
+    )
+    effective_model = _default_model_for_provider(provider=effective_provider, settings=settings)
+    if model is not None:
+        effective_model = model
+
+    try:
+        stats = run_analyze_intent(
+            settings=settings,
+            repo_value=repo,
+            type_filter=item_type,
+            only_changed=only_changed,
+            provider=effective_provider,
+            model=effective_model,
+            thinking_level=thinking,
+            console=console,
+            logger=logger,
+        )
+    except Exception as exc:  # noqa: BLE001
+        artifact_path = _persist_command_failure_artifact(
+            settings=settings,
+            logger=logger,
+            command="analyze-intent",
+            error=exc,
+            context={
+                "repo": repo,
+                "type": item_type.value,
+                "only_changed": only_changed,
+                "provider": effective_provider,
+                "model": effective_model,
+                "thinking": thinking,
+            },
+        )
+        logger.error(
+            "analyze_intent.failed",
+            stage="analyze_intent",
+            status="error",
+            error_class=type(exc).__name__,
+            artifact_path=artifact_path,
+        )
+        console.print(f"[red]analyze-intent failed:[/red] {_friendly_error_message(exc)}")
+        if artifact_path is not None:
+            console.print(f"artifact: [bold]{artifact_path}[/bold]")
+        raise typer.Exit(code=1) from exc
+
+    table = Table(title="analyze-intent summary")
+    table.add_column("Metric")
+    table.add_column("Value")
+    table.add_row("provider", effective_provider)
+    table.add_row("model", effective_model)
+    table.add_row("thinking", thinking or "-")
+    table.add_row("only_changed", str(only_changed))
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))
 

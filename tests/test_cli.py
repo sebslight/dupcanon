@@ -27,6 +27,7 @@ def test_cli_help_shows_core_commands() -> None:
     assert result.exit_code == 0
     assert "init" in result.stdout
     assert "sync" in result.stdout
+    assert "analyze-intent" in result.stdout
     assert "maintainers" in result.stdout
     assert "judge" in result.stdout
     assert "judge-audit" in result.stdout
@@ -61,6 +62,16 @@ def test_refresh_help_includes_core_options() -> None:
     assert "--dry-run" in result.stdout
 
 
+def test_analyze_intent_help_includes_core_options() -> None:
+    result = runner.invoke(app, ["analyze-intent", "--help"])
+
+    assert result.exit_code == 0
+    assert "--only-changed" in result.stdout
+    assert "--provider" in result.stdout
+    assert "--model" in result.stdout
+    assert "--thinking" in result.stdout
+
+
 def test_embed_help_includes_core_options() -> None:
     result = runner.invoke(app, ["embed", "--help"])
 
@@ -68,6 +79,42 @@ def test_embed_help_includes_core_options() -> None:
     assert "--only-changed" in result.stdout
     assert "--provider" in result.stdout
     assert "--model" in result.stdout
+
+
+def test_analyze_intent_defaults_openai_model_when_provider_openai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_analyze_intent(**kwargs):
+        captured.update(kwargs)
+
+        class _Stats:
+            def model_dump(self):
+                return {}
+
+        return _Stats()
+
+    monkeypatch.setattr("dupcanon.cli.run_analyze_intent", fake_run_analyze_intent)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "analyze-intent",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--provider",
+            "openai",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("provider") == "openai"
+    assert captured.get("model") == "gpt-5-mini"
 
 
 def test_embed_defaults_openai_model_when_provider_openai(

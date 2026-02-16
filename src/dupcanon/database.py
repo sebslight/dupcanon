@@ -496,6 +496,7 @@ class Database:
         type_filter: TypeFilter,
         schema_version: str,
         prompt_version: str,
+        only_changed: bool = True,
     ) -> list[IntentCardSourceItem]:
         query = """
             select
@@ -529,12 +530,16 @@ class Database:
             query += " and i.type = %s"
             params.append(type_filter.value)
 
+        if only_changed:
+            query += """
+                and (
+                    latest.source_content_hash is null
+                    or latest.source_content_hash <> i.content_hash
+                    or latest.status <> 'fresh'
+                )
+            """
+
         query += """
-            and (
-                latest.source_content_hash is null
-                or latest.source_content_hash <> i.content_hash
-                or latest.status <> 'fresh'
-            )
             order by i.id asc
         """
 

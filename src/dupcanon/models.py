@@ -191,6 +191,14 @@ class EmbedStats(BaseModel):
     failed: int = 0
 
 
+class AnalyzeIntentStats(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    discovered: int = 0
+    extracted: int = 0
+    failed: int = 0
+
+
 class EmbeddingItem(BaseModel):
     model_config = ConfigDict(frozen=True)
 
