@@ -30,6 +30,7 @@ Public docs (Mintlify):
 - Overview: `docs/index.mdx`
 - Get started: `docs/get-started.mdx`
 - Architecture: `docs/architecture.mdx`
+- Evaluation flow (issues + PRs): `docs/evaluation.mdx`
 
 Internal deep docs:
 - Batch design/spec + journal: `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`

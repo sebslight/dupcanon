@@ -1,0 +1,482 @@
+---
+title: Evaluation flow (issues + PRs)
+description: Detailed end-to-end data flow for how dupcanon evaluates issues and pull requests, including retrieval, judging, guardrails, and quality evaluation.
+---
+
+<Info>
+This page is the implementation-level view of how dupcanon evaluates issues and PRs in v1:
+
+- what data is collected
+- how it moves through each layer
+- where decisions are made
+- how quality is measured before any mutation
+</Info>
+
+## Scope and core principles
+
+This flow applies to both item types:
+
+- `issue`
+- `pr`
+
+with strict type separation (issues are only compared to issues, PRs only to PRs).
+
+Core v1 principles:
+
+1. **DB-first, auditable pipeline** (state persisted at every major stage)
+2. **Semantic retrieval first, LLM second**
+3. **Deterministic veto gates over model output**
+4. **Human-gated mutation path (`plan-close` -> reviewed `apply-close --yes`)**
+5. **Precision-first online classification for new items (`detect-new`)**
+
+---
+
+## What data we use
+
+## 1) Source data from GitHub
+
+For each item we ingest:
+
+- identity: `repo`, `type`, `number`, `url`
+- textual content: `title`, `body`
+- state + actors: `state`, `author_login`, `assignees`
+- metadata: `labels`, `comment_count`, `review_comment_count`
+- timestamps: `created_at_gh`, `updated_at_gh`, `closed_at_gh`
+
+### Issue vs PR differences
+
+- **Issues** use `comments` as `comment_count`
+- **PRs** use both `comments` and `review_comment_count`
+- **PR online detection only** (`detect-new`) additionally fetches changed files + bounded patch excerpts for judge context
+
+<Warning>
+Modeling for retrieval and batch judge is based on **title + body**. Comments are intentionally not part of semantic modeling in v1.
+</Warning>
+
+## 2) Derived modeling data
+
+From item content we derive:
+
+- `content_hash` = hash of normalized `{type, title, body}`
+- `content_version` = monotonic counter incremented only when title/body content changes
+- `embedded_content_hash` in `embeddings` to detect stale vectors
+
+## 3) Runtime decision data
+
+The system also persists/uses:
+
+- candidate snapshots and similarity scores (`candidate_sets`, `candidate_set_members`)
+- judge outputs + final gate status (`judge_decisions`)
+- planning/apply state (`close_runs`, `close_run_items`)
+- audit run outputs (`judge_audit_runs`, `judge_audit_run_items`)
+
+---
+
+## System layers and how data flows
+
+## Layer A — Ingestion & normalization (`sync`, `refresh`)
+
+### Inputs
+
+- GitHub API (via `gh api`) for issues/PRs
+
+### Processing
+
+- Upsert repo in `repos`
+- Upsert item rows in `items`
+- Recompute `content_hash` on every upsert
+- Increment `content_version` only on semantic content change (title/body)
+- On content change, mark existing fresh candidate sets for that item as `stale`
+
+### Why this matters
+
+This is what makes downstream retrieval/judging reproducible and freshness-aware.
+
+---
+
+## Layer B — Embedding substrate (`embed`)
+
+### Inputs
+
+- `items` rows for selected repo/type
+- provider/model config
+
+### Text used for embeddings
+
+- title + body, normalized and truncated
+- current limits in code:
+  - title excerpt: 300 chars
+  - body excerpt: 7700 chars
+  - combined cap: 8000 chars
+
+### Processing
+
+- Batch embed queued items
+- Upsert into `embeddings` with:
+  - `model`
+  - `dim` (v1: 3072)
+  - vector payload
+  - `embedded_content_hash`
+
+### Freshness behavior
+
+- With `--only-changed`, rows where `embedded_content_hash == content_hash` are skipped
+
+---
+
+## Layer C — Retrieval snapshot (`candidates`)
+
+### Inputs
+
+- source items + embeddings
+- retrieval params (`k`, `min_score`, `include_states`)
+
+### Candidate query semantics
+
+For each source item:
+
+- same repo
+- same type (`issue` vs `pr` isolated)
+- exclude self
+- state filter (`open`/`closed`/`all`)
+- cosine similarity score >= `min_score`
+- top `k` neighbors
+
+### Persistence
+
+For each source item, command:
+
+1. marks prior fresh candidate sets stale for that source
+2. creates a new `candidate_set` row (query params + source content version)
+3. writes ranked members to `candidate_set_members`
+
+This means every judge run has an explicit retrieval snapshot to audit against.
+
+---
+
+## Layer D — Semantic judgment + deterministic policy (`judge`)
+
+### Inputs
+
+- latest candidate set per source item (fresh by default)
+- source and candidate title/body context
+- provider/model/thinking settings
+
+### Prompted task
+
+Model must return strict JSON:
+
+- duplicate or not
+- selected candidate number (if duplicate)
+- confidence
+- structured relation fields (`relation`, `root_cause_match`, `scope_relation`, `path_match`, `certainty`)
+
+### Pre-LLM skip conditions
+
+- source has no candidates
+- source appears too vague (short/generic/low-signal)
+- source already has accepted edge and `--rejudge` is not set
+
+### Deterministic acceptance gates
+
+Even if model says duplicate, edge is accepted only if all pass:
+
+1. parse/shape valid JSON
+2. selected target is in candidate set
+3. structural duplicate veto checks pass (relation/root-cause/scope/path/certainty)
+4. bug-vs-feature mismatch veto does not trigger
+5. target is open
+6. `confidence >= min_edge` (default 0.85)
+7. candidate score gap gate passes:
+   - `selected_score - best_alternative_score >= 0.015`
+
+### Persistence
+
+Each evaluated set writes a `judge_decisions` record with:
+
+- raw model polarity (`model_is_duplicate`)
+- final outcome (`accepted` | `rejected` | `skipped`)
+- selected target (if any)
+- confidence + reasoning
+- structured decision fields
+- `veto_reason` if demoted/rejected/skipped
+- provider/model, run metadata
+
+### Edge policy
+
+- first accepted outgoing edge per source wins by default
+- explicit `--rejudge` required to supersede
+
+---
+
+## Layer E — Canonical resolution (`canonicalize`)
+
+### Inputs
+
+- accepted edges from `judge_decisions`
+- item metadata (`state`, `author`, activity, timestamps)
+- maintainer set from GitHub collaborators
+
+### Processing
+
+- build connected components from accepted edges (undirected for clustering)
+- choose canonical per cluster using ordered preference:
+  1. if any open item exists, canonical must be open
+  2. prefer likely-English content
+  3. prefer maintainer-authored item
+  4. tie-break by activity, then age, then number
+
+### Output
+
+- v1 `canonicalize` emits stats only (does not persist canonical mapping table)
+- same selection logic is reused by `plan-close`
+
+---
+
+## Layer F — Governed action planning (`plan-close`)
+
+### Inputs
+
+- accepted edges + confidence
+- canonical selection result per cluster
+- maintainer identities
+
+### Per-item action logic (non-canonical nodes)
+
+Item is **close-eligible** only if:
+
+1. source item is open
+2. author is known and not maintainer
+3. assignees are known and none is maintainer
+4. direct accepted edge exists from source to canonical
+5. direct edge confidence >= `min_close` (default 0.90)
+
+Otherwise action is `skip` with explicit reason:
+
+- `not_open`
+- `uncertain_maintainer_identity`
+- `maintainer_author`
+- `maintainer_assignee`
+- `missing_accepted_edge`
+- `low_confidence`
+
+### Persistence
+
+- non-dry-run creates `close_runs(mode=plan)`
+- writes `close_run_items` with action and skip reasons
+
+---
+
+## Layer G — Controlled mutation (`apply-close`)
+
+### Gate
+
+Must satisfy both:
+
+- input run exists and is `mode=plan`
+- explicit `--yes`
+
+### Processing
+
+- create new `close_runs(mode=apply)`
+- copy planned rows into apply run
+- execute only `action=close` rows against GitHub
+- close message template:
+  - `Closing as duplicate of #{}. If this is incorrect, please contact us.`
+- persist API results per item (`gh_result`, `applied_at`)
+
+---
+
+## Online path for newly opened issues/PRs (`detect-new`)
+
+This is the single-item classifier used for workflow automation.
+
+## Input and persistence behavior
+
+1. fetch source issue/PR from GitHub
+2. upsert source into `items`
+3. ensure source embedding freshness (embed only if stale/missing)
+4. retrieve open same-type neighbors (`k=8`, `min_score=0.75` defaults)
+
+### PR-specific online context
+
+For PRs only, judge context appends bounded diff info:
+
+- up to 30 changed files
+- per-file patch excerpt cap: 2000 chars
+- total patch excerpt cap: 12000 chars
+
+This PR diff context improves online judgment quality but is not persisted as modeled corpus text.
+
+## Classification mapping
+
+After judge output and guardrails:
+
+- `duplicate`
+  - confidence >= duplicate threshold (default 0.92)
+  - top retrieval score >= 0.90
+  - strict guardrails all pass
+- `maybe_duplicate`
+  - model leans duplicate but strict guardrails fail, or confidence/retrieval support is weaker
+- `not_duplicate`
+  - model says non-duplicate, or evidence too weak
+
+## Strict online guardrails (downgrade path)
+
+A duplicate is downgraded to maybe when any fails:
+
+- duplicate veto checks
+- bug/feature mismatch
+- strict structure requirements:
+  - `relation = same_instance`
+  - `root_cause_match = same`
+  - `scope_relation = same_scope`
+  - `certainty = sure`
+- score-gap guardrail (`>= 0.015`)
+
+## Parse-failure fallback behavior
+
+If judge output is invalid:
+
+- if nearest score is strong (`>= max(min_score, maybe_threshold)`), return `maybe_duplicate`
+- else `not_duplicate`
+
+## Online persistence constraints (v1)
+
+`detect-new` persists:
+
+- `repos` upsert
+- source `items` upsert
+- source `embeddings` update (when stale/missing)
+
+It does **not** persist:
+
+- candidate set snapshots
+- judge decision rows
+- close actions
+
+---
+
+## How issues and PRs are evaluated differently
+
+| Concern | Issues | PRs |
+|---|---|---|
+| Corpus type partitioning | issue-only | pr-only |
+| Base modeled content | title + body | title + body |
+| Extra online context | none | changed files + patch excerpts in detect-new |
+| Activity signal in canonical tie-break | comment_count | comment_count + review_comment_count |
+| Close execution command | `gh issue close` | `gh pr close` |
+
+Everything else (retrieval/judge/gate/policy) is intentionally symmetric across types.
+
+---
+
+## Evaluation methodology (quality measurement)
+
+There are two quality loops in v1.
+
+## 1) Operational run metrics (per command)
+
+Each stage emits counters (discovered/processed/accepted/rejected/skipped/failed etc.), which show throughput and immediate quality posture.
+
+Examples:
+
+- `candidates`: missing embeddings, stale marked, members written
+- `judge`: accepted/rejected/skipped classes, invalid responses, veto categories
+- `plan-close`: close vs skip mix and skip-reason distribution
+
+This is the real-time operational signal.
+
+## 2) Sampled cheap-vs-strong audit (`judge-audit` + `report-audit`)
+
+### Sampling policy
+
+- latest fresh, non-empty candidate sets
+- source state=open
+- random uniform sample with deterministic seed
+
+### Two-lane evaluation
+
+- cheap lane (cost-optimized profile)
+- strong lane (higher-quality reference profile)
+- both run through same deterministic gates
+
+### Outcome classes
+
+- **tp**: both accepted, same target
+- **fp**: cheap accepted, strong not accepted
+- **fn**: cheap not accepted, strong accepted
+- **tn**: both not accepted
+- **conflict**: both accepted, different targets
+- **incomplete**: skipped/error lane outcome
+
+### Core metrics
+
+- `precision = tp / (tp + fp)`
+- `recall = tp / (tp + fn)`
+- conflict count (target disagreement risk)
+- incomplete count (runtime/data quality issues)
+
+`report-audit` also supports non-LLM gate simulation to estimate metric trade-offs when tightening:
+
+- rank constraints
+- score minimum
+- gap minimum
+
+---
+
+## Production-readiness gate for close automation
+
+Before broad production apply, policy target is:
+
+- **>= 0.90 precision**
+- on **at least 100 labeled proposed closes**
+
+This is separate from cheap-vs-strong model agreement and should be based on human-labeled close proposals.
+
+---
+
+## Why this flow is safe by design
+
+1. **Type-isolated retrieval** prevents issue/PR cross-contamination.
+2. **State snapshots** (`candidate_sets`) make judging reproducible.
+3. **LLM output is advisory**, not authoritative.
+4. **Deterministic vetoes** block high-confidence but risky decisions.
+5. **Plan/apply split** ensures human review before mutation.
+6. **Per-item audit rows** provide post-hoc explainability and threshold tuning.
+
+---
+
+## Practical end-to-end sequence
+
+```bash
+# 1) keep corpus fresh
+uv run dupcanon refresh --repo <org/repo> --refresh-known
+uv run dupcanon embed --repo <org/repo> --type issue --only-changed
+uv run dupcanon embed --repo <org/repo> --type pr --only-changed
+
+# 2) build retrieval snapshots
+uv run dupcanon candidates --repo <org/repo> --type issue --include open
+uv run dupcanon candidates --repo <org/repo> --type pr --include open
+
+# 3) semantic judgment with policy gates
+uv run dupcanon judge --repo <org/repo> --type issue
+uv run dupcanon judge --repo <org/repo> --type pr
+
+# 4) planning (safe)
+uv run dupcanon plan-close --repo <org/repo> --type issue --dry-run
+uv run dupcanon plan-close --repo <org/repo> --type pr --dry-run
+
+# 5) optional audit loop
+uv run dupcanon judge-audit --repo <org/repo> --type issue --sample-size 100 --seed 42
+uv run dupcanon report-audit --run-id <id> --simulate-gates --gate-gap-min 0.02
+```
+
+---
+
+## Related docs
+
+- `/architecture` — command/state architecture map
+- `/get-started` — setup and first run
+- `docs/internal/operator_runbook_v1.md` — deeper operator playbook
+- `docs/internal/online_duplicate_detection_pipeline_design_doc_v1.md` — online-specific design details
