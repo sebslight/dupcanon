@@ -986,3 +986,271 @@ What comes next
 2. Ensure candidate-set provenance is used consistently for representation-aware comparisons.
 3. Add comparison/report workflow to quantify raw vs intent retrieval deltas before judge-path changes.
 
+### 2026-02-16 — Entry 40 (intent PR diff cap increase to 50k chars)
+
+Today we increased the PR patch context budget used by `analyze-intent` to provide richer implementation evidence in intent extraction.
+
+What we changed
+- Updated `src/dupcanon/intent_card_service.py`:
+  - `_PR_MAX_TOTAL_PATCH_CHARS` changed from `20000` to `50000`.
+- Updated design doc lock values in `docs/internal/intent_card_pipeline_design_doc_v1.md`:
+  - Phase-0 locked default `max total patch chars` changed to `50000`.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Continue Phase 4 retrieval A/B work (`candidates --source raw|intent`).
+2. Monitor extraction latency/cost impact from larger PR patch context windows.
+
+### 2026-02-17 — Entry 41 (fix Logfire token wiring from settings/.env)
+
+Today we fixed a logging configuration gap where Logfire token values loaded via Pydantic settings were not being passed to `logfire.configure`, which could result in no remote logs when `LOGFIRE_TOKEN` existed only in `.env`.
+
+What we changed
+- Added `logfire_token` to `Settings` in `src/dupcanon/config.py` (`validation_alias="LOGFIRE_TOKEN"`).
+- Updated logging setup in `src/dupcanon/logging_config.py`:
+  - `configure_logging` now accepts `logfire_token`.
+  - `_configure_logfire_once` now forwards `token` into `logfire.configure(...)`.
+- Updated CLI bootstrap in `src/dupcanon/cli.py` to pass `settings.logfire_token` into `configure_logging`.
+- Added init visibility in `src/dupcanon/cli.py` for optional remote logging readiness:
+  - `LOGFIRE_TOKEN (optional for remote logs)` check row.
+- Updated tests:
+  - `tests/test_config.py` for `LOGFIRE_TOKEN` load/default behavior.
+  - `tests/test_logging_config.py` for configure kwargs and explicit token forwarding.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Verify remote Logfire ingestion in a real run using `dupcanon init` + one command (`sync`/`analyze-intent`) and confirm events appear in project logs.
+
+### 2026-02-17 — Entry 42 (intent-card structured output hardening for provenance schema errors)
+
+Today we hardened `analyze-intent` extraction against common structured-output drift that was causing `IntentCard` validation failures on `fact_provenance`.
+
+What we changed
+- Updated extraction prompt contract in `src/dupcanon/intent_card_service.py` to explicitly require:
+  - `fact_provenance.fact` must exactly match `evidence_facts` entries,
+  - `fact_provenance.source` must be one of `title|body|diff|file_context`,
+  - never emit file paths/labels (for example `PR_CHANGED_FILES`) as `source`.
+- Added payload normalization before `IntentCard.model_validate(...)` in `src/dupcanon/intent_card_service.py`:
+  - normalizes/coerces non-enum provenance sources into allowed enum values,
+  - canonicalizes provenance facts to normalized evidence facts,
+  - drops provenance rows that cannot be mapped to `evidence_facts`.
+- Kept strict Pydantic validation as final gate; normalization is pre-validation repair only.
+- Added regression test in `tests/test_intent_card_service.py` verifying malformed provenance (`source` file paths and unmapped facts) is normalized into schema-compliant output and persists as `status=fresh`.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Re-run `analyze-intent` on the previously failing PR sample and confirm conversion rate from `failed` to `fresh` improves.
+2. Continue Phase 4 retrieval A/B implementation (`candidates --source raw|intent`).
+
+### 2026-02-17 — Entry 43 (analyze-intent defaults to open items)
+
+Today we updated `analyze-intent` to focus on active work by default, filtering source items to open issues/PRs unless explicitly overridden.
+
+What we changed
+- Added `--state` to `dupcanon analyze-intent` in `src/dupcanon/cli.py` with default `open` (`open|closed|all`).
+- Threaded the selected state filter through `run_analyze_intent(...)` in `src/dupcanon/intent_card_service.py`.
+- Updated DB source-item query in `src/dupcanon/database.py`:
+  - `list_items_for_intent_card_extraction(...)` now accepts `state_filter` (default `open`),
+  - applies `i.state = %s` when filter is not `all`.
+- Updated tests:
+  - `tests/test_cli.py` now checks `analyze-intent --help` includes `--state` and verifies default state passed is `open`.
+  - `tests/test_intent_card_service.py` updated `run_analyze_intent(...)` calls for the new `state_filter` parameter.
+  - `tests/test_database.py` verifies the intent extraction source query includes the open-state filter by default.
+- Updated docs:
+  - `README.md` notes `analyze-intent` default `--state open` behavior.
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md` command signature includes `--state`.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Run `analyze-intent` in a repo with mixed open/closed history and confirm reduced extraction volume aligns with expected open-item counts.
+2. Decide whether `embed --source intent` should mirror open-only defaults or remain all-items for offline analysis.
+
+### 2026-02-17 — Entry 44 (add `--workers` to analyze-intent)
+
+Today we added explicit worker concurrency control for `analyze-intent` so operators can tune extraction throughput the same way as other batch commands.
+
+What we changed
+- Added CLI flag `--workers` to `dupcanon analyze-intent` in `src/dupcanon/cli.py`.
+  - Passed through to service as `worker_concurrency`.
+  - Included in failure artifact context and command summary table output.
+- Updated `run_analyze_intent(...)` in `src/dupcanon/intent_card_service.py`:
+  - accepts `worker_concurrency` override,
+  - defaults to `settings.judge_worker_concurrency` when unset,
+  - validates effective concurrency is `> 0`.
+- Implemented concurrent extraction execution path using `ThreadPoolExecutor` + `as_completed`:
+  - sequential path remains for worker count `1`,
+  - multi-worker path processes items in parallel and preserves per-item failure logging/artifacts/fallback upserts.
+- Added internal helper `_process_intent_source_item(...)` for single-item extraction + persistence + fallback handling.
+- Updated tests:
+  - `tests/test_cli.py` now checks analyze-intent help includes `--workers` and validates worker override propagation.
+  - `tests/test_intent_card_service.py` updated for new required service argument.
+- Updated docs:
+  - `README.md` notes `analyze-intent` supports `--workers N`.
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md` command signature includes `--workers N`.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Benchmark `analyze-intent --workers {1,2,4,8}` on a representative repo and document latency/cost tradeoffs.
+2. Consider introducing a dedicated `DUPCANON_ANALYZE_INTENT_WORKER_CONCURRENCY` setting if operators want independent defaults from `judge`.
+
+### 2026-02-17 — Entry 45 (regression test coverage for analyze-intent state/workers changes)
+
+Today we added targeted regression tests to cover the full behavior changed in recent `analyze-intent` updates (`--state` defaulting and `--workers` concurrency).
+
+What we changed
+- Expanded CLI regression coverage in `tests/test_cli.py`:
+  - verify default `state_filter=open` still passes to service,
+  - verify explicit `--state closed` override passes through,
+  - verify default `worker_concurrency` remains `None` when unset,
+  - keep explicit `--workers` pass-through assertion.
+- Expanded service regression coverage in `tests/test_intent_card_service.py`:
+  - verify `state_filter` is forwarded from service to DB source-item query call,
+  - verify non-positive worker concurrency raises `ValueError`,
+  - verify parallel extraction path (`worker_concurrency=2`) processes multiple items and persists all results.
+- Expanded DB regression coverage in `tests/test_database.py`:
+  - verify `state_filter=all` does not inject `i.state = %s` clause in query,
+  - preserving existing assertion that default behavior includes open-state filtering.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Add a small stress/integration test fixture for mixed issue+PR intent extraction with `--workers > 1` to catch thread-safety regressions earlier.
+2. Evaluate whether a separate analyze-intent default worker setting should be introduced (vs reusing judge worker default).
+
+### 2026-02-17 — Entry 46 (switch OpenAI judge path from Chat Completions to Responses API)
+
+Today we corrected the OpenAI judge/analyze-intent transport to use the Responses API, removing the Chat Completions dependency that was incompatible with non-chat model endpoints and causing 404 endpoint errors in operator runs.
+
+What we changed
+- Updated `src/dupcanon/openai_judge.py`:
+  - replaced `client.chat.completions.create(...)` calls with `client.responses.create(...)`,
+  - removed the temporary legacy `/v1/completions` fallback path,
+  - mapped thinking controls to Responses API format (`reasoning={"effort": ...}`),
+  - moved JSON-output constraint to Responses API text format (`text={"format": {"type": "json_object"}}`),
+  - added Responses-input builder with explicit `system` + `user` roles,
+  - updated response parsing to prefer `response.output_text` and fallback to `response.output[*].content[*].text`.
+- Reworked OpenAI judge tests in `tests/test_openai_judge.py`:
+  - validates request shape for Responses API,
+  - validates reasoning mapping,
+  - validates extraction from `output_text` and structured `output` parts,
+  - validates status-code propagation on API status errors.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Add a small runtime sanity command/example in docs showing a known-good OpenAI Responses model for `analyze-intent`.
+2. Consider fail-fast model capability checks for provider/model mismatches before batch processing begins.
+
+### 2026-02-17 — Entry 47 (normalize blank PR behavior fields in intent extraction)
+
+Today we addressed a recurring `IntentCard` validation failure where extractor outputs included empty strings for PR-required fields (`behavioral_intent`, `change_summary`).
+
+What we changed
+- Updated payload normalization in `src/dupcanon/intent_card_service.py`:
+  - trims/coerces blank `behavioral_intent` / `change_summary` strings to missing values,
+  - for PR cards, deterministically backfills missing values from existing extracted fields:
+    - `behavioral_intent`: preferred from `desired_outcome`, else `problem_statement`, else a fixed fallback,
+    - `change_summary`: preferred from `key_changed_components`, else first evidence fact, else a fixed fallback.
+- Added regression test in `tests/test_intent_card_service.py`:
+  - `test_run_analyze_intent_normalizes_blank_pr_behavior_fields`
+  - verifies PR cards with blank behavior fields now persist as `status=fresh` with non-empty normalized values.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Re-run the previously failing `analyze-intent` batch (`openclaw/openclaw`) and confirm failure rate drops for PR items.
+2. Consider logging concise per-field normalization counters to better quantify model-output drift over time.
+
+### 2026-02-17 — Entry 48 (OpenAI structured outputs for intent extraction via Responses JSON schema)
+
+Today we implemented true OpenAI Structured Outputs for `analyze-intent` by switching the OpenAI extraction path from generic JSON-object mode to strict JSON-schema output on the Responses API.
+
+What we changed
+- Updated `src/dupcanon/openai_judge.py`:
+  - added `judge_with_json_schema(...)` helper that sends:
+    - `text.format.type = "json_schema"`
+    - `text.format.name = ...`
+    - `text.format.schema = ...`
+    - `text.format.strict = true`
+  - refactored `judge(...)` to share the same Responses transport path via internal helper.
+- Updated `src/dupcanon/intent_card_service.py`:
+  - added `_OPENAI_INTENT_CARD_JSON_SCHEMA` covering the full intent-card payload shape,
+  - when provider is `openai`, extraction now calls `judge_with_json_schema(...)` with strict mode,
+  - non-openai providers continue using the existing `judge(...)` flow.
+- Added/updated tests:
+  - `tests/test_openai_judge.py`
+    - regression coverage for structured-output request shape and JSON-schema config,
+  - `tests/test_intent_card_service.py`
+    - verifies `analyze-intent` openai path uses schema-based structured output method.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Re-run `analyze-intent` on `openclaw/openclaw` with OpenAI provider and compare fresh/failed rates before/after schema enforcement.
+2. If needed, tighten schema constraints further (for example per-field max lengths) to better align with `IntentCard` post-validators.
+
+### 2026-02-18 — Entry 49 (Phase 4 foundation: `candidates --source raw|intent`)
+
+Today we implemented source-aware candidate retrieval so operators can run retrieval A/B between raw and intent representations.
+
+What we changed
+- Extended `dupcanon candidates` in `src/dupcanon/cli.py` with:
+  - `--source raw|intent` (default `raw`),
+  - source propagation into service call, failure artifact context, and summary output.
+- Updated retrieval service in `src/dupcanon/candidates_service.py`:
+  - added `source: RepresentationSource` to `run_candidates(...)`,
+  - added intent representation constants (`v1`, `intent-card-v1`),
+  - source-aware source-item discovery and neighbor lookup,
+  - candidate-set writes now persist `representation` + `representation_version` for both modes,
+  - stale-marking/count now applies per representation to avoid cross-source interference.
+- Updated DB layer in `src/dupcanon/database.py`:
+  - `list_candidate_source_items(...)` now supports raw vs intent source selection,
+  - `find_candidate_neighbors(...)` now supports intent-neighbor retrieval via latest fresh `intent_cards` + `intent_embeddings`,
+  - `count_fresh_candidate_sets_for_item(...)` / `mark_candidate_sets_stale_for_item(...)` now accept optional representation filters,
+  - constrained judge and judge-audit candidate-set selection to `representation='raw'` until Phase 5 source-aware judge integration lands.
+- Added/updated tests:
+  - `tests/test_cli.py` for candidates `--source` help/default/propagation,
+  - `tests/test_candidates_service.py` for raw behavior and intent-source propagation,
+  - `tests/test_database.py` for intent-source SQL paths (`list_candidate_source_items`, `find_candidate_neighbors`).
+- Updated docs:
+  - `README.md` key behavior section,
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md` status and Phase 4 implementation notes.
+
+Validation
+- `uv run ruff check src/dupcanon/candidates_service.py src/dupcanon/database.py src/dupcanon/cli.py tests/test_candidates_service.py tests/test_cli.py tests/test_database.py`
+
+What comes next
+1. Run side-by-side retrieval windows (`candidates --source raw` vs `--source intent`) and produce comparison metrics/artifacts for Phase 4 exit criteria.
+2. Implement representation-aware judging (`judge --source raw|intent`) in Phase 5.

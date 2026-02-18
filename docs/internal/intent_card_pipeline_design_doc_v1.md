@@ -1,6 +1,6 @@
 # Intent-Card Representation Pipeline (v1 Proposal)
 
-Status: Phase 3 embedding foundation complete (ready for Phase 4 implementation)
+Status: Phase 4 retrieval source support in progress (`candidates --source` implemented; A/B reporting pending)
 Owner: dupcanon
 Date: 2026-02-15
 
@@ -193,7 +193,7 @@ Use deterministic, bounded context first.
 Phase 0 locked defaults:
 - max changed files: 40
 - max patch chars/file: 2000
-- max total patch chars: 20000
+- max total patch chars: 50000
 - max file-context chars/file: 1200
 - max total file-context chars: 12000
 - skip binaries and huge generated files
@@ -260,7 +260,7 @@ This is required for audit/replay and A/B analysis.
 
 ### New command
 
-- `dupcanon analyze-intent --repo ... [--type ...] [--only-changed] [--provider ...] [--model ...]`
+- `dupcanon analyze-intent --repo ... [--type ...] [--state open|closed|all] [--only-changed] [--provider ...] [--model ...] [--workers N]`
   - extracts + validates + persists cards
   - logs parse/validation failures with artifacts
 
@@ -402,6 +402,14 @@ Implementation notes (2026-02-16)
 **Exit criteria**
 - A/B retrieval metrics available for same time window.
 - Raw path remains stable and reproducible.
+
+Implementation notes (2026-02-18)
+- Added `candidates --source raw|intent` in `src/dupcanon/cli.py` and `src/dupcanon/candidates_service.py`.
+- Retrieval now selects source embeddings by representation:
+  - raw: `public.embeddings`
+  - intent: latest fresh `intent_cards` + `public.intent_embeddings`
+- Candidate-set writes now persist explicit representation provenance for both modes.
+- Judge and judge-audit selection queries are explicitly constrained to raw candidate sets until Phase 5 source-aware judging is implemented.
 
 ### Phase 5 — Judge on intent candidates (flagged)
 
