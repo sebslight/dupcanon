@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from threading import local
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from psycopg import errors as psycopg_errors
 from rich.console import Console
@@ -29,6 +29,7 @@ from dupcanon.judge_runtime import (
 )
 from dupcanon.logging_config import BoundLogger
 from dupcanon.models import (
+    IntentCard,
     ItemType,
     JudgeCandidate,
     JudgeDecision,
@@ -112,6 +113,72 @@ Output constraints:
 - reasoning must be short (<= 240 chars) and mention concrete matching facts.
 - No extra keys.
 """
+
+_SYSTEM_PROMPT_INTENT = """You are a conservative duplicate-triage judge
+for GitHub issues/PRs, using structured intent cards.
+
+Task:
+Given one SOURCE_INTENT_CARD and a list of CANDIDATE_INTENT_CARDS (same repo, same type),
+decide whether SOURCE is a duplicate of exactly one candidate.
+
+Core duplicate definition (strict):
+A duplicate means SOURCE and the selected candidate describe the same specific
+underlying bug/request instance, not merely related area/topic/component.
+
+Evidence priority (highest to lowest):
+1) evidence_facts (+ fact_provenance)
+2) important_signals
+3) scope_boundaries
+4) PR fields (key_changed_components, behavioral_intent, change_summary) when item_type=pr
+5) reported_claims / extractor_inference (treat as weaker evidence)
+
+Hard decision rules:
+- Prefer non-duplicate unless evidence is strong.
+- Select at most one candidate.
+- duplicate_of must be from ALLOWED_CANDIDATE_NUMBERS.
+- If none clearly match, return non-duplicate.
+- Do not use retrieval rank as duplicate evidence by itself.
+- If uncertain, set certainty=\"unsure\" and prefer non-duplicate.
+
+Required duplicate evidence threshold:
+- Mark duplicate only when at least TWO concrete aligned facts are present.
+- Shared subsystem keywords alone are insufficient.
+
+Anti-overlap guardrails:
+- If relationship is subset/superset/follow-up/adjacent hardening/partial overlap,
+  return non-duplicate unless same-instance evidence is explicit.
+
+Uncertainty handling:
+- If insufficient_context=true on source or selected candidate, raise the bar for duplicate.
+- extraction_confidence is advisory; do not treat it as direct duplicate evidence.
+- Conflicting evidence_facts should bias toward non-duplicate.
+
+Output JSON schema:
+{
+  \"is_duplicate\": boolean,
+  \"duplicate_of\": integer,
+  \"confidence\": number,
+  \"reasoning\": string,
+  \"relation\": \"same_instance\" | \"related_followup\" | \"partial_overlap\" | \"different\",
+  \"root_cause_match\": \"same\" | \"adjacent\" | \"different\",
+  \"scope_relation\":
+    \"same_scope\" | \"source_subset\" | \"source_superset\" |
+    \"partial_overlap\" | \"different_scope\",
+  \"path_match\": \"same\" | \"different\" | \"unknown\",
+  \"certainty\": \"sure\" | \"unsure\"
+}
+
+Output constraints:
+- JSON only. No markdown. No extra keys.
+- confidence must be in [0,1].
+- If is_duplicate=false, duplicate_of must be 0.
+- If is_duplicate=true, duplicate_of must be one of ALLOWED_CANDIDATE_NUMBERS.
+- relation must be same_instance when is_duplicate=true.
+- reasoning must be short (<= 240 chars) and mention concrete aligned facts.
+"""
+
+_INTENT_SCHEMA_VERSION = "v1"
+_INTENT_PROMPT_VERSION = "intent-card-v1"
 
 _TITLE_MAX_CHARS = 300
 _BODY_MAX_CHARS = 4000
@@ -292,6 +359,121 @@ def _build_user_prompt(
 
     lines.append("Return JSON only.")
     return "\n".join(lines)
+
+
+def _intent_card_prompt_payload(card: IntentCard) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": card.schema_version,
+        "item_type": card.item_type.value,
+        "problem_statement": card.problem_statement,
+        "desired_outcome": card.desired_outcome,
+        "important_signals": card.important_signals,
+        "scope_boundaries": card.scope_boundaries,
+        "unknowns_and_ambiguities": card.unknowns_and_ambiguities,
+        "evidence_facts": card.evidence_facts,
+        "reported_claims": card.reported_claims,
+        "extractor_inference": card.extractor_inference,
+        "insufficient_context": card.insufficient_context,
+        "missing_info": card.missing_info,
+        "extraction_confidence": card.extraction_confidence,
+    }
+
+    if card.item_type == ItemType.PR:
+        payload["key_changed_components"] = card.key_changed_components
+        payload["behavioral_intent"] = card.behavioral_intent
+        payload["change_summary"] = card.change_summary
+        payload["risk_notes"] = card.risk_notes
+
+    return payload
+
+
+def _build_user_prompt_from_intent_cards(
+    *,
+    source_number: int,
+    source_card: IntentCard,
+    candidates: list[dict[str, Any]],
+    candidate_cards_by_number: dict[int, IntentCard],
+) -> str:
+    allowed_numbers = [int(candidate["number"]) for candidate in candidates]
+
+    candidate_payloads: list[dict[str, Any]] = []
+    for candidate in candidates:
+        number = int(candidate["number"])
+        card = candidate_cards_by_number[number]
+        candidate_payloads.append(
+            {
+                "number": number,
+                "retrieval_rank": int(candidate["rank"]),
+                "state": str(candidate["state"]),
+                "retrieval_score": float(candidate["score"]),
+                "intent_card": _intent_card_prompt_payload(card),
+            }
+        )
+
+    payload = {
+        "source_intent_card": {
+            "number": source_number,
+            "intent_card": _intent_card_prompt_payload(source_card),
+        },
+        "ALLOWED_CANDIDATE_NUMBERS": allowed_numbers,
+        "candidate_intent_cards": candidate_payloads,
+    }
+
+    return "\n".join(
+        [
+            "SOURCE_INTENT_CARD + CANDIDATE_INTENT_CARDS",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            "",
+            "Return JSON only.",
+        ]
+    )
+
+
+def _build_intent_prompt_or_none(
+    *,
+    db: Database,
+    work_item: JudgeWorkItem,
+    candidates: list[dict[str, Any]],
+) -> tuple[str | None, str | None, int]:
+    list_cards = getattr(db, "list_latest_fresh_intent_cards_for_items", None)
+    if not callable(list_cards):
+        return None, "db_missing_intent_card_lookup", 0
+
+    item_ids = [work_item.source_item_id]
+    item_ids.extend(candidate.candidate_item_id for candidate in work_item.candidates)
+
+    cards_by_item_id = cast(
+        dict[int, IntentCard],
+        list_cards(
+            item_ids=item_ids,
+            schema_version=_INTENT_SCHEMA_VERSION,
+            prompt_version=_INTENT_PROMPT_VERSION,
+        ),
+    )
+
+    source_card = cards_by_item_id.get(work_item.source_item_id)
+    if source_card is None:
+        return None, "missing_source_intent_card", 1
+
+    candidate_cards_by_number: dict[int, IntentCard] = {}
+    missing_candidates = 0
+    for candidate in work_item.candidates:
+        card = cards_by_item_id.get(candidate.candidate_item_id)
+        if card is None:
+            missing_candidates += 1
+            continue
+        candidate_cards_by_number[candidate.number] = card
+
+    if missing_candidates > 0:
+        return None, "missing_candidate_intent_card", missing_candidates
+
+    prompt = _build_user_prompt_from_intent_cards(
+        source_number=work_item.source_number,
+        source_card=source_card,
+        candidates=candidates,
+        candidate_cards_by_number=candidate_cards_by_number,
+    )
+    return prompt, None, 0
 
 
 def _parse_judge_decision(*, raw_response: str, candidate_numbers: set[int]) -> JudgeDecision:
@@ -694,11 +876,46 @@ def _judge_single_item(
                 }
             )
 
+        prompt_mode = "raw"
+        system_prompt = _SYSTEM_PROMPT
         user_prompt = _build_user_prompt(
             source_title=work_item.source_title,
             source_body=work_item.source_body,
             candidates=candidate_rows,
         )
+
+        if source == RepresentationSource.INTENT:
+            try:
+                intent_prompt, fallback_reason, missing_card_count = _build_intent_prompt_or_none(
+                    db=db,
+                    work_item=work_item,
+                    candidates=candidate_rows,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "judge.intent_prompt_unavailable",
+                    status="warn",
+                    item_id=work_item.source_number,
+                    item_type=work_item.source_type.value,
+                    source=source.value,
+                    reason="intent_card_lookup_failed",
+                    error_class=type(exc).__name__,
+                )
+            else:
+                if intent_prompt is not None:
+                    prompt_mode = "intent"
+                    system_prompt = _SYSTEM_PROMPT_INTENT
+                    user_prompt = intent_prompt
+                else:
+                    logger.info(
+                        "judge.intent_prompt_fallback",
+                        status="skip",
+                        item_id=work_item.source_number,
+                        item_type=work_item.source_type.value,
+                        source=source.value,
+                        reason=fallback_reason,
+                        missing_intent_cards=missing_card_count,
+                    )
 
         client_model = normalize_judge_client_model(
             provider=normalized_provider,
@@ -710,7 +927,7 @@ def _judge_single_item(
             model=client_model,
             thinking_level=thinking_level,
         )
-        raw_response = client.judge(system_prompt=_SYSTEM_PROMPT, user_prompt=user_prompt)
+        raw_response = client.judge(system_prompt=system_prompt, user_prompt=user_prompt)
 
         try:
             decision = _parse_judge_decision(
@@ -729,6 +946,7 @@ def _judge_single_item(
                     "item_id": work_item.source_number,
                     "item_type": work_item.source_type.value,
                     "candidate_set_id": work_item.candidate_set_id,
+                    "prompt_mode": prompt_mode,
                     "error_class": type(parse_exc).__name__,
                     "error": str(parse_exc),
                     "raw_response": raw_response,
@@ -907,6 +1125,7 @@ def _judge_single_item(
                     "item_id": work_item.source_number,
                     "item_type": work_item.source_type.value,
                     "candidate_set_id": work_item.candidate_set_id,
+                    "prompt_mode": prompt_mode,
                     "error_class": "ValueError",
                     "error": "duplicate_of candidate number was not in candidate set",
                     "raw_response": raw_response,

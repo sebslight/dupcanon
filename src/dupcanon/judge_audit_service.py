@@ -42,6 +42,12 @@ from dupcanon.judge_runtime import (
 from dupcanon.judge_runtime import (
     parse_judge_decision as _parse_judge_decision,
 )
+from dupcanon.judge_service import (
+    _SYSTEM_PROMPT_INTENT as _SYSTEM_PROMPT_INTENT,
+)
+from dupcanon.judge_service import (
+    _build_intent_prompt_or_none as _build_intent_prompt_or_none,
+)
 from dupcanon.logging_config import BoundLogger
 from dupcanon.models import (
     ItemType,
@@ -108,6 +114,8 @@ def _judge_once(
     work_item: JudgeWorkItem,
     debug_rpc: bool,
     debug_rpc_sink: Any | None,
+    system_prompt_override: str | None = None,
+    user_prompt_override: str | None = None,
 ) -> _AuditDecisionResult:
     if not work_item.candidates:
         return _AuditDecisionResult(
@@ -146,11 +154,16 @@ def _judge_once(
             }
         )
 
+    system_prompt = _SYSTEM_PROMPT
     user_prompt = _build_user_prompt(
         source_title=work_item.source_title,
         source_body=work_item.source_body,
         candidates=candidate_rows,
     )
+
+    if system_prompt_override is not None and user_prompt_override is not None:
+        system_prompt = system_prompt_override
+        user_prompt = user_prompt_override
 
     client_model = normalize_judge_client_model(provider=provider, model=model)
     client = _get_thread_local_judge_client(
@@ -161,7 +174,7 @@ def _judge_once(
         codex_debug=debug_rpc,
         codex_debug_sink=debug_rpc_sink,
     )
-    raw_response = client.judge(system_prompt=_SYSTEM_PROMPT, user_prompt=user_prompt)
+    raw_response = client.judge(system_prompt=system_prompt, user_prompt=user_prompt)
 
     try:
         decision = _parse_judge_decision(
@@ -301,6 +314,8 @@ def _persist_failure_artifact(
 
 def _process_work_item(
     *,
+    db: Database,
+    source: RepresentationSource,
     work_item: JudgeWorkItem,
     min_edge: float,
     cheap_provider: str,
@@ -315,6 +330,36 @@ def _process_work_item(
     debug_rpc_sink: Any | None,
 ) -> _AuditItemResult:
     try:
+        system_prompt_override: str | None = None
+        user_prompt_override: str | None = None
+
+        if source == RepresentationSource.INTENT:
+            candidate_rows: list[dict[str, Any]] = []
+            for candidate in work_item.candidates:
+                candidate_rows.append(
+                    {
+                        "number": candidate.number,
+                        "rank": candidate.rank,
+                        "state": candidate.state.value,
+                        "score": candidate.score,
+                        "title": candidate.title,
+                        "body": candidate.body or "",
+                    }
+                )
+
+            try:
+                intent_prompt, _, _ = _build_intent_prompt_or_none(
+                    db=db,
+                    work_item=work_item,
+                    candidates=candidate_rows,
+                )
+            except Exception:
+                intent_prompt = None
+
+            if intent_prompt is not None:
+                system_prompt_override = _SYSTEM_PROMPT_INTENT
+                user_prompt_override = intent_prompt
+
         cheap_result = _judge_once(
             provider=cheap_provider,
             model=cheap_model,
@@ -324,6 +369,8 @@ def _process_work_item(
             work_item=work_item,
             debug_rpc=debug_rpc,
             debug_rpc_sink=debug_rpc_sink,
+            system_prompt_override=system_prompt_override,
+            user_prompt_override=user_prompt_override,
         )
         strong_result = _judge_once(
             provider=strong_provider,
@@ -334,6 +381,8 @@ def _process_work_item(
             work_item=work_item,
             debug_rpc=debug_rpc,
             debug_rpc_sink=debug_rpc_sink,
+            system_prompt_override=system_prompt_override,
+            user_prompt_override=user_prompt_override,
         )
         outcome_class = _classify_outcome(cheap=cheap_result, strong=strong_result)
         return _AuditItemResult(
@@ -631,6 +680,8 @@ def run_judge_audit(
                         item_type=work_item.source_type.value,
                     )
                 result = _process_work_item(
+                    db=db,
+                    source=source,
                     work_item=work_item,
                     min_edge=min_edge,
                     cheap_provider=normalized_cheap_provider,
@@ -659,6 +710,8 @@ def run_judge_audit(
                         )
                     future = executor.submit(
                         _process_work_item,
+                        db=db,
+                        source=source,
                         work_item=work_item,
                         min_edge=min_edge,
                         cheap_provider=normalized_cheap_provider,

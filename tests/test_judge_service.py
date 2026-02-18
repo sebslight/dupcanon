@@ -10,6 +10,7 @@ import dupcanon.judge_service as judge_service
 from dupcanon.config import Settings, load_settings
 from dupcanon.logging_config import get_logger
 from dupcanon.models import (
+    IntentCard,
     ItemType,
     JudgeCandidate,
     JudgeWorkItem,
@@ -210,6 +211,140 @@ def test_run_judge_passes_source_to_database(monkeypatch) -> None:
     assert captured["list_source"] == RepresentationSource.INTENT
     assert captured["has_source"] == RepresentationSource.INTENT
     assert captured["insert_source"] == RepresentationSource.INTENT
+
+
+def test_run_judge_uses_intent_prompt_when_cards_available(monkeypatch) -> None:
+    captured: dict[str, object] = {"system_prompt": None, "user_prompt": None}
+
+    source_item_id = 3001
+    candidate_item_id = 4001
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_candidate_sets_for_judging(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            allow_stale: bool,
+            source: RepresentationSource,
+        ):
+            return [
+                JudgeWorkItem(
+                    candidate_set_id=77,
+                    candidate_set_status="fresh",
+                    source_item_id=source_item_id,
+                    source_number=501,
+                    source_type=ItemType.ISSUE,
+                    source_state=StateFilter.OPEN,
+                    source_title="exec approvals still required despite ask=off and security=full",
+                    source_body=(
+                        "Config tools.exec.security=full and tools.exec.ask=off is set. "
+                        "Running `ls` still asks for approval and times out. "
+                        "Repro: set config, restart, execute command; expected no approval."
+                    ),
+                    candidates=[
+                        JudgeCandidate(
+                            candidate_item_id=candidate_item_id,
+                            number=9001,
+                            state=StateFilter.OPEN,
+                            title="candidate title",
+                            body="candidate body",
+                            score=0.93,
+                            rank=1,
+                        )
+                    ],
+                )
+            ]
+
+        def list_latest_fresh_intent_cards_for_items(
+            self,
+            *,
+            item_ids: list[int],
+            schema_version: str,
+            prompt_version: str,
+        ) -> dict[int, IntentCard]:
+            assert source_item_id in item_ids
+            assert candidate_item_id in item_ids
+            assert schema_version == "v1"
+            assert prompt_version == "intent-card-v1"
+            return {
+                source_item_id: IntentCard(
+                    item_type=ItemType.ISSUE,
+                    problem_statement="exec approvals still required",
+                    desired_outcome="no approval prompts",
+                    important_signals=["ask=off", "security=full"],
+                    evidence_facts=["approval prompt appears on ls"],
+                    extraction_confidence=0.95,
+                ),
+                candidate_item_id: IntentCard(
+                    item_type=ItemType.ISSUE,
+                    problem_statement="ask=off still prompts approval",
+                    desired_outcome="commands run without approval",
+                    important_signals=["tools.exec.ask=off"],
+                    evidence_facts=["ls triggers approval prompt"],
+                    extraction_confidence=0.94,
+                ),
+            }
+
+        def has_accepted_duplicate_edge(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            from_item_id: int,
+            source: RepresentationSource,
+        ) -> bool:
+            return False
+
+        def insert_duplicate_edge(self, **kwargs) -> None:
+            return None
+
+        def replace_accepted_duplicate_edge(self, **kwargs) -> None:
+            msg = "replace should not be called"
+            raise AssertionError(msg)
+
+    class FakeOpenAICodexJudgeClient:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            captured["system_prompt"] = system_prompt
+            captured["user_prompt"] = user_prompt
+            return (
+                '{"is_duplicate": true, "duplicate_of": 9001, '
+                '"confidence": 0.95, "reasoning": "Same intent facts."}'
+            )
+
+    monkeypatch.setattr(judge_service, "Database", FakeDatabase)
+    monkeypatch.setattr(judge_service, "OpenAICodexJudgeClient", FakeOpenAICodexJudgeClient)
+
+    stats = judge_service.run_judge(
+        settings=Settings(supabase_db_url="postgresql://localhost/db"),
+        repo_value="org/repo",
+        item_type=ItemType.ISSUE,
+        provider="openai-codex",
+        model="gpt-5.1-codex-mini",
+        min_edge=0.85,
+        allow_stale=False,
+        rejudge=False,
+        worker_concurrency=1,
+        source=RepresentationSource.INTENT,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.accepted_edges == 1
+    system_prompt = str(captured.get("system_prompt") or "")
+    user_prompt = str(captured.get("user_prompt") or "")
+    assert "structured intent cards" in system_prompt
+    assert "SOURCE_INTENT_CARD" in user_prompt
+    assert "candidate_intent_cards" in user_prompt
 
 
 def test_run_judge_skips_closed_source_items(monkeypatch) -> None:

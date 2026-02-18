@@ -489,6 +489,45 @@ class Database:
             updated_at=cast(datetime, row["updated_at"]),
         )
 
+    def list_latest_fresh_intent_cards_for_items(
+        self,
+        *,
+        item_ids: list[int],
+        schema_version: str,
+        prompt_version: str,
+    ) -> dict[int, IntentCard]:
+        if not item_ids:
+            return {}
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select distinct on (ic.item_id)
+                    ic.item_id,
+                    ic.card_json
+                from public.intent_cards ic
+                where
+                    ic.item_id = any(%s)
+                    and ic.schema_version = %s
+                    and ic.prompt_version = %s
+                    and ic.status = 'fresh'
+                order by ic.item_id asc, ic.created_at desc, ic.id desc
+                """,
+                (item_ids, schema_version, prompt_version),
+            )
+            rows = cur.fetchall()
+
+        result: dict[int, IntentCard] = {}
+        for row in rows:
+            item_id = int(row["item_id"])
+            card_payload = row.get("card_json")
+            if not isinstance(card_payload, dict):
+                msg = "invalid intent_cards.card_json payload"
+                raise DatabaseError(msg)
+            result[item_id] = IntentCard.model_validate(card_payload)
+
+        return result
+
     def list_items_for_intent_card_extraction(
         self,
         *,
