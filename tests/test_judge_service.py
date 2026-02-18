@@ -347,6 +347,84 @@ def test_run_judge_uses_intent_prompt_when_cards_available(monkeypatch) -> None:
     assert "candidate_intent_cards" in user_prompt
 
 
+def test_run_judge_intent_falls_back_to_raw_prompt_when_cards_unavailable(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {"system_prompt": None, "user_prompt": None}
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_candidate_sets_for_judging(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            allow_stale: bool,
+            source: RepresentationSource,
+        ):
+            return [_work_item(source_item_id=5555)]
+
+        def has_accepted_duplicate_edge(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            from_item_id: int,
+            source: RepresentationSource,
+        ) -> bool:
+            return False
+
+        def insert_duplicate_edge(self, **kwargs) -> None:
+            return None
+
+        def replace_accepted_duplicate_edge(self, **kwargs) -> None:
+            msg = "replace should not be called"
+            raise AssertionError(msg)
+
+    class FakeOpenAICodexJudgeClient:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            captured["system_prompt"] = system_prompt
+            captured["user_prompt"] = user_prompt
+            return (
+                '{"is_duplicate": true, "duplicate_of": 9001, '
+                '"confidence": 0.95, "reasoning": "Same raw evidence."}'
+            )
+
+    monkeypatch.setattr(judge_service, "Database", FakeDatabase)
+    monkeypatch.setattr(judge_service, "OpenAICodexJudgeClient", FakeOpenAICodexJudgeClient)
+
+    stats = judge_service.run_judge(
+        settings=Settings(supabase_db_url="postgresql://localhost/db"),
+        repo_value="org/repo",
+        item_type=ItemType.ISSUE,
+        provider="openai-codex",
+        model="gpt-5.1-codex-mini",
+        min_edge=0.85,
+        allow_stale=False,
+        rejudge=False,
+        worker_concurrency=1,
+        source=RepresentationSource.INTENT,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.accepted_edges == 1
+    system_prompt = str(captured.get("system_prompt") or "")
+    user_prompt = str(captured.get("user_prompt") or "")
+    assert "structured intent cards" not in system_prompt
+    assert "Given one SOURCE item" in system_prompt
+    assert "SOURCE_INTENT_CARD" not in user_prompt
+    assert "SOURCE" in user_prompt
+
+
 def test_run_judge_skips_closed_source_items(monkeypatch) -> None:
     class FakeDatabase:
         def __init__(self, db_url: str) -> None:

@@ -373,6 +373,110 @@ def test_run_judge_audit_uses_intent_prompt_when_cards_available(monkeypatch) ->
     assert all("SOURCE_INTENT_CARD" in prompt for prompt in user_prompts)
 
 
+def test_run_judge_audit_intent_falls_back_to_raw_prompt_when_cards_unavailable(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {
+        "system_prompts": [],
+        "user_prompts": [],
+    }
+
+    work_item = _work_item(source_item_id=1, source_number=101)
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_candidate_sets_for_judge_audit(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            sample_size: int,
+            sample_seed: int,
+            source: RepresentationSource,
+        ):
+            return [work_item]
+
+        def list_latest_fresh_intent_cards_for_items(
+            self,
+            *,
+            item_ids: list[int],
+            schema_version: str,
+            prompt_version: str,
+        ) -> dict[int, IntentCard]:
+            return {}
+
+        def create_judge_audit_run(self, **kwargs) -> int:
+            return 323
+
+        def insert_judge_audit_run_item(self, **kwargs) -> None:
+            return None
+
+        def complete_judge_audit_run(self, **kwargs) -> None:
+            return None
+
+    class FakeJudgeClient:
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            system_prompts = captured["system_prompts"]
+            user_prompts = captured["user_prompts"]
+            assert isinstance(system_prompts, list)
+            assert isinstance(user_prompts, list)
+            system_prompts.append(system_prompt)
+            user_prompts.append(user_prompt)
+            return (
+                '{"is_duplicate": false, "duplicate_of": 0, '
+                '"confidence": 0.2, "reasoning": "Different."}'
+            )
+
+    monkeypatch.setattr(judge_audit_service, "Database", FakeDatabase)
+    monkeypatch.setattr(
+        judge_audit_service,
+        "_get_thread_local_judge_client",
+        lambda **kwargs: FakeJudgeClient(),
+    )
+
+    stats = judge_audit_service.run_judge_audit(
+        settings=Settings(
+            supabase_db_url="postgresql://localhost/db",
+            gemini_api_key="gemini-key",
+            openai_api_key="openai-key",
+        ),
+        repo_value="org/repo",
+        item_type=ItemType.ISSUE,
+        sample_size=1,
+        sample_seed=42,
+        min_edge=0.85,
+        cheap_provider="gemini",
+        cheap_model="gemini-3-flash-preview",
+        strong_provider="openai",
+        strong_model="gpt-5-mini",
+        cheap_thinking_level=None,
+        strong_thinking_level=None,
+        worker_concurrency=1,
+        verbose=False,
+        debug_rpc=False,
+        source=RepresentationSource.INTENT,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.audit_run_id == 323
+
+    system_prompts = captured["system_prompts"]
+    user_prompts = captured["user_prompts"]
+    assert isinstance(system_prompts, list)
+    assert isinstance(user_prompts, list)
+    assert len(system_prompts) == 2
+    assert len(user_prompts) == 2
+    assert all("structured intent cards" not in prompt for prompt in system_prompts)
+    assert all("Given one SOURCE item" in prompt for prompt in system_prompts)
+    assert all("SOURCE_INTENT_CARD" not in prompt for prompt in user_prompts)
+
+
 def test_judge_audit_judge_once_vetoes_small_candidate_gap(monkeypatch) -> None:
     work_item = JudgeWorkItem(
         candidate_set_id=77,
