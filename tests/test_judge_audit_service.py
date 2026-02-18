@@ -5,7 +5,13 @@ from rich.console import Console
 import dupcanon.judge_audit_service as judge_audit_service
 from dupcanon.config import Settings
 from dupcanon.logging_config import get_logger
-from dupcanon.models import ItemType, JudgeCandidate, JudgeWorkItem, StateFilter
+from dupcanon.models import (
+    ItemType,
+    JudgeCandidate,
+    JudgeWorkItem,
+    RepresentationSource,
+    StateFilter,
+)
 
 
 def _work_item(
@@ -168,6 +174,84 @@ def test_run_judge_audit_target_disagreement_can_become_fp_with_gap_guardrail(
     assert isinstance(rows, list)
     assert len(rows) == 1
     assert rows[0]["outcome_class"] == "fp"
+
+
+def test_run_judge_audit_passes_source_to_database(monkeypatch) -> None:
+    captured: dict[str, object] = {"list_source": None, "run_source": None}
+
+    work_item = _work_item(source_item_id=1, source_number=101)
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_candidate_sets_for_judge_audit(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            sample_size: int,
+            sample_seed: int,
+            source: RepresentationSource,
+        ):
+            captured["list_source"] = source
+            return [work_item]
+
+        def create_judge_audit_run(self, **kwargs) -> int:
+            captured["run_source"] = kwargs.get("source")
+            return 321
+
+        def insert_judge_audit_run_item(self, **kwargs) -> None:
+            return None
+
+        def complete_judge_audit_run(self, **kwargs) -> None:
+            return None
+
+    class FakeJudgeClient:
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            return (
+                '{"is_duplicate": false, "duplicate_of": 0, '
+                '"confidence": 0.2, "reasoning": "Different."}'
+            )
+
+    monkeypatch.setattr(judge_audit_service, "Database", FakeDatabase)
+    monkeypatch.setattr(
+        judge_audit_service,
+        "_get_thread_local_judge_client",
+        lambda **kwargs: FakeJudgeClient(),
+    )
+
+    stats = judge_audit_service.run_judge_audit(
+        settings=Settings(
+            supabase_db_url="postgresql://localhost/db",
+            gemini_api_key="gemini-key",
+            openai_api_key="openai-key",
+        ),
+        repo_value="org/repo",
+        item_type=ItemType.ISSUE,
+        sample_size=1,
+        sample_seed=42,
+        min_edge=0.85,
+        cheap_provider="gemini",
+        cheap_model="gemini-3-flash-preview",
+        strong_provider="openai",
+        strong_model="gpt-5-mini",
+        cheap_thinking_level=None,
+        strong_thinking_level=None,
+        worker_concurrency=1,
+        verbose=False,
+        debug_rpc=False,
+        source=RepresentationSource.INTENT,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.audit_run_id == 321
+    assert captured["list_source"] == RepresentationSource.INTENT
+    assert captured["run_source"] == RepresentationSource.INTENT
 
 
 def test_judge_audit_judge_once_vetoes_small_candidate_gap(monkeypatch) -> None:

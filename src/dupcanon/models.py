@@ -574,6 +574,7 @@ class JudgeAuditRunReport(BaseModel):
     sample_size_actual: int
     candidate_set_status: str
     source_state_filter: str
+    representation: RepresentationSource = RepresentationSource.RAW
     min_edge: float
     cheap_provider: str
     cheap_model: str
@@ -778,6 +779,7 @@ class CloseRunRecord(BaseModel):
     item_type: ItemType
     mode: Literal["plan", "apply"]
     min_confidence_close: float
+    representation: RepresentationSource = RepresentationSource.RAW
 
 
 class ClosePlanEntry(BaseModel):

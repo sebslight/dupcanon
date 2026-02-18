@@ -43,7 +43,13 @@ from dupcanon.judge_runtime import (
     parse_judge_decision as _parse_judge_decision,
 )
 from dupcanon.logging_config import BoundLogger
-from dupcanon.models import ItemType, JudgeAuditStats, JudgeWorkItem, RepoRef
+from dupcanon.models import (
+    ItemType,
+    JudgeAuditStats,
+    JudgeWorkItem,
+    RepoRef,
+    RepresentationSource,
+)
 from dupcanon.sync_service import require_postgres_dsn
 from dupcanon.thinking import normalize_thinking_level
 
@@ -362,6 +368,7 @@ def run_judge_audit(
     worker_concurrency: int | None,
     verbose: bool,
     debug_rpc: bool,
+    source: RepresentationSource = RepresentationSource.RAW,
     console: Console,
     logger: BoundLogger,
 ) -> JudgeAuditStats:
@@ -444,6 +451,7 @@ def run_judge_audit(
         worker_concurrency=effective_worker_concurrency,
         verbose=verbose,
         debug_rpc=debug_rpc,
+        source=source.value,
     )
     logger.info("judge_audit.start", status="started")
 
@@ -453,28 +461,55 @@ def run_judge_audit(
         logger.warning("judge_audit.repo_not_found", status="skip")
         return JudgeAuditStats(sample_size_requested=sample_size)
 
-    work_items = db.list_candidate_sets_for_judge_audit(
-        repo_id=repo_id,
-        item_type=item_type,
-        sample_size=sample_size,
-        sample_seed=sample_seed,
-    )
+    if source == RepresentationSource.RAW:
+        work_items = db.list_candidate_sets_for_judge_audit(
+            repo_id=repo_id,
+            item_type=item_type,
+            sample_size=sample_size,
+            sample_seed=sample_seed,
+        )
+    else:
+        work_items = db.list_candidate_sets_for_judge_audit(
+            repo_id=repo_id,
+            item_type=item_type,
+            sample_size=sample_size,
+            sample_seed=sample_seed,
+            source=source,
+        )
 
-    audit_run_id = db.create_judge_audit_run(
-        repo_id=repo_id,
-        item_type=item_type,
-        sample_policy="random_uniform",
-        sample_seed=sample_seed,
-        sample_size_requested=sample_size,
-        sample_size_actual=len(work_items),
-        min_edge=min_edge,
-        cheap_llm_provider=normalized_cheap_provider,
-        cheap_llm_model=cheap_model_name,
-        strong_llm_provider=normalized_strong_provider,
-        strong_llm_model=strong_model_name,
-        created_by=_CREATED_BY,
-        created_at=utc_now(),
-    )
+    if source == RepresentationSource.RAW:
+        audit_run_id = db.create_judge_audit_run(
+            repo_id=repo_id,
+            item_type=item_type,
+            sample_policy="random_uniform",
+            sample_seed=sample_seed,
+            sample_size_requested=sample_size,
+            sample_size_actual=len(work_items),
+            min_edge=min_edge,
+            cheap_llm_provider=normalized_cheap_provider,
+            cheap_llm_model=cheap_model_name,
+            strong_llm_provider=normalized_strong_provider,
+            strong_llm_model=strong_model_name,
+            created_by=_CREATED_BY,
+            created_at=utc_now(),
+        )
+    else:
+        audit_run_id = db.create_judge_audit_run(
+            repo_id=repo_id,
+            item_type=item_type,
+            sample_policy="random_uniform",
+            sample_seed=sample_seed,
+            sample_size_requested=sample_size,
+            sample_size_actual=len(work_items),
+            min_edge=min_edge,
+            cheap_llm_provider=normalized_cheap_provider,
+            cheap_llm_model=cheap_model_name,
+            strong_llm_provider=normalized_strong_provider,
+            strong_llm_model=strong_model_name,
+            created_by=_CREATED_BY,
+            created_at=utc_now(),
+            source=source,
+        )
 
     counters: dict[str, int] = {
         "tp": 0,
@@ -519,6 +554,7 @@ def run_judge_audit(
                         "item_id": work_item.source_number,
                         "item_type": work_item.source_type.value,
                         "candidate_set_id": work_item.candidate_set_id,
+                        "source": source.value,
                         "error_class": result.error_class,
                         "error": result.error_message or "unknown",
                     },

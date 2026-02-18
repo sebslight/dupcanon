@@ -7,7 +7,7 @@ from rich.console import Console
 import dupcanon.canonicalize_service as canonicalize_service
 from dupcanon.config import Settings
 from dupcanon.logging_config import get_logger
-from dupcanon.models import CanonicalNode, ItemType, StateFilter
+from dupcanon.models import CanonicalNode, ItemType, RepresentationSource, StateFilter
 
 
 def _node(
@@ -149,6 +149,74 @@ def test_select_canonical_falls_back_to_activity_created_number() -> None:
     assert selection.used_open_filter is False
     assert selection.used_english_preference is False
     assert selection.used_maintainer_preference is False
+
+
+def test_run_canonicalize_passes_source_to_database(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_accepted_duplicate_edges(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            source: RepresentationSource,
+        ):
+            captured["edges_source"] = source
+            return [(1, 2)]
+
+        def list_nodes_for_canonicalization(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            source: RepresentationSource,
+        ):
+            captured["nodes_source"] = source
+            return [
+                _node(
+                    item_id=1,
+                    number=101,
+                    state=StateFilter.OPEN,
+                    author_login="alice",
+                    comment_count=2,
+                ),
+                _node(
+                    item_id=2,
+                    number=102,
+                    state=StateFilter.OPEN,
+                    author_login="bob",
+                    comment_count=1,
+                ),
+            ]
+
+    class FakeGitHubClient:
+        def fetch_maintainers(self, *, repo):
+            return set()
+
+    monkeypatch.setattr(canonicalize_service, "Database", FakeDatabase)
+    monkeypatch.setattr(canonicalize_service, "GitHubClient", FakeGitHubClient)
+
+    stats = canonicalize_service.run_canonicalize(
+        settings=Settings(supabase_db_url="postgresql://localhost/db"),
+        repo_value="org/repo",
+        item_type=ItemType.ISSUE,
+        source=RepresentationSource.INTENT,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.accepted_edges == 1
+    edge_source = captured.get("edges_source")
+    node_source = captured.get("nodes_source")
+    assert edge_source == RepresentationSource.INTENT
+    assert node_source == RepresentationSource.INTENT
 
 
 def test_run_canonicalize_aggregates_cluster_stats(monkeypatch) -> None:

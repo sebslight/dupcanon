@@ -1034,6 +1034,7 @@ class Database:
         repo_id: int,
         item_type: ItemType,
         allow_stale: bool,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> list[JudgeWorkItem]:
         status_predicate = (
             "cs.status in ('fresh', 'stale')" if allow_stale else "cs.status = 'fresh'"
@@ -1054,7 +1055,7 @@ class Database:
                 where
                     cs.repo_id = %s
                     and cs.type = %s
-                    and cs.representation = 'raw'
+                    and cs.representation = %s
                     and {status_predicate}
                 order by cs.item_id, {freshness_order}
             )
@@ -1086,7 +1087,7 @@ class Database:
         """
 
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(query, (repo_id, item_type.value))
+            cur.execute(query, (repo_id, item_type.value, source.value))
             rows = cur.fetchall()
 
         grouped: dict[int, dict[str, Any]] = {}
@@ -1140,6 +1141,7 @@ class Database:
         item_type: ItemType,
         sample_size: int,
         sample_seed: int,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> list[JudgeWorkItem]:
         query = """
             with latest_fresh as (
@@ -1151,7 +1153,7 @@ class Database:
                 where
                     cs.repo_id = %s
                     and cs.type = %s
-                    and cs.representation = 'raw'
+                    and cs.representation = %s
                     and cs.status = 'fresh'
                     and src.state = 'open'
                     and exists (
@@ -1195,7 +1197,10 @@ class Database:
         """
 
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(query, (repo_id, item_type.value, sample_seed, sample_size))
+            cur.execute(
+                query,
+                (repo_id, item_type.value, source.value, sample_seed, sample_size),
+            )
             rows = cur.fetchall()
 
         grouped: dict[int, dict[str, Any]] = {}
@@ -1243,6 +1248,7 @@ class Database:
         repo_id: int,
         item_type: ItemType,
         from_item_id: int,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> bool:
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -1254,9 +1260,10 @@ class Database:
                     and type = %s
                     and from_item_id = %s
                     and final_status = 'accepted'
+                    and representation = %s
                 limit 1
                 """,
-                (repo_id, item_type.value, from_item_id),
+                (repo_id, item_type.value, from_item_id, source.value),
             )
             row = cur.fetchone()
 
@@ -1276,6 +1283,7 @@ class Database:
         created_by: str,
         status: str,
         created_at: datetime,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> None:
         final_status: Literal["accepted", "rejected", "skipped"]
         if status == "accepted":
@@ -1302,9 +1310,10 @@ class Database:
                     llm_provider,
                     llm_model,
                     created_by,
-                    created_at
+                    created_at,
+                    representation
                 ) values (
-                    %s, %s, %s, %s, true, %s, %s, %s, 0, %s, %s, %s, %s
+                    %s, %s, %s, %s, true, %s, %s, %s, 0, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -1319,6 +1328,7 @@ class Database:
                     llm_model,
                     created_by,
                     created_at,
+                    source.value,
                 ),
             )
 
@@ -1345,6 +1355,7 @@ class Database:
         llm_model: str,
         created_by: str,
         created_at: datetime,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> None:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
@@ -1369,10 +1380,12 @@ class Database:
                     llm_provider,
                     llm_model,
                     created_by,
-                    created_at
+                    created_at,
+                    representation
                 ) values (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s
                 )
                 """,
                 (
@@ -1396,6 +1409,7 @@ class Database:
                     llm_model,
                     created_by,
                     created_at,
+                    source.value,
                 ),
             )
 
@@ -1412,6 +1426,7 @@ class Database:
         llm_model: str,
         created_by: str,
         created_at: datetime,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> None:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
@@ -1424,8 +1439,9 @@ class Database:
                     and type = %s
                     and from_item_id = %s
                     and final_status = 'accepted'
+                    and representation = %s
                 """,
-                (repo_id, item_type.value, from_item_id),
+                (repo_id, item_type.value, from_item_id, source.value),
             )
 
     def list_accepted_duplicate_edges(
@@ -1433,6 +1449,7 @@ class Database:
         *,
         repo_id: int,
         item_type: ItemType,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> list[tuple[int, int]]:
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -1443,9 +1460,10 @@ class Database:
                     repo_id = %s
                     and type = %s
                     and final_status = 'accepted'
+                    and representation = %s
                 order by id asc
                 """,
-                (repo_id, item_type.value),
+                (repo_id, item_type.value, source.value),
             )
             rows = cur.fetchall()
 
@@ -1459,6 +1477,7 @@ class Database:
         *,
         repo_id: int,
         item_type: ItemType,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> list[AcceptedDuplicateEdge]:
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -1469,9 +1488,10 @@ class Database:
                     repo_id = %s
                     and type = %s
                     and final_status = 'accepted'
+                    and representation = %s
                 order by id asc
                 """,
-                (repo_id, item_type.value),
+                (repo_id, item_type.value, source.value),
             )
             rows = cur.fetchall()
 
@@ -1491,6 +1511,7 @@ class Database:
         *,
         repo_id: int,
         item_type: ItemType,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> list[PlanCloseItem]:
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -1498,11 +1519,19 @@ class Database:
                 with edge_items as (
                     select from_item_id as item_id
                     from public.judge_decisions
-                    where repo_id = %s and type = %s and final_status = 'accepted'
+                    where
+                        repo_id = %s
+                        and type = %s
+                        and final_status = 'accepted'
+                        and representation = %s
                     union
                     select to_item_id as item_id
                     from public.judge_decisions
-                    where repo_id = %s and type = %s and final_status = 'accepted'
+                    where
+                        repo_id = %s
+                        and type = %s
+                        and final_status = 'accepted'
+                        and representation = %s
                 )
                 select
                     i.id as item_id,
@@ -1519,7 +1548,14 @@ class Database:
                 join public.items i on i.id = e.item_id
                 order by i.id asc
                 """,
-                (repo_id, item_type.value, repo_id, item_type.value),
+                (
+                    repo_id,
+                    item_type.value,
+                    source.value,
+                    repo_id,
+                    item_type.value,
+                    source.value,
+                ),
             )
             rows = cur.fetchall()
 
@@ -1572,6 +1608,7 @@ class Database:
         strong_llm_model: str,
         created_by: str,
         created_at: datetime,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> int:
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -1590,10 +1627,11 @@ class Database:
                     strong_llm_model,
                     status,
                     created_by,
-                    created_at
+                    created_at,
+                    representation
                 ) values (
                     %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, 'running', %s, %s
+                    %s, %s, %s, %s, 'running', %s, %s, %s
                 )
                 returning id
                 """,
@@ -1611,6 +1649,7 @@ class Database:
                     strong_llm_model,
                     created_by,
                     created_at,
+                    source.value,
                 ),
             )
             row = cur.fetchone()
@@ -1763,6 +1802,7 @@ class Database:
                     j.sample_size_actual,
                     j.candidate_set_status,
                     j.source_state_filter,
+                    j.representation,
                     j.min_edge,
                     j.cheap_llm_provider,
                     j.cheap_llm_model,
@@ -1807,6 +1847,7 @@ class Database:
             sample_size_actual=int(row["sample_size_actual"]),
             candidate_set_status=str(row["candidate_set_status"]),
             source_state_filter=str(row["source_state_filter"]),
+            representation=RepresentationSource(str(row["representation"])),
             min_edge=float(row["min_edge"]),
             cheap_provider=str(row["cheap_llm_provider"]),
             cheap_model=str(row["cheap_llm_model"]),
@@ -2045,6 +2086,7 @@ class Database:
         min_confidence_close: float,
         created_by: str,
         created_at: datetime,
+        representation: RepresentationSource = RepresentationSource.RAW,
     ) -> int:
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -2055,9 +2097,10 @@ class Database:
                     mode,
                     min_confidence_close,
                     created_by,
-                    created_at
+                    created_at,
+                    representation
                 ) values (
-                    %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s
                 )
                 returning id
                 """,
@@ -2068,6 +2111,7 @@ class Database:
                     min_confidence_close,
                     created_by,
                     created_at,
+                    representation.value,
                 ),
             )
             row = cur.fetchone()
@@ -2161,7 +2205,8 @@ class Database:
                     r.name,
                     cr.type,
                     cr.mode,
-                    cr.min_confidence_close
+                    cr.min_confidence_close,
+                    cr.representation
                 from public.close_runs cr
                 join public.repos r
                     on r.id = cr.repo_id
@@ -2187,6 +2232,7 @@ class Database:
             item_type=ItemType(str(row["type"])),
             mode=mode,
             min_confidence_close=float(row["min_confidence_close"]),
+            representation=RepresentationSource(str(row["representation"])),
         )
 
     def list_close_plan_entries(self, *, close_run_id: int) -> list[ClosePlanEntry]:
@@ -2264,6 +2310,7 @@ class Database:
         *,
         repo_id: int,
         item_type: ItemType,
+        source: RepresentationSource = RepresentationSource.RAW,
     ) -> list[CanonicalNode]:
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -2271,11 +2318,19 @@ class Database:
                 with edge_items as (
                     select from_item_id as item_id
                     from public.judge_decisions
-                    where repo_id = %s and type = %s and final_status = 'accepted'
+                    where
+                        repo_id = %s
+                        and type = %s
+                        and final_status = 'accepted'
+                        and representation = %s
                     union
                     select to_item_id as item_id
                     from public.judge_decisions
-                    where repo_id = %s and type = %s and final_status = 'accepted'
+                    where
+                        repo_id = %s
+                        and type = %s
+                        and final_status = 'accepted'
+                        and representation = %s
                 )
                 select
                     i.id as item_id,
@@ -2291,7 +2346,14 @@ class Database:
                 join public.items i on i.id = e.item_id
                 order by i.id asc
                 """,
-                (repo_id, item_type.value, repo_id, item_type.value),
+                (
+                    repo_id,
+                    item_type.value,
+                    source.value,
+                    repo_id,
+                    item_type.value,
+                    source.value,
+                ),
             )
             rows = cur.fetchall()
 

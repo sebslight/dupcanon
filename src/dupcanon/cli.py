@@ -116,6 +116,11 @@ CANDIDATES_WORKERS_OPTION = typer.Option(
     help="Candidates worker concurrency override",
 )
 JUDGE_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
+JUDGE_SOURCE_OPTION = typer.Option(
+    RepresentationSource.RAW,
+    "--source",
+    help="Judge source representation (raw or intent)",
+)
 JUDGE_PROVIDER_OPTION = typer.Option(
     None,
     "--provider",
@@ -140,6 +145,11 @@ JUDGE_WORKERS_OPTION = typer.Option(
     help="Judge worker concurrency override",
 )
 JUDGE_AUDIT_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
+JUDGE_AUDIT_SOURCE_OPTION = typer.Option(
+    RepresentationSource.RAW,
+    "--source",
+    help="Judge-audit source representation (raw or intent)",
+)
 JUDGE_AUDIT_SAMPLE_SIZE_OPTION = typer.Option(
     100,
     "--sample-size",
@@ -280,7 +290,17 @@ DETECT_DUPLICATE_THRESHOLD_OPTION = typer.Option(
 )
 DETECT_JSON_OUT_OPTION = typer.Option(None, "--json-out", help="Write JSON result to this path")
 CANONICAL_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
+CANONICAL_SOURCE_OPTION = typer.Option(
+    RepresentationSource.RAW,
+    "--source",
+    help="Canonicalization source representation (raw or intent)",
+)
 PLAN_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
+PLAN_SOURCE_OPTION = typer.Option(
+    RepresentationSource.RAW,
+    "--source",
+    help="Plan-close source representation (raw or intent)",
+)
 MIN_CLOSE_OPTION = typer.Option(
     0.90,
     "--min-close",
@@ -480,6 +500,7 @@ def _print_judge_audit_report_summary(report: JudgeAuditRunReport) -> None:
     table.add_row("status", report.status)
     table.add_row("sample_policy", report.sample_policy)
     table.add_row("seed", str(report.sample_seed))
+    table.add_row("source", report.representation.value)
     table.add_row("min_edge", str(report.min_edge))
     table.add_row("cheap_provider", report.cheap_provider)
     table.add_row("cheap_model", report.cheap_model)
@@ -1221,6 +1242,7 @@ def candidates(
 def judge(
     repo: str = REPO_OPTION,
     item_type: ItemType = JUDGE_TYPE_OPTION,
+    source: RepresentationSource = JUDGE_SOURCE_OPTION,
     provider: str | None = JUDGE_PROVIDER_OPTION,
     model: str | None = JUDGE_MODEL_OPTION,
     thinking: str | None = JUDGE_THINKING_OPTION,
@@ -1253,6 +1275,7 @@ def judge(
             allow_stale=allow_stale,
             rejudge=rejudge,
             worker_concurrency=workers,
+            source=source,
             console=console,
             logger=logger,
         )
@@ -1265,6 +1288,7 @@ def judge(
             context={
                 "repo": repo,
                 "type": item_type.value,
+                "source": source.value,
                 "provider": effective_provider,
                 "model": effective_model,
                 "thinking": effective_thinking,
@@ -1292,6 +1316,7 @@ def judge(
     table.add_row("provider", effective_provider)
     table.add_row("model", effective_model or "pi-default")
     table.add_row("thinking", effective_thinking or "default")
+    table.add_row("source", source.value)
     table.add_row("min_edge", str(min_edge))
     table.add_row("allow_stale", str(allow_stale))
     table.add_row("rejudge", str(rejudge))
@@ -1307,6 +1332,7 @@ def judge(
 def judge_audit(
     repo: str = REPO_OPTION,
     item_type: ItemType = JUDGE_AUDIT_TYPE_OPTION,
+    source: RepresentationSource = JUDGE_AUDIT_SOURCE_OPTION,
     sample_size: int = JUDGE_AUDIT_SAMPLE_SIZE_OPTION,
     seed: int = JUDGE_AUDIT_SEED_OPTION,
     min_edge: float = JUDGE_AUDIT_MIN_EDGE_OPTION,
@@ -1354,6 +1380,7 @@ def judge_audit(
             strong_model=effective_strong_model,
             strong_thinking_level=effective_strong_thinking,
             worker_concurrency=workers,
+            source=source,
             verbose=verbose,
             debug_rpc=debug_rpc,
             console=console,
@@ -1368,6 +1395,7 @@ def judge_audit(
             context={
                 "repo": repo,
                 "type": item_type.value,
+                "source": source.value,
                 "sample_size": sample_size,
                 "seed": seed,
                 "min_edge": min_edge,
@@ -1401,6 +1429,7 @@ def judge_audit(
     table.add_column("Value")
     table.add_row("sample_size", str(sample_size))
     table.add_row("seed", str(seed))
+    table.add_row("source", source.value)
     table.add_row("min_edge", str(min_edge))
     table.add_row("cheap_provider", effective_cheap_provider)
     table.add_row("cheap_model", effective_cheap_model or "default")
@@ -1654,6 +1683,7 @@ def detect_new(
 def canonicalize(
     repo: str = REPO_OPTION,
     item_type: ItemType = CANONICAL_TYPE_OPTION,
+    source: RepresentationSource = CANONICAL_SOURCE_OPTION,
 ) -> None:
     """Compute canonical item per duplicate cluster."""
     settings, run_id, logger = _bootstrap("canonicalize")
@@ -1663,6 +1693,7 @@ def canonicalize(
             settings=settings,
             repo_value=repo,
             item_type=item_type,
+            source=source,
             console=console,
             logger=logger,
         )
@@ -1675,6 +1706,7 @@ def canonicalize(
             context={
                 "repo": repo,
                 "type": item_type.value,
+                "source": source.value,
             },
         )
         logger.error(
@@ -1692,6 +1724,7 @@ def canonicalize(
     table = Table(title="canonicalize summary")
     table.add_column("Metric")
     table.add_column("Value")
+    table.add_row("source", source.value)
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))
 
@@ -1705,6 +1738,7 @@ def plan_close(
     item_type: ItemType = PLAN_TYPE_OPTION,
     min_close: float = MIN_CLOSE_OPTION,
     maintainers_source: str = MAINTAINERS_SOURCE_OPTION,
+    source: RepresentationSource = PLAN_SOURCE_OPTION,
     dry_run: bool = DRY_RUN_OPTION,
 ) -> None:
     """Build a close plan with guardrails."""
@@ -1717,6 +1751,7 @@ def plan_close(
             item_type=item_type,
             min_close=min_close,
             maintainers_source=maintainers_source,
+            source=source,
             dry_run=dry_run,
             console=console,
             logger=logger,
@@ -1732,6 +1767,7 @@ def plan_close(
                 "type": item_type.value,
                 "min_close": min_close,
                 "maintainers_source": maintainers_source,
+                "source": source.value,
                 "dry_run": dry_run,
             },
         )
@@ -1752,6 +1788,7 @@ def plan_close(
     table.add_column("Value")
     table.add_row("min_close", str(min_close))
     table.add_row("maintainers_source", maintainers_source)
+    table.add_row("source", source.value)
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))
 

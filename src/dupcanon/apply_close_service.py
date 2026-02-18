@@ -91,19 +91,31 @@ def run_apply_close(
             repo=repo_ref.full_name(),
             type=run_record.item_type.value,
             stage="apply_close",
+            source=run_record.representation.value,
         )
         plan_entries = db.list_close_plan_entries(close_run_id=close_run_id)
         init_progress.advance(init_task)
 
         gh = GitHubClient()
-        apply_close_run_id = db.create_close_run(
-            repo_id=run_record.repo_id,
-            item_type=run_record.item_type,
-            mode="apply",
-            min_confidence_close=run_record.min_confidence_close,
-            created_by=_CREATED_BY,
-            created_at=utc_now(),
-        )
+        if run_record.representation.value == "raw":
+            apply_close_run_id = db.create_close_run(
+                repo_id=run_record.repo_id,
+                item_type=run_record.item_type,
+                mode="apply",
+                min_confidence_close=run_record.min_confidence_close,
+                created_by=_CREATED_BY,
+                created_at=utc_now(),
+            )
+        else:
+            apply_close_run_id = db.create_close_run(
+                repo_id=run_record.repo_id,
+                item_type=run_record.item_type,
+                mode="apply",
+                min_confidence_close=run_record.min_confidence_close,
+                created_by=_CREATED_BY,
+                created_at=utc_now(),
+                representation=run_record.representation,
+            )
         init_progress.advance(init_task)
 
         copied_items = db.copy_close_run_items(

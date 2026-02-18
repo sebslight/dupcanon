@@ -12,7 +12,14 @@ from dupcanon.config import Settings
 from dupcanon.database import Database, utc_now
 from dupcanon.github_client import GitHubClient
 from dupcanon.logging_config import BoundLogger
-from dupcanon.models import CanonicalNode, ItemType, PlanCloseStats, RepoRef, StateFilter
+from dupcanon.models import (
+    CanonicalNode,
+    ItemType,
+    PlanCloseStats,
+    RepoRef,
+    RepresentationSource,
+    StateFilter,
+)
 from dupcanon.sync_service import require_postgres_dsn
 
 _CREATED_BY = "dupcanon/plan-close"
@@ -50,6 +57,7 @@ def run_plan_close(
     item_type: ItemType,
     min_close: float,
     maintainers_source: str,
+    source: RepresentationSource = RepresentationSource.RAW,
     dry_run: bool,
     console: Console,
     logger: BoundLogger,
@@ -72,12 +80,14 @@ def run_plan_close(
         repo=repo.full_name(),
         type=item_type.value,
         stage="plan_close",
+        source=source.value,
     )
     logger.info(
         "plan_close.start",
         status="started",
         min_close=min_close,
         maintainers_source=normalized_maintainers_source,
+        source=source.value,
         dry_run=dry_run,
     )
 
@@ -91,12 +101,29 @@ def run_plan_close(
 
     maintainer_logins = {login.lower() for login in gh.fetch_maintainers(repo=repo)}
 
-    edges = db.list_accepted_duplicate_edges_with_confidence(repo_id=repo_id, item_type=item_type)
+    if source == RepresentationSource.RAW:
+        edges = db.list_accepted_duplicate_edges_with_confidence(
+            repo_id=repo_id,
+            item_type=item_type,
+        )
+    else:
+        edges = db.list_accepted_duplicate_edges_with_confidence(
+            repo_id=repo_id,
+            item_type=item_type,
+            source=source,
+        )
     if not edges:
         logger.info("plan_close.no_edges", status="skip")
         return PlanCloseStats(dry_run=dry_run)
 
-    items = db.list_items_for_close_planning(repo_id=repo_id, item_type=item_type)
+    if source == RepresentationSource.RAW:
+        items = db.list_items_for_close_planning(repo_id=repo_id, item_type=item_type)
+    else:
+        items = db.list_items_for_close_planning(
+            repo_id=repo_id,
+            item_type=item_type,
+            source=source,
+        )
     items_by_id = {item.item_id: item for item in items}
     confidence_by_direct_edge = {
         (edge.from_item_id, edge.to_item_id): edge.confidence
@@ -107,14 +134,25 @@ def run_plan_close(
 
     close_run_id: int | None = None
     if not dry_run:
-        close_run_id = db.create_close_run(
-            repo_id=repo_id,
-            item_type=item_type,
-            mode="plan",
-            min_confidence_close=min_close,
-            created_by=_CREATED_BY,
-            created_at=utc_now(),
-        )
+        if source == RepresentationSource.RAW:
+            close_run_id = db.create_close_run(
+                repo_id=repo_id,
+                item_type=item_type,
+                mode="plan",
+                min_confidence_close=min_close,
+                created_by=_CREATED_BY,
+                created_at=utc_now(),
+            )
+        else:
+            close_run_id = db.create_close_run(
+                repo_id=repo_id,
+                item_type=item_type,
+                mode="plan",
+                min_confidence_close=min_close,
+                created_by=_CREATED_BY,
+                created_at=utc_now(),
+                representation=source,
+            )
 
     considered = 0
     close_actions = 0
@@ -230,6 +268,7 @@ def run_plan_close(
                         "stage": "plan_close",
                         "repo": repo.full_name(),
                         "item_type": item_type.value,
+                        "source": source.value,
                         "component_item_ids": component,
                         "min_close": min_close,
                         "dry_run": dry_run,

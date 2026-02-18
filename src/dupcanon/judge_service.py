@@ -35,6 +35,7 @@ from dupcanon.models import (
     JudgeStats,
     JudgeWorkItem,
     RepoRef,
+    RepresentationSource,
     StateFilter,
     normalize_text,
 )
@@ -480,6 +481,7 @@ def _insert_judge_decision_with_fallback(
     llm_provider: str,
     llm_model: str,
     created_at: datetime,
+    source: RepresentationSource,
 ) -> None:
     insert_judge = getattr(db, "insert_judge_decision", None)
     if callable(insert_judge):
@@ -504,6 +506,7 @@ def _insert_judge_decision_with_fallback(
             llm_model=llm_model,
             created_by=_CREATED_BY,
             created_at=created_at,
+            source=source,
         )
         return
 
@@ -526,6 +529,7 @@ def _insert_judge_decision_with_fallback(
             created_by=_CREATED_BY,
             status=final_status,
             created_at=created_at,
+            source=source,
         )
         return
 
@@ -547,6 +551,7 @@ def _record_judge_decision(
     min_edge: float,
     normalized_provider: str,
     judge_model: str,
+    source: RepresentationSource,
 ) -> None:
     reasoning = decision.reasoning
     if veto_reason:
@@ -574,6 +579,7 @@ def _record_judge_decision(
             llm_provider=normalized_provider,
             llm_model=judge_model,
             created_at=utc_now(),
+            source=source,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -624,6 +630,7 @@ def _judge_single_item(
     thinking_level: str | None,
     min_edge: float,
     rejudge: bool,
+    source: RepresentationSource,
     work_item: JudgeWorkItem,
 ) -> _JudgeItemResult:
     stale_sets_used = 1 if work_item.candidate_set_status == "stale" else 0
@@ -651,11 +658,19 @@ def _judge_single_item(
                 stale_sets_used=stale_sets_used,
             )
 
-        has_existing_accepted = db.has_accepted_duplicate_edge(
-            repo_id=repo_id,
-            item_type=item_type,
-            from_item_id=work_item.source_item_id,
-        )
+        if source == RepresentationSource.RAW:
+            has_existing_accepted = db.has_accepted_duplicate_edge(
+                repo_id=repo_id,
+                item_type=item_type,
+                from_item_id=work_item.source_item_id,
+            )
+        else:
+            has_existing_accepted = db.has_accepted_duplicate_edge(
+                repo_id=repo_id,
+                item_type=item_type,
+                from_item_id=work_item.source_item_id,
+                source=source,
+            )
         if has_existing_accepted and not rejudge:
             return _JudgeItemResult(
                 skipped_existing_edge=1,
@@ -750,6 +765,7 @@ def _judge_single_item(
                     llm_provider=normalized_provider,
                     llm_model=judge_model,
                     created_at=utc_now(),
+                    source=source,
                 )
             except Exception as record_exc:  # noqa: BLE001
                 logger.warning(
@@ -799,6 +815,7 @@ def _judge_single_item(
                 min_edge=min_edge,
                 normalized_provider=normalized_provider,
                 judge_model=judge_model,
+                source=source,
             )
             counter_updates = _decision_counter_updates(
                 decision=decision,
@@ -834,6 +851,7 @@ def _judge_single_item(
                 min_edge=min_edge,
                 normalized_provider=normalized_provider,
                 judge_model=judge_model,
+                source=source,
             )
             counter_updates = _decision_counter_updates(
                 decision=decision,
@@ -862,6 +880,7 @@ def _judge_single_item(
                 min_edge=min_edge,
                 normalized_provider=normalized_provider,
                 judge_model=judge_model,
+                source=source,
             )
             counter_updates = _decision_counter_updates(
                 decision=decision,
@@ -923,6 +942,7 @@ def _judge_single_item(
                 min_edge=min_edge,
                 normalized_provider=normalized_provider,
                 judge_model=judge_model,
+                source=source,
             )
             logger.info(
                 "judge.duplicate_veto",
@@ -965,6 +985,7 @@ def _judge_single_item(
                 min_edge=min_edge,
                 normalized_provider=normalized_provider,
                 judge_model=judge_model,
+                source=source,
             )
             logger.info(
                 "judge.duplicate_veto",
@@ -999,6 +1020,7 @@ def _judge_single_item(
                 min_edge=min_edge,
                 normalized_provider=normalized_provider,
                 judge_model=judge_model,
+                source=source,
             )
             counter_updates = _decision_counter_updates(
                 decision=decision,
@@ -1031,6 +1053,7 @@ def _judge_single_item(
                 min_edge=min_edge,
                 normalized_provider=normalized_provider,
                 judge_model=judge_model,
+                source=source,
             )
             counter_updates = _decision_counter_updates(
                 decision=decision,
@@ -1046,18 +1069,33 @@ def _judge_single_item(
 
         try:
             if has_existing_accepted and rejudge:
-                db.replace_accepted_duplicate_edge(
-                    repo_id=repo_id,
-                    item_type=item_type,
-                    from_item_id=work_item.source_item_id,
-                    to_item_id=to_item_id,
-                    confidence=decision.confidence,
-                    reasoning=decision.reasoning,
-                    llm_provider=normalized_provider,
-                    llm_model=judge_model,
-                    created_by=_CREATED_BY,
-                    created_at=utc_now(),
-                )
+                if source == RepresentationSource.RAW:
+                    db.replace_accepted_duplicate_edge(
+                        repo_id=repo_id,
+                        item_type=item_type,
+                        from_item_id=work_item.source_item_id,
+                        to_item_id=to_item_id,
+                        confidence=decision.confidence,
+                        reasoning=decision.reasoning,
+                        llm_provider=normalized_provider,
+                        llm_model=judge_model,
+                        created_by=_CREATED_BY,
+                        created_at=utc_now(),
+                    )
+                else:
+                    db.replace_accepted_duplicate_edge(
+                        repo_id=repo_id,
+                        item_type=item_type,
+                        from_item_id=work_item.source_item_id,
+                        to_item_id=to_item_id,
+                        confidence=decision.confidence,
+                        reasoning=decision.reasoning,
+                        llm_provider=normalized_provider,
+                        llm_model=judge_model,
+                        created_by=_CREATED_BY,
+                        created_at=utc_now(),
+                        source=source,
+                    )
 
             _insert_judge_decision_with_fallback(
                 db=db,
@@ -1080,6 +1118,7 @@ def _judge_single_item(
                 llm_provider=normalized_provider,
                 llm_model=judge_model,
                 created_at=utc_now(),
+                source=source,
             )
         except psycopg_errors.UniqueViolation:
             logger.warning(
@@ -1102,6 +1141,7 @@ def _judge_single_item(
                 min_edge=min_edge,
                 normalized_provider=normalized_provider,
                 judge_model=judge_model,
+                source=source,
             )
             counter_updates = _decision_counter_updates(
                 decision=decision,
@@ -1140,6 +1180,7 @@ def _judge_single_item(
                 "candidate_set_id": work_item.candidate_set_id,
                 "min_edge": min_edge,
                 "rejudge": rejudge,
+                "source": source.value,
                 "error_class": type(exc).__name__,
                 "error": str(exc),
             },
@@ -1185,6 +1226,7 @@ def run_judge(
     console: Console,
     logger: BoundLogger,
     thinking_level: str | None = None,
+    source: RepresentationSource = RepresentationSource.RAW,
 ) -> JudgeStats:
     command_started = perf_counter()
 
@@ -1232,6 +1274,7 @@ def run_judge(
         provider=normalized_provider,
         model=judge_model,
         thinking=normalized_thinking_level,
+        source=source.value,
     )
     logger.info(
         "judge.start",
@@ -1241,6 +1284,7 @@ def run_judge(
         rejudge=rejudge,
         worker_concurrency=effective_worker_concurrency,
         thinking=normalized_thinking_level,
+        source=source.value,
     )
 
     db = Database(db_url)
@@ -1249,11 +1293,19 @@ def run_judge(
         logger.warning("judge.repo_not_found", status="skip")
         return JudgeStats()
 
-    work_items = db.list_candidate_sets_for_judging(
-        repo_id=repo_id,
-        item_type=item_type,
-        allow_stale=allow_stale,
-    )
+    if source == RepresentationSource.RAW:
+        work_items = db.list_candidate_sets_for_judging(
+            repo_id=repo_id,
+            item_type=item_type,
+            allow_stale=allow_stale,
+        )
+    else:
+        work_items = db.list_candidate_sets_for_judging(
+            repo_id=repo_id,
+            item_type=item_type,
+            allow_stale=allow_stale,
+            source=source,
+        )
     open_work_items = [item for item in work_items if item.source_state == StateFilter.OPEN]
     skipped_closed_sources = len(work_items) - len(open_work_items)
     if skipped_closed_sources > 0:
@@ -1266,7 +1318,10 @@ def run_judge(
         logger.info(
             "judge.no_candidate_sets",
             status="skip",
-            hint="run candidates with --include open to build judgeable sets",
+            hint=(
+                f"run candidates with --source {source.value} --include open "
+                "to build judgeable sets"
+            ),
         )
         return JudgeStats(discovered_candidate_sets=0)
 
@@ -1310,6 +1365,7 @@ def run_judge(
                     thinking_level=normalized_thinking_level,
                     min_edge=min_edge,
                     rejudge=rejudge,
+                    source=source,
                     work_item=work_item,
                 )
                 _accumulate_stats(totals=totals, result=result)
@@ -1331,6 +1387,7 @@ def run_judge(
                         thinking_level=normalized_thinking_level,
                         min_edge=min_edge,
                         rejudge=rejudge,
+                        source=source,
                         work_item=work_item,
                     ): work_item
                     for work_item in open_work_items
@@ -1354,6 +1411,7 @@ def run_judge(
                                 "candidate_set_id": work_item.candidate_set_id,
                                 "min_edge": min_edge,
                                 "rejudge": rejudge,
+                                "source": source.value,
                                 "error_class": type(exc).__name__,
                                 "error": str(exc),
                             },

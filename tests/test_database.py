@@ -81,6 +81,56 @@ def test_list_candidate_sets_for_judge_audit_filters_empty_sets(monkeypatch) -> 
     assert "exists" in query
     assert "candidate_set_members" in query
 
+    params = captured.get("params")
+    assert isinstance(params, tuple)
+    assert params[2] == RepresentationSource.RAW.value
+
+
+def test_list_candidate_sets_for_judging_applies_source_filter(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    rows = db.list_candidate_sets_for_judging(
+        repo_id=42,
+        item_type=ItemType.ISSUE,
+        allow_stale=False,
+        source=RepresentationSource.INTENT,
+    )
+
+    assert rows == []
+    query = str(captured.get("query") or "")
+    assert "cs.representation = %s" in query
+
+    params = captured.get("params")
+    assert isinstance(params, tuple)
+    assert params[2] == RepresentationSource.INTENT.value
+
 
 def test_list_judge_audit_disagreements_returns_rows(monkeypatch) -> None:
     captured: dict[str, object] = {}
@@ -164,6 +214,7 @@ def test_get_judge_audit_run_report_returns_row(monkeypatch) -> None:
                 "sample_size_actual": 98,
                 "candidate_set_status": "fresh",
                 "source_state_filter": "open",
+                "representation": "raw",
                 "min_edge": 0.92,
                 "cheap_llm_provider": "openai-codex",
                 "cheap_llm_model": "gpt-5.1-codex-mini",
@@ -200,11 +251,55 @@ def test_get_judge_audit_run_report_returns_row(monkeypatch) -> None:
     assert report.audit_run_id == 7
     assert report.repo == "openclaw/openclaw"
     assert report.status == "completed"
+    assert report.representation == RepresentationSource.RAW
     assert report.cheap_model == "gpt-5.1-codex-mini"
     assert report.strong_model == "gpt-5.3-codex"
 
     query = str(captured.get("query") or "")
     assert "from public.judge_audit_runs" in query
+
+
+def test_get_close_run_record_includes_representation(monkeypatch) -> None:
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            self.query = query
+            self.params = params
+
+        def fetchone(self) -> dict[str, object]:
+            return {
+                "close_run_id": 9,
+                "repo_id": 42,
+                "org": "org",
+                "name": "repo",
+                "type": "issue",
+                "mode": "plan",
+                "min_confidence_close": 0.9,
+                "representation": "intent",
+            }
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    record = db.get_close_run_record(close_run_id=9)
+
+    assert record is not None
+    assert record.representation == RepresentationSource.INTENT
 
 
 def test_list_judge_audit_simulation_rows_returns_rows(monkeypatch) -> None:

@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from dupcanon.cli import _friendly_error_message, app
 from dupcanon.models import (
+    CanonicalizeStats,
     DetectNewResult,
     DetectSource,
     DetectVerdict,
@@ -16,6 +17,7 @@ from dupcanon.models import (
     JudgeAuditSimulationRow,
     JudgeAuditStats,
     JudgeStats,
+    PlanCloseStats,
 )
 
 runner = CliRunner()
@@ -410,6 +412,7 @@ def test_judge_help_includes_core_options() -> None:
     assert "--type" in result.stdout
     assert "--provider" in result.stdout
     assert "--model" in result.stdout
+    assert "--source" in result.stdout
     assert "--min-edge" in result.stdout
     assert "--allow-stale" in result.stdout
     assert "--rejudge" in result.stdout
@@ -421,6 +424,7 @@ def test_judge_audit_help_includes_core_options() -> None:
 
     assert result.exit_code == 0
     assert "--type" in result.stdout
+    assert "--source" in result.stdout
     assert "--sample-size" in result.stdout
     assert "--seed" in result.stdout
     assert "--min-edge" in result.stdout
@@ -431,7 +435,7 @@ def test_judge_audit_help_includes_core_options() -> None:
     assert "--workers" in result.stdout
     assert "--verbose" in result.stdout
     assert "--debug-rpc" in result.stdout
-    assert "show-disagreements" in result.stdout
+    assert "--show-disagreem" in result.stdout
     assert "--disagreements-" in result.stdout
 
 
@@ -486,6 +490,9 @@ def test_judge_defaults_openai_model_when_provider_openai(monkeypatch: pytest.Mo
     assert result.exit_code == 0
     assert captured.get("provider") == "openai"
     assert captured.get("model") == "gpt-5-mini"
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "raw"
 
 
 def test_judge_defaults_gemini_model_when_provider_gemini(
@@ -588,6 +595,35 @@ def test_judge_passes_thinking_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured.get("thinking_level") == "high"
 
 
+def test_judge_passes_source_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_judge(**kwargs):
+        captured.update(kwargs)
+        return JudgeStats()
+
+    monkeypatch.setattr("dupcanon.cli.run_judge", fake_run_judge)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "judge",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--source",
+            "intent",
+        ],
+    )
+
+    assert result.exit_code == 0
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "intent"
+
+
 def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -629,6 +665,9 @@ def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0
     assert captured.get("sample_size") == 25
     assert captured.get("sample_seed") == 7
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "raw"
     assert captured.get("cheap_provider") == "gemini"
     assert captured.get("cheap_thinking_level") == "low"
     assert captured.get("strong_provider") == "openai"
@@ -636,6 +675,36 @@ def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured.get("worker_concurrency") == 3
     assert captured.get("verbose") is True
     assert captured.get("debug_rpc") is True
+
+
+def test_judge_audit_passes_source_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_judge_audit(**kwargs):
+        captured.update(kwargs)
+        return JudgeAuditStats(audit_run_id=12, sample_size_requested=10, sample_size_actual=10)
+
+    monkeypatch.setattr("dupcanon.cli.run_judge_audit", fake_run_judge_audit)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "judge-audit",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--source",
+            "intent",
+            "--no-show-disagreements",
+        ],
+    )
+
+    assert result.exit_code == 0
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "intent"
 
 
 def test_judge_audit_prints_disagreements_when_enabled(
@@ -1168,11 +1237,63 @@ def test_detect_new_json_out_writes_file(
     assert '"number": 123' in content
 
 
+def test_canonicalize_passes_source_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_canonicalize(**kwargs):
+        captured.update(kwargs)
+        return CanonicalizeStats()
+
+    monkeypatch.setattr("dupcanon.cli.run_canonicalize", fake_run_canonicalize)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        ["canonicalize", "--repo", "org/repo", "--type", "issue", "--source", "intent"],
+    )
+
+    assert result.exit_code == 0
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "intent"
+
+
+def test_plan_close_passes_source_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_plan_close(**kwargs):
+        captured.update(kwargs)
+        return PlanCloseStats(dry_run=True)
+
+    monkeypatch.setattr("dupcanon.cli.run_plan_close", fake_run_plan_close)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "plan-close",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--source",
+            "intent",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "intent"
+
+
 def test_canonicalize_help_includes_type() -> None:
     result = runner.invoke(app, ["canonicalize", "--help"])
 
     assert result.exit_code == 0
     assert "--type" in result.stdout
+    assert "--source" in result.stdout
 
 
 def test_plan_close_help_includes_core_options() -> None:
@@ -1182,6 +1303,7 @@ def test_plan_close_help_includes_core_options() -> None:
     assert "--type" in result.stdout
     assert "--min-close" in result.stdout
     assert "--maintainers-source" in result.stdout
+    assert "--source" in result.stdout
     assert "--dry-run" in result.stdout
 
 

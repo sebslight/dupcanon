@@ -9,7 +9,13 @@ from rich.console import Console
 import dupcanon.judge_service as judge_service
 from dupcanon.config import Settings, load_settings
 from dupcanon.logging_config import get_logger
-from dupcanon.models import ItemType, JudgeCandidate, JudgeWorkItem, StateFilter
+from dupcanon.models import (
+    ItemType,
+    JudgeCandidate,
+    JudgeWorkItem,
+    RepresentationSource,
+    StateFilter,
+)
 
 
 def _work_item(
@@ -127,6 +133,83 @@ def test_run_judge_accepts_edge_when_confident(monkeypatch) -> None:
     assert len(inserted) == 1
     assert inserted[0]["status"] == "accepted"
     assert inserted[0]["to_item_id"] == 2001
+
+
+def test_run_judge_passes_source_to_database(monkeypatch) -> None:
+    captured: dict[str, object] = {
+        "list_source": None,
+        "has_source": None,
+        "insert_source": None,
+    }
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_candidate_sets_for_judging(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            allow_stale: bool,
+            source: RepresentationSource,
+        ):
+            captured["list_source"] = source
+            return [_work_item(source_item_id=1999)]
+
+        def has_accepted_duplicate_edge(
+            self,
+            *,
+            repo_id: int,
+            item_type: ItemType,
+            from_item_id: int,
+            source: RepresentationSource,
+        ) -> bool:
+            captured["has_source"] = source
+            return False
+
+        def insert_duplicate_edge(self, **kwargs) -> None:
+            captured["insert_source"] = kwargs.get("source")
+
+        def replace_accepted_duplicate_edge(self, **kwargs) -> None:
+            msg = "replace should not be called"
+            raise AssertionError(msg)
+
+    class FakeOpenAICodexJudgeClient:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+            return (
+                '{"is_duplicate": true, "duplicate_of": 9001, '
+                '"confidence": 0.96, "reasoning": "Same root cause details."}'
+            )
+
+    monkeypatch.setattr(judge_service, "Database", FakeDatabase)
+    monkeypatch.setattr(judge_service, "OpenAICodexJudgeClient", FakeOpenAICodexJudgeClient)
+
+    stats = judge_service.run_judge(
+        settings=Settings(supabase_db_url="postgresql://localhost/db"),
+        repo_value="org/repo",
+        item_type=ItemType.ISSUE,
+        provider="openai-codex",
+        model="gpt-5.1-codex-mini",
+        min_edge=0.85,
+        allow_stale=False,
+        rejudge=False,
+        worker_concurrency=1,
+        source=RepresentationSource.INTENT,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.accepted_edges == 1
+    assert captured["list_source"] == RepresentationSource.INTENT
+    assert captured["has_source"] == RepresentationSource.INTENT
+    assert captured["insert_source"] == RepresentationSource.INTENT
 
 
 def test_run_judge_skips_closed_source_items(monkeypatch) -> None:

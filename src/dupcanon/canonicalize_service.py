@@ -15,7 +15,14 @@ from dupcanon.config import Settings
 from dupcanon.database import Database
 from dupcanon.github_client import GitHubClient
 from dupcanon.logging_config import BoundLogger
-from dupcanon.models import CanonicalizeStats, CanonicalNode, ItemType, RepoRef, StateFilter
+from dupcanon.models import (
+    CanonicalizeStats,
+    CanonicalNode,
+    ItemType,
+    RepoRef,
+    RepresentationSource,
+    StateFilter,
+)
 from dupcanon.sync_service import require_postgres_dsn
 
 
@@ -198,6 +205,7 @@ def run_canonicalize(
     settings: Settings,
     repo_value: str,
     item_type: ItemType,
+    source: RepresentationSource = RepresentationSource.RAW,
     console: Console,
     logger: BoundLogger,
 ) -> CanonicalizeStats:
@@ -206,8 +214,13 @@ def run_canonicalize(
     db_url = require_postgres_dsn(settings.supabase_db_url)
     repo = RepoRef.parse(repo_value)
 
-    logger = logger.bind(repo=repo.full_name(), type=item_type.value, stage="canonicalize")
-    logger.info("canonicalize.start", status="started")
+    logger = logger.bind(
+        repo=repo.full_name(),
+        type=item_type.value,
+        stage="canonicalize",
+        source=source.value,
+    )
+    logger.info("canonicalize.start", status="started", source=source.value)
 
     db = Database(db_url)
     gh = GitHubClient()
@@ -219,12 +232,26 @@ def run_canonicalize(
 
     maintainer_logins = {login.lower() for login in gh.fetch_maintainers(repo=repo)}
 
-    edges = db.list_accepted_duplicate_edges(repo_id=repo_id, item_type=item_type)
+    if source == RepresentationSource.RAW:
+        edges = db.list_accepted_duplicate_edges(repo_id=repo_id, item_type=item_type)
+    else:
+        edges = db.list_accepted_duplicate_edges(
+            repo_id=repo_id,
+            item_type=item_type,
+            source=source,
+        )
     if not edges:
         logger.info("canonicalize.no_edges", status="skip")
         return CanonicalizeStats(accepted_edges=0)
 
-    nodes = db.list_nodes_for_canonicalization(repo_id=repo_id, item_type=item_type)
+    if source == RepresentationSource.RAW:
+        nodes = db.list_nodes_for_canonicalization(repo_id=repo_id, item_type=item_type)
+    else:
+        nodes = db.list_nodes_for_canonicalization(
+            repo_id=repo_id,
+            item_type=item_type,
+            source=source,
+        )
     nodes_by_id = {node.item_id: node for node in nodes}
     components = _components_from_edges(edges)
 
@@ -275,6 +302,7 @@ def run_canonicalize(
                         "stage": "canonicalize",
                         "repo": repo.full_name(),
                         "item_type": item_type.value,
+                        "source": source.value,
                         "component_item_ids": component,
                         "error_class": type(exc).__name__,
                         "error": str(exc),
