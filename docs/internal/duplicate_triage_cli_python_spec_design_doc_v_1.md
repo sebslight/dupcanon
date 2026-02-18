@@ -128,6 +128,7 @@ Single CLI, subcommands. Example name: dupcanon.
 
 - dupcanon judge --repo org/name --type issue|pr [--source raw|intent] [--provider gemini|openai|openrouter|openai-codex] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
   - Reads fresh candidate sets, calls LLM, writes judge_decisions.
+  - `--source intent` uses a structured intent-card judge prompt (falls back to raw prompt when fresh cards are unavailable).
   - Default configured provider/model is OpenAI Codex via `pi` RPC (`openai-codex`, `gpt-5.1-codex-mini`). Gemini/OpenAI/OpenRouter are available as overrides.
   - Model resolution:
     - `--model` overrides everything.
@@ -137,6 +138,7 @@ Single CLI, subcommands. Example name: dupcanon.
 
 - dupcanon judge-audit --repo org/name --type issue|pr [--source raw|intent] [--sample-size 100] [--seed 42] [--min-edge 0.85] [--cheap-provider ...] [--cheap-model ...] [--cheap-thinking ...] [--strong-provider ...] [--strong-model ...] [--strong-thinking ...] [--workers N] [--verbose] [--debug-rpc] [--show-disagreements/--no-show-disagreements] [--disagreements-limit N]
   - Samples latest fresh candidate sets (open source items only) that have at least one candidate member, runs cheap and strong judges on the same sample, and records audit outcomes into `judge_audit_runs` + `judge_audit_run_items`.
+  - `--source intent` uses the same structured intent-card prompt path as `judge --source intent` (with raw fallback when fresh cards are unavailable).
   - Cheap/strong model resolution is independent per lane (`--*-model` override, otherwise lane provider-match with lane env defaults, otherwise provider defaults).
   - Produces immediate confusion-matrix style counts (`tp`, `fp`, `fn`, `tn`) plus `conflict` (both accepted, different target).
   - By default prints a disagreement table (`fp`, `fn`, `conflict`, `incomplete`) with source + cheap/strong decision details; limit defaults to 20 rows.

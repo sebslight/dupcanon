@@ -1342,3 +1342,59 @@ Validation
 What comes next
 1. Run side-by-side end-to-end windows (`judge` → `canonicalize` → `plan-close`) for `--source raw` and `--source intent` and compare close-plan precision proxies.
 2. Add reporting helpers that summarize representation-specific accepted-edge overlap and plan-close deltas for operator review.
+
+### 2026-02-18 — Entry 52 (intent-aware judge prompt for `judge --source intent`)
+
+Today we added a structured intent-card prompt path for judge runs when `--source intent` is selected.
+
+What we changed
+- Updated `src/dupcanon/judge_service.py`:
+  - added an intent-specific system prompt tailored to `IntentCard` fields,
+  - added structured user-prompt assembly from source/candidate intent cards,
+  - kept automatic fallback to the existing raw-text prompt when fresh intent cards are unavailable,
+  - added prompt-mode context to invalid-response artifacts for troubleshooting.
+- Updated DB access in `src/dupcanon/database.py`:
+  - added `list_latest_fresh_intent_cards_for_items(...)` for batched card lookup by item ids.
+- Added/updated tests:
+  - `tests/test_judge_service.py` now verifies the intent prompt path is used when fresh cards are present.
+- Updated docs:
+  - `README.md`
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md`
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Extend the same intent-prompt behavior to `judge-audit --source intent` so audit runs evaluate the same prompt path as production judge runs.
+2. Add explicit prompt-version provenance for judge decisions (raw vs intent prompt versions) for replay comparisons.
+
+### 2026-02-18 — Entry 53 (judge-audit parity: intent prompt path)
+
+Today we aligned `judge-audit --source intent` with the same intent-card prompt path used by `judge --source intent`.
+
+What we changed
+- Updated `src/dupcanon/judge_audit_service.py`:
+  - audit item processing now attempts intent-card prompt construction when `source=intent`,
+  - cheap and strong lanes now consume the same prompt payload per work item,
+  - falls back to the existing raw prompt path when intent cards are unavailable,
+  - preserves existing decision parsing and veto/guardrail logic.
+- Reused judge prompt helpers from `src/dupcanon/judge_service.py` to keep prompt shape and behavior consistent.
+- Added/updated tests:
+  - `tests/test_judge_audit_service.py` now verifies structured intent prompts are used for both cheap/strong lanes when cards are available.
+
+Docs updated
+- `README.md`
+- `docs/internal/intent_card_pipeline_design_doc_v1.md`
+- `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Persist explicit judge prompt provenance fields (prompt family/version) on `judge_decisions` and optionally `judge_audit_run_items` for replay-grade analysis.
+2. Add report-level breakdowns comparing raw vs intent prompt-mode outcomes for sampled audits.

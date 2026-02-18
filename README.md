@@ -72,6 +72,7 @@ Internal deep docs:
 - `candidates` now reports intent skip root causes separately in summary stats (`skipped_missing_fresh_intent_card` vs `skipped_missing_intent_embedding`).
 - `analyze-intent` defaults to open items (`--state open`) to focus extraction on active issues/PRs and supports `--workers N` for extraction concurrency.
 - Judge prompt/parse/veto/runtime logic is centralized in `src/dupcanon/judge_runtime.py` and reused by `judge`, `judge-audit`, and `detect-new`.
+- For `judge --source intent` and `judge-audit --source intent`, judging now uses an intent-card-specific prompt (with automatic fallback to raw prompt when fresh intent cards are unavailable).
 - Canonical selection priority is:
   1. open if any open item exists
   2. English-language preference (title/body heuristic)
