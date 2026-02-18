@@ -126,7 +126,7 @@ Single CLI, subcommands. Example name: dupcanon.
   - With --dry-run: computes candidate stats without DB writes.
   - v1 default clustering retrieval is k=4 with `--include open` (configurable).
 
-- dupcanon judge --repo org/name --type issue|pr [--provider gemini|openai|openrouter|openai-codex] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
+- dupcanon judge --repo org/name --type issue|pr [--source raw|intent] [--provider gemini|openai|openrouter|openai-codex] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--min-edge 0.85] [--allow-stale] [--rejudge] [--workers N]
   - Reads fresh candidate sets, calls LLM, writes judge_decisions.
   - Default configured provider/model is OpenAI Codex via `pi` RPC (`openai-codex`, `gpt-5.1-codex-mini`). Gemini/OpenAI/OpenRouter are available as overrides.
   - Model resolution:
@@ -135,7 +135,7 @@ Single CLI, subcommands. Example name: dupcanon.
     - Otherwise use provider defaults (`gemini-3-flash-preview`, `gpt-5-mini`, `minimax/minimax-m2.5`, `gpt-5.1-codex-mini`).
   - Thinking defaults can be set globally via `DUPCANON_JUDGE_THINKING`.
 
-- dupcanon judge-audit --repo org/name --type issue|pr [--sample-size 100] [--seed 42] [--min-edge 0.85] [--cheap-provider ...] [--cheap-model ...] [--cheap-thinking ...] [--strong-provider ...] [--strong-model ...] [--strong-thinking ...] [--workers N] [--verbose] [--debug-rpc] [--show-disagreements/--no-show-disagreements] [--disagreements-limit N]
+- dupcanon judge-audit --repo org/name --type issue|pr [--source raw|intent] [--sample-size 100] [--seed 42] [--min-edge 0.85] [--cheap-provider ...] [--cheap-model ...] [--cheap-thinking ...] [--strong-provider ...] [--strong-model ...] [--strong-thinking ...] [--workers N] [--verbose] [--debug-rpc] [--show-disagreements/--no-show-disagreements] [--disagreements-limit N]
   - Samples latest fresh candidate sets (open source items only) that have at least one candidate member, runs cheap and strong judges on the same sample, and records audit outcomes into `judge_audit_runs` + `judge_audit_run_items`.
   - Cheap/strong model resolution is independent per lane (`--*-model` override, otherwise lane provider-match with lane env defaults, otherwise provider defaults).
   - Produces immediate confusion-matrix style counts (`tp`, `fp`, `fn`, `tn`) plus `conflict` (both accepted, different target).
@@ -156,10 +156,10 @@ Single CLI, subcommands. Example name: dupcanon.
   - Runs one-item online duplicate detection using the same provider/model/thinking controls as judge.
   - Model resolution matches judge behavior (`--model` override, otherwise configured-provider match, otherwise provider defaults).
 
-- dupcanon canonicalize --repo org/name --type issue|pr
+- dupcanon canonicalize --repo org/name --type issue|pr [--source raw|intent]
   - Computes canonical statistics on the fly from accepted edges (no canonical table materialization in v1).
 
-- dupcanon plan-close --repo org/name --type issue|pr [--min-close 0.90] [--maintainers-source collaborators] [--dry-run]
+- dupcanon plan-close --repo org/name --type issue|pr [--source raw|intent] [--min-close 0.90] [--maintainers-source collaborators] [--dry-run]
   - Produces a close_run and close_run_items for explicit human review.
 
 - dupcanon apply-close --close-run <id> [--yes]
@@ -324,6 +324,7 @@ Why store decisions?
 - min_edge (real not null)
 - llm_provider (text not null)
 - llm_model (text not null)
+- representation (`raw`|`intent`)
 - created_by (text not null)
 - created_at (timestamptz)
 
@@ -332,8 +333,8 @@ Constraints
 - If `model_is_duplicate=true`, `to_item_id` must be non-null.
 
 Cardinality rule (chain-killer)
-- Allow at most one accepted outgoing edge per item:
-  unique (repo_id, type, from_item_id) where final_status='accepted'
+- Allow at most one accepted outgoing edge per item per representation source:
+  unique (repo_id, type, from_item_id, representation) where final_status='accepted'
 
 Rejudge policy (stability)
 - Default: first accepted edge wins.
@@ -353,6 +354,7 @@ judge_audit_runs
 - sample_size_actual
 - candidate_set_status (`fresh` in v1)
 - source_state_filter (`open` in v1)
+- representation (`raw`|`intent`)
 - min_edge
 - cheap_llm_provider, cheap_llm_model
 - strong_llm_provider, strong_llm_model
@@ -382,6 +384,7 @@ close_runs
 - repo_id
 - type
 - mode ('plan'|'apply')
+- representation (`raw`|`intent`)
 - min_confidence_close
 - created_by
 - created_at

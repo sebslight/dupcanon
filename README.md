@@ -59,16 +59,16 @@ Internal deep docs:
 
 ## Key current behavior
 
-- Batch pipeline is DB-first and auditable (`items`, `embeddings`, `candidate_sets`, `judge_decisions`, `close_runs`).
+- Batch pipeline is DB-first and auditable (`items`, `embeddings`, `candidate_sets`, `judge_decisions`, `close_runs`) with explicit representation provenance (`raw` vs `intent`) in candidate/judge/close stages.
 - Apply gate is: reviewed persisted `close_run(mode=plan)` + explicit `--yes`.
 - There is **no approval-file / approve-plan flow** in v1.
 - `refresh` defaults to discovering new items only; use `refresh --refresh-known` to also update known-item metadata.
 - Operational candidate retrieval defaults to open source items (`candidates --source-state open`) and open candidate neighbors (`--include open`) with default clustering `k=4`, `min_score=0.75`.
-- Judge acceptance defaults: `min_edge=0.85`, target must be open, and selected candidate score gap vs best alternate must be `>= 0.015`.
+- Judge acceptance defaults: `min_edge=0.85`, target must be open, and selected candidate score gap vs best alternate must be `>= 0.015`; accepted-edge uniqueness is enforced per source representation.
 - `plan-close` requires a **direct accepted edge** to canonical and `min_close=0.90`, plus maintainer author/assignee protections.
 - `detect-new` is a precision-first online classifier (`duplicate` / `maybe_duplicate` / `not_duplicate`) with stricter duplicate thresholds and downgrade guardrails.
 - In v1, `detect-new` persists source/corpus state (`items`, source `embeddings` when stale) but does not persist online judge outcomes to `judge_decisions`.
-- Intent sidecar foundations are available in shadow mode: `analyze-intent` persists `intent_cards`, `embed --source intent` writes `intent_embeddings`, and `candidates --source raw|intent` enables retrieval A/B while default source remains raw.
+- Intent sidecar foundations are available in shadow mode: `analyze-intent` persists `intent_cards`, `embed --source intent` writes `intent_embeddings`, and source-aware pipeline steps (`candidates|judge|judge-audit|canonicalize|plan-close --source raw|intent`) enable retrieval/decision/planning A/B while defaults remain raw.
 - `candidates` now reports intent skip root causes separately in summary stats (`skipped_missing_fresh_intent_card` vs `skipped_missing_intent_embedding`).
 - `analyze-intent` defaults to open items (`--state open`) to focus extraction on active issues/PRs and supports `--workers N` for extraction concurrency.
 - Judge prompt/parse/veto/runtime logic is centralized in `src/dupcanon/judge_runtime.py` and reused by `judge`, `judge-audit`, and `detect-new`.
@@ -137,15 +137,21 @@ uv run dupcanon sync --repo openclaw/openclaw --since 3d
 uv run dupcanon refresh --repo openclaw/openclaw --refresh-known
 uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed
 uv run dupcanon candidates --repo openclaw/openclaw --type issue --include open
-uv run dupcanon judge --repo openclaw/openclaw --type issue --thinking medium
-uv run dupcanon canonicalize --repo openclaw/openclaw --type issue
+uv run dupcanon judge --repo openclaw/openclaw --type issue --source raw --thinking medium
+uv run dupcanon canonicalize --repo openclaw/openclaw --type issue --source raw
 
 # safe close planning/apply
-uv run dupcanon plan-close --repo openclaw/openclaw --type issue --dry-run
+uv run dupcanon plan-close --repo openclaw/openclaw --type issue --source raw --dry-run
 # persist a reviewable plan when ready:
-# uv run dupcanon plan-close --repo openclaw/openclaw --type issue
+# uv run dupcanon plan-close --repo openclaw/openclaw --type issue --source raw
 # then apply only after review:
 # uv run dupcanon apply-close --close-run <id> --yes
+
+# optional source A/B (intent path)
+# uv run dupcanon candidates --repo openclaw/openclaw --type issue --source intent
+# uv run dupcanon judge --repo openclaw/openclaw --type issue --source intent
+# uv run dupcanon canonicalize --repo openclaw/openclaw --type issue --source intent
+# uv run dupcanon plan-close --repo openclaw/openclaw --type issue --source intent --dry-run
 
 # online single-item path (shadow/suggest)
 uv run dupcanon detect-new --repo openclaw/openclaw --type issue --number 123 --thinking low \
@@ -173,19 +179,22 @@ It runs `dupcanon detect-new` and uploads JSON artifacts (no mutation).
 All LLM-using commands support explicit CLI flags and env-backed defaults.
 
 - `judge`
-  - flags: `--provider`, `--model`, `--thinking`
+  - flags: `--source`, `--provider`, `--model`, `--thinking`
   - env defaults: `DUPCANON_JUDGE_PROVIDER`, `DUPCANON_JUDGE_MODEL`, `DUPCANON_JUDGE_THINKING`
 - `detect-new`
   - flags: `--provider`, `--model`, `--thinking`
   - env defaults: `DUPCANON_JUDGE_PROVIDER`, `DUPCANON_JUDGE_MODEL`, `DUPCANON_JUDGE_THINKING`
 - `judge-audit`
-  - flags: `--cheap-provider`, `--cheap-model`, `--cheap-thinking`, `--strong-provider`, `--strong-model`, `--strong-thinking`, `--show-disagreements/--no-show-disagreements`, `--disagreements-limit`
+  - flags: `--source`, `--cheap-provider`, `--cheap-model`, `--cheap-thinking`, `--strong-provider`, `--strong-model`, `--strong-thinking`, `--show-disagreements/--no-show-disagreements`, `--disagreements-limit`
   - env defaults:
     - `DUPCANON_JUDGE_AUDIT_CHEAP_PROVIDER`, `DUPCANON_JUDGE_AUDIT_CHEAP_MODEL`, `DUPCANON_JUDGE_AUDIT_CHEAP_THINKING`
     - `DUPCANON_JUDGE_AUDIT_STRONG_PROVIDER`, `DUPCANON_JUDGE_AUDIT_STRONG_MODEL`, `DUPCANON_JUDGE_AUDIT_STRONG_THINKING`
 - `report-audit`
   - flags: `--run-id`, `--show-disagreements/--no-show-disagreements`, `--disagreements-limit`, `--simulate-gates`, `--gate-rank-max`, `--gate-score-min`, `--gate-gap-min`, `--simulate-sweep gap`, `--sweep-from`, `--sweep-to`, `--sweep-step`
   - uses persisted `judge_audit_runs` + `judge_audit_run_items` data only (no LLM calls)
+- Non-LLM downstream source controls:
+  - `canonicalize --source raw|intent`
+  - `plan-close --source raw|intent`
 
 Thinking values: `off|minimal|low|medium|high|xhigh`.
 Gemini paths reject `xhigh`.

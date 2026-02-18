@@ -1293,3 +1293,52 @@ Validation
 What comes next
 1. Consider extending similar source-state controls to future `judge --source intent` work in Phase 5.
 2. Add optional operator report output that summarizes intent coverage gaps by state (`missing card` vs `missing embedding`) before large runs.
+
+### 2026-02-18 — Entry 51 (source-aware judge/canonicalize/plan-close pipeline)
+
+Today we extended source-selection beyond retrieval so operators can run source-consistent batch pipelines (`raw` vs `intent`) through judging, canonicalization, and close planning.
+
+What we changed
+- Extended CLI command surface in `src/dupcanon/cli.py`:
+  - `judge --source raw|intent`
+  - `judge-audit --source raw|intent`
+  - `canonicalize --source raw|intent`
+  - `plan-close --source raw|intent`
+  - propagated source into service calls, failure-artifact context, and summary output.
+- Updated judge execution in `src/dupcanon/judge_service.py`:
+  - `run_judge(..., source=...)` now selects candidate sets by representation,
+  - existing-edge checks, rejudge demotion, and decision persistence are now source-aware,
+  - decision writes now persist representation source metadata.
+- Updated downstream services:
+  - `src/dupcanon/canonicalize_service.py`: canonicalization now filters accepted edges/nodes by source.
+  - `src/dupcanon/plan_close_service.py`: planning now reads source-filtered accepted edges/items and persists plan close runs with representation provenance.
+  - `src/dupcanon/apply_close_service.py`: apply runs now inherit representation from the reviewed plan run.
+- Updated judge-audit source support:
+  - `src/dupcanon/judge_audit_service.py` + `src/dupcanon/database.py` now support source-filtered candidate-set sampling and source provenance on audit runs.
+- Updated DB contracts in `src/dupcanon/database.py`:
+  - source-aware filters for judge candidate-set selection, accepted-edge reads, canonicalization node reads, and close-planning item reads,
+  - source-aware accepted-edge lifecycle checks/replacement,
+  - close-run and judge-audit-run create/read paths now carry representation metadata.
+- Added migration:
+  - `supabase/migrations/20260218102000_add_representation_source_to_judge_and_close_runs.sql`
+  - adds `representation` columns/checks/indexing for `judge_decisions`, `judge_audit_runs`, and `close_runs`,
+  - updates accepted-edge uniqueness to be representation-scoped.
+- Added/updated tests:
+  - `tests/test_judge_service.py` source propagation coverage,
+  - `tests/test_judge_audit_service.py` source propagation coverage,
+  - `tests/test_canonicalize_service.py` + `tests/test_plan_close_service.py` source propagation coverage,
+  - `tests/test_cli.py` source help/override coverage for judge/audit/canonicalize/plan-close,
+  - `tests/test_database.py` source filter + representation parsing coverage.
+- Updated docs:
+  - `README.md`
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md`
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Run side-by-side end-to-end windows (`judge` → `canonicalize` → `plan-close`) for `--source raw` and `--source intent` and compare close-plan precision proxies.
+2. Add reporting helpers that summarize representation-specific accepted-edge overlap and plan-close deltas for operator review.

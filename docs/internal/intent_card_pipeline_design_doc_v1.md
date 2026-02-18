@@ -1,6 +1,6 @@
 # Intent-Card Representation Pipeline (v1 Proposal)
 
-Status: Phase 4 retrieval source support in progress (`candidates --source` implemented; A/B reporting pending)
+Status: Phase 5 source-aware batch pipeline support in progress (`candidates|judge|judge-audit|canonicalize|plan-close --source` implemented; A/B quality reporting pending)
 Owner: dupcanon
 Date: 2026-02-15
 
@@ -269,7 +269,10 @@ This is required for audit/replay and A/B analysis.
 - `embed --source raw|intent`
 - `candidates --source raw|intent [--source-state open|closed|all]`
 - `judge --source raw|intent`
-- `detect-new --source raw|intent` (default remains raw until cutover)
+- `judge-audit --source raw|intent`
+- `canonicalize --source raw|intent`
+- `plan-close --source raw|intent`
+- `detect-new --source raw|intent` (planned; default remains raw until cutover)
 
 ### Service modules
 
@@ -409,17 +412,18 @@ Implementation notes (2026-02-18)
   - raw: `public.embeddings`
   - intent: latest fresh `intent_cards` + `public.intent_embeddings`
 - Candidate-set writes now persist explicit representation provenance for both modes.
-- Judge and judge-audit selection queries are explicitly constrained to raw candidate sets until Phase 5 source-aware judging is implemented.
+- Retrieval artifacts now persist enough provenance (`representation`, optional `representation_version`) to feed source-aware judge/canonicalize/plan-close paths.
 
-### Phase 5 — Judge on intent candidates (flagged)
+### Phase 5 — Source-aware downstream pipeline (implemented foundation)
 
 **Goal**
 - Evaluate end-to-end duplicate decisions using intent retrieval while preserving current guardrails.
 
 **Deliverables**
-- `judge --source intent` behind explicit flag.
-- Reuse same deterministic vetoes and decision policies.
-- Audit comparison runs (`judge-audit`, `report-audit`) for raw vs intent.
+- `judge --source raw|intent` support with representation-scoped accepted-edge lifecycle.
+- `judge-audit --source raw|intent` support for sampled cheap-vs-strong comparisons.
+- `canonicalize --source raw|intent` and `plan-close --source raw|intent` support for source-consistent downstream planning.
+- Representation provenance persisted on `judge_decisions`, `judge_audit_runs`, and `close_runs`.
 
 **Exit criteria**
 - No safety-policy regressions.
