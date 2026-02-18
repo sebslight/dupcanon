@@ -17,10 +17,14 @@ from dupcanon.models import (
     CandidateStats,
     ItemType,
     RepoRef,
+    RepresentationSource,
     StateFilter,
     TypeFilter,
 )
 from dupcanon.sync_service import require_postgres_dsn
+
+_INTENT_SCHEMA_VERSION = "v1"
+_INTENT_PROMPT_VERSION = "intent-card-v1"
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,10 @@ def _process_source_item(
     repo_id: int,
     item_type: ItemType,
     model: str,
+    representation_source: RepresentationSource,
+    representation_version: str | None,
+    intent_schema_version: str | None,
+    intent_prompt_version: str | None,
     include_states: list[str],
     k: int,
     min_score: float,
@@ -94,9 +102,15 @@ def _process_source_item(
             return _CandidateItemResult(skipped_missing_embedding=1)
 
         if dry_run:
-            stale_marked = db.count_fresh_candidate_sets_for_item(item_id=source.item_id)
+            stale_marked = db.count_fresh_candidate_sets_for_item(
+                item_id=source.item_id,
+                representation=representation_source,
+            )
         else:
-            stale_marked = db.mark_candidate_sets_stale_for_item(item_id=source.item_id)
+            stale_marked = db.mark_candidate_sets_stale_for_item(
+                item_id=source.item_id,
+                representation=representation_source,
+            )
 
         neighbors = db.find_candidate_neighbors(
             repo_id=repo_id,
@@ -106,6 +120,9 @@ def _process_source_item(
             include_states=include_states,
             k=k,
             min_score=min_score,
+            source=representation_source,
+            intent_schema_version=intent_schema_version,
+            intent_prompt_version=intent_prompt_version,
         )
 
         if not dry_run:
@@ -120,6 +137,8 @@ def _process_source_item(
                 include_states=include_states,
                 item_content_version=source.content_version,
                 created_at=created_at,
+                representation=representation_source,
+                representation_version=representation_version,
             )
             db.create_candidate_set_members(
                 candidate_set_id=candidate_set_id,
@@ -146,6 +165,7 @@ def _process_source_item(
                 "k": k,
                 "min_score": min_score,
                 "include_states": include_states,
+                "source": representation_source.value,
                 "dry_run": dry_run,
                 "error_class": type(exc).__name__,
                 "error": str(exc),
@@ -181,6 +201,7 @@ def run_candidates(
     include_filter: StateFilter,
     dry_run: bool,
     worker_concurrency: int | None,
+    source: RepresentationSource = RepresentationSource.RAW,
     console: Console,
     logger: BoundLogger,
 ) -> CandidateStats:
@@ -208,12 +229,21 @@ def run_candidates(
     item_type = _item_type_from_filter(type_filter)
     model = settings.embedding_model
     include_states = _include_states(include_filter)
+    selected_source = source
+    intent_schema_version = (
+        _INTENT_SCHEMA_VERSION if selected_source == RepresentationSource.INTENT else None
+    )
+    intent_prompt_version = (
+        _INTENT_PROMPT_VERSION if selected_source == RepresentationSource.INTENT else None
+    )
+    representation_version = intent_prompt_version
 
     logger = logger.bind(
         repo=repo.full_name(),
         type=item_type.value,
         stage="candidates",
         model=model,
+        source=selected_source.value,
     )
     logger.info(
         "candidates.start",
@@ -221,6 +251,7 @@ def run_candidates(
         k=k,
         min_score=min_score,
         include_states=include_states,
+        source=selected_source.value,
         dry_run=dry_run,
         worker_concurrency=effective_worker_concurrency,
     )
@@ -236,6 +267,9 @@ def run_candidates(
         repo_id=repo_id,
         type_filter=type_filter,
         model=model,
+        source=selected_source,
+        intent_schema_version=intent_schema_version,
+        intent_prompt_version=intent_prompt_version,
     )
 
     totals: dict[str, int] = {
@@ -261,16 +295,20 @@ def run_candidates(
         task = progress.add_task("Building candidate sets", total=len(source_items))
 
         if effective_worker_concurrency == 1:
-            for source in source_items:
+            for source_item in source_items:
                 result = _process_source_item(
                     settings=settings,
                     logger=logger,
                     db=db,
                     repo_full_name=repo.full_name(),
-                    source=source,
+                    source=source_item,
                     repo_id=repo_id,
                     item_type=item_type,
                     model=model,
+                    representation_source=selected_source,
+                    representation_version=representation_version,
+                    intent_schema_version=intent_schema_version,
+                    intent_prompt_version=intent_prompt_version,
                     include_states=include_states,
                     k=k,
                     min_score=min_score,
@@ -287,20 +325,24 @@ def run_candidates(
                         logger=logger,
                         db=db,
                         repo_full_name=repo.full_name(),
-                        source=source,
+                        source=source_item,
                         repo_id=repo_id,
                         item_type=item_type,
                         model=model,
+                        representation_source=selected_source,
+                        representation_version=representation_version,
+                        intent_schema_version=intent_schema_version,
+                        intent_prompt_version=intent_prompt_version,
                         include_states=include_states,
                         k=k,
                         min_score=min_score,
                         dry_run=dry_run,
-                    ): source
-                    for source in source_items
+                    ): source_item
+                    for source_item in source_items
                 }
 
                 for future in as_completed(futures):
-                    source = futures[future]
+                    source_item = futures[future]
                     try:
                         result = future.result()
                     except Exception as exc:  # noqa: BLE001
@@ -311,11 +353,12 @@ def run_candidates(
                                 "command": "candidates",
                                 "stage": "candidates",
                                 "repo": repo.full_name(),
-                                "item_id": source.number,
+                                "item_id": source_item.number,
                                 "item_type": item_type.value,
                                 "k": k,
                                 "min_score": min_score,
                                 "include_states": include_states,
+                                "source": selected_source.value,
                                 "dry_run": dry_run,
                                 "error_class": type(exc).__name__,
                                 "error": str(exc),
@@ -324,7 +367,7 @@ def run_candidates(
                         logger.error(
                             "candidates.item_failed",
                             status="error",
-                            item_id=source.number,
+                            item_id=source_item.number,
                             item_type=item_type.value,
                             error_class=type(exc).__name__,
                             artifact_path=artifact_path,
@@ -348,6 +391,7 @@ def run_candidates(
         "candidates.stage.complete",
         status="ok",
         dry_run=dry_run,
+        source=selected_source.value,
         worker_concurrency=effective_worker_concurrency,
         duration_ms=int((perf_counter() - stage_started) * 1000),
         **stats.model_dump(),
@@ -358,6 +402,7 @@ def run_candidates(
         k=k,
         min_score=min_score,
         include_states=include_states,
+        source=selected_source.value,
         dry_run=dry_run,
         worker_concurrency=effective_worker_concurrency,
         duration_ms=int((perf_counter() - command_started) * 1000),

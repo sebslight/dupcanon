@@ -6,7 +6,13 @@ from rich.console import Console
 import dupcanon.candidates_service as candidates_service
 from dupcanon.config import Settings
 from dupcanon.logging_config import get_logger
-from dupcanon.models import CandidateNeighbor, CandidateSourceItem, StateFilter, TypeFilter
+from dupcanon.models import (
+    CandidateNeighbor,
+    CandidateSourceItem,
+    RepresentationSource,
+    StateFilter,
+    TypeFilter,
+)
 
 
 def test_run_candidates_builds_sets_and_members(monkeypatch) -> None:
@@ -24,7 +30,19 @@ def test_run_candidates_builds_sets_and_members(monkeypatch) -> None:
         def get_repo_id(self, repo) -> int | None:
             return 42
 
-        def list_candidate_source_items(self, *, repo_id: int, type_filter: TypeFilter, model: str):
+        def list_candidate_source_items(
+            self,
+            *,
+            repo_id: int,
+            type_filter: TypeFilter,
+            model: str,
+            source: RepresentationSource,
+            intent_schema_version: str | None,
+            intent_prompt_version: str | None,
+        ):
+            assert source == RepresentationSource.RAW
+            assert intent_schema_version is None
+            assert intent_prompt_version is None
             return [
                 CandidateSourceItem(
                     item_id=1,
@@ -40,7 +58,13 @@ def test_run_candidates_builds_sets_and_members(monkeypatch) -> None:
                 ),
             ]
 
-        def mark_candidate_sets_stale_for_item(self, *, item_id: int) -> int:
+        def mark_candidate_sets_stale_for_item(
+            self,
+            *,
+            item_id: int,
+            representation: RepresentationSource | None,
+        ) -> int:
+            assert representation == RepresentationSource.RAW
             stale_calls = captured["stale_calls"]
             assert isinstance(stale_calls, list)
             stale_calls.append(item_id)
@@ -97,6 +121,13 @@ def test_run_candidates_builds_sets_and_members(monkeypatch) -> None:
     assert isinstance(find_calls, list)
     assert len(find_calls) == 1
     assert find_calls[0]["include_states"] == ["open", "closed"]
+    assert find_calls[0]["source"] == RepresentationSource.RAW
+
+    created_sets = captured["created_sets"]
+    assert isinstance(created_sets, list)
+    assert len(created_sets) == 1
+    assert created_sets[0]["representation"] == RepresentationSource.RAW
+    assert created_sets[0]["representation_version"] is None
 
 
 def test_run_candidates_dry_run_does_not_write(monkeypatch) -> None:
@@ -114,7 +145,19 @@ def test_run_candidates_dry_run_does_not_write(monkeypatch) -> None:
         def get_repo_id(self, repo) -> int | None:
             return 42
 
-        def list_candidate_source_items(self, *, repo_id: int, type_filter: TypeFilter, model: str):
+        def list_candidate_source_items(
+            self,
+            *,
+            repo_id: int,
+            type_filter: TypeFilter,
+            model: str,
+            source: RepresentationSource,
+            intent_schema_version: str | None,
+            intent_prompt_version: str | None,
+        ):
+            assert source == RepresentationSource.RAW
+            assert intent_schema_version is None
+            assert intent_prompt_version is None
             return [
                 CandidateSourceItem(
                     item_id=10,
@@ -124,11 +167,23 @@ def test_run_candidates_dry_run_does_not_write(monkeypatch) -> None:
                 )
             ]
 
-        def count_fresh_candidate_sets_for_item(self, *, item_id: int) -> int:
+        def count_fresh_candidate_sets_for_item(
+            self,
+            *,
+            item_id: int,
+            representation: RepresentationSource | None,
+        ) -> int:
+            assert representation == RepresentationSource.RAW
             captured["count_fresh_calls"] += 1
             return 3
 
-        def mark_candidate_sets_stale_for_item(self, *, item_id: int) -> int:
+        def mark_candidate_sets_stale_for_item(
+            self,
+            *,
+            item_id: int,
+            representation: RepresentationSource | None,
+        ) -> int:
+            assert representation == RepresentationSource.RAW
             captured["mark_calls"] += 1
             return 0
 
@@ -169,6 +224,99 @@ def test_run_candidates_dry_run_does_not_write(monkeypatch) -> None:
     assert captured["mark_calls"] == 0
     assert captured["create_set_calls"] == 0
     assert captured["create_member_calls"] == 0
+
+
+def test_run_candidates_supports_intent_source(monkeypatch) -> None:
+    captured: dict[str, object] = {
+        "find_calls": [],
+        "created_sets": [],
+    }
+
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_candidate_source_items(
+            self,
+            *,
+            repo_id: int,
+            type_filter: TypeFilter,
+            model: str,
+            source: RepresentationSource,
+            intent_schema_version: str | None,
+            intent_prompt_version: str | None,
+        ):
+            assert source == RepresentationSource.INTENT
+            assert intent_schema_version == "v1"
+            assert intent_prompt_version == "intent-card-v1"
+            return [
+                CandidateSourceItem(
+                    item_id=1,
+                    number=101,
+                    content_version=4,
+                    has_embedding=True,
+                )
+            ]
+
+        def mark_candidate_sets_stale_for_item(
+            self,
+            *,
+            item_id: int,
+            representation: RepresentationSource | None,
+        ) -> int:
+            assert representation == RepresentationSource.INTENT
+            return 0
+
+        def find_candidate_neighbors(self, **kwargs):
+            find_calls = captured["find_calls"]
+            assert isinstance(find_calls, list)
+            find_calls.append(kwargs)
+            return [CandidateNeighbor(candidate_item_id=11, score=0.93, rank=1)]
+
+        def create_candidate_set(self, **kwargs) -> int:
+            created_sets = captured["created_sets"]
+            assert isinstance(created_sets, list)
+            created_sets.append(kwargs)
+            return 501
+
+        def create_candidate_set_members(self, **kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(candidates_service, "Database", FakeDatabase)
+
+    stats = candidates_service.run_candidates(
+        settings=Settings(supabase_db_url="postgresql://localhost/db"),
+        repo_value="org/repo",
+        type_filter=TypeFilter.ISSUE,
+        k=4,
+        min_score=0.75,
+        include_filter=StateFilter.OPEN,
+        dry_run=False,
+        worker_concurrency=1,
+        source=RepresentationSource.INTENT,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.discovered == 1
+    assert stats.processed == 1
+    assert stats.failed == 0
+
+    find_calls = captured["find_calls"]
+    assert isinstance(find_calls, list)
+    assert len(find_calls) == 1
+    assert find_calls[0]["source"] == RepresentationSource.INTENT
+    assert find_calls[0]["intent_schema_version"] == "v1"
+    assert find_calls[0]["intent_prompt_version"] == "intent-card-v1"
+
+    created_sets = captured["created_sets"]
+    assert isinstance(created_sets, list)
+    assert len(created_sets) == 1
+    assert created_sets[0]["representation"] == RepresentationSource.INTENT
+    assert created_sets[0]["representation_version"] == "intent-card-v1"
 
 
 def test_run_candidates_requires_specific_type() -> None:

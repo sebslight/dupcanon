@@ -71,6 +71,16 @@ ANALYZE_INTENT_THINKING_OPTION = typer.Option(
     "--thinking",
     help="Extractor thinking level override (off, minimal, low, medium, high, xhigh)",
 )
+ANALYZE_INTENT_STATE_OPTION = typer.Option(
+    StateFilter.OPEN,
+    "--state",
+    help="Item state filter (open, closed, all). Default is open.",
+)
+ANALYZE_INTENT_WORKERS_OPTION = typer.Option(
+    None,
+    "--workers",
+    help="Analyze-intent worker concurrency override",
+)
 EMBED_PROVIDER_OPTION = typer.Option(
     None,
     "--provider",
@@ -89,6 +99,11 @@ INCLUDE_OPTION = typer.Option(
     StateFilter.OPEN,
     "--include",
     help="Include candidate item states (open, closed, all). Default is open.",
+)
+CANDIDATES_SOURCE_OPTION = typer.Option(
+    RepresentationSource.RAW,
+    "--source",
+    help="Candidate retrieval source representation (raw or intent)",
 )
 CANDIDATES_WORKERS_OPTION = typer.Option(
     None,
@@ -578,14 +593,10 @@ def _run_audit_simulation(
     recall_denominator = counts["tp"] + counts["fn"]
     target_precision_denominator = counts["tp"] + counts["fp"] + counts["conflict"]
 
-    precision = (
-        counts["tp"] / precision_denominator if precision_denominator > 0 else None
-    )
+    precision = counts["tp"] / precision_denominator if precision_denominator > 0 else None
     recall = counts["tp"] / recall_denominator if recall_denominator > 0 else None
     target_precision = (
-        counts["tp"] / target_precision_denominator
-        if target_precision_denominator > 0
-        else None
+        counts["tp"] / target_precision_denominator if target_precision_denominator > 0 else None
     )
 
     return {
@@ -975,10 +986,12 @@ def refresh(
 def analyze_intent(
     repo: str = REPO_OPTION,
     item_type: TypeFilter = TYPE_OPTION,
+    state: StateFilter = ANALYZE_INTENT_STATE_OPTION,
     only_changed: bool = ONLY_CHANGED_OPTION,
     provider: str | None = ANALYZE_INTENT_PROVIDER_OPTION,
     model: str | None = ANALYZE_INTENT_MODEL_OPTION,
     thinking: str | None = ANALYZE_INTENT_THINKING_OPTION,
+    workers: int | None = ANALYZE_INTENT_WORKERS_OPTION,
 ) -> None:
     """Extract and persist intent cards for issues/PRs."""
     settings, run_id, logger = _bootstrap("analyze-intent")
@@ -995,10 +1008,12 @@ def analyze_intent(
             settings=settings,
             repo_value=repo,
             type_filter=item_type,
+            state_filter=state,
             only_changed=only_changed,
             provider=effective_provider,
             model=effective_model,
             thinking_level=thinking,
+            worker_concurrency=workers,
             console=console,
             logger=logger,
         )
@@ -1011,10 +1026,12 @@ def analyze_intent(
             context={
                 "repo": repo,
                 "type": item_type.value,
+                "state": state.value,
                 "only_changed": only_changed,
                 "provider": effective_provider,
                 "model": effective_model,
                 "thinking": thinking,
+                "workers": workers,
             },
         )
         logger.error(
@@ -1035,6 +1052,8 @@ def analyze_intent(
     table.add_row("provider", effective_provider)
     table.add_row("model", effective_model)
     table.add_row("thinking", thinking or "-")
+    table.add_row("state", state.value)
+    table.add_row("workers", str(workers or settings.judge_worker_concurrency))
     table.add_row("only_changed", str(only_changed))
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))
@@ -1123,6 +1142,7 @@ def candidates(
     k: int = K_OPTION,
     min_score: float = MIN_SCORE_OPTION,
     include: StateFilter = INCLUDE_OPTION,
+    source: RepresentationSource = CANDIDATES_SOURCE_OPTION,
     dry_run: bool = DRY_RUN_OPTION,
     workers: int | None = CANDIDATES_WORKERS_OPTION,
 ) -> None:
@@ -1139,6 +1159,7 @@ def candidates(
             include_filter=include,
             dry_run=dry_run,
             worker_concurrency=workers,
+            source=source,
             console=console,
             logger=logger,
         )
@@ -1154,6 +1175,7 @@ def candidates(
                 "k": k,
                 "min_score": min_score,
                 "include": include.value,
+                "source": source.value,
                 "dry_run": dry_run,
                 "workers": workers,
             },
@@ -1177,6 +1199,7 @@ def candidates(
     table.add_row("k", str(k))
     table.add_row("min_score", str(min_score))
     table.add_row("include", include.value)
+    table.add_row("source", source.value)
     table.add_row("workers", str(workers or settings.candidate_worker_concurrency))
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))
@@ -1293,15 +1316,15 @@ def judge_audit(
     """Run sampled cheap-vs-strong judge audit on open items."""
     settings, run_id, logger = _bootstrap("judge-audit")
     effective_cheap_provider = (
-        cheap_provider or settings.judge_audit_cheap_provider
-    ).strip().lower()
+        (cheap_provider or settings.judge_audit_cheap_provider).strip().lower()
+    )
     effective_cheap_model = cheap_model or settings.judge_audit_cheap_model
     effective_cheap_thinking = normalize_thinking_level(
         cheap_thinking or settings.judge_audit_cheap_thinking
     )
     effective_strong_provider = (
-        strong_provider or settings.judge_audit_strong_provider
-    ).strip().lower()
+        (strong_provider or settings.judge_audit_strong_provider).strip().lower()
+    )
     effective_strong_model = strong_model or settings.judge_audit_strong_model
     effective_strong_thinking = normalize_thinking_level(
         strong_thinking or settings.judge_audit_strong_thinking

@@ -494,6 +494,7 @@ class Database:
         *,
         repo_id: int,
         type_filter: TypeFilter,
+        state_filter: StateFilter = StateFilter.OPEN,
         schema_version: str,
         prompt_version: str,
         only_changed: bool = True,
@@ -529,6 +530,10 @@ class Database:
         if type_filter != TypeFilter.ALL:
             query += " and i.type = %s"
             params.append(type_filter.value)
+
+        if state_filter != StateFilter.ALL:
+            query += " and i.state = %s"
+            params.append(state_filter.value)
 
         if only_changed:
             query += """
@@ -687,20 +692,57 @@ class Database:
         repo_id: int,
         type_filter: TypeFilter,
         model: str,
+        source: RepresentationSource = RepresentationSource.RAW,
+        intent_schema_version: str | None = None,
+        intent_prompt_version: str | None = None,
     ) -> list[CandidateSourceItem]:
-        query = """
-            select
-                i.id as item_id,
-                i.number,
-                i.content_version,
-                (e.item_id is not null) as has_embedding
-            from public.items i
-            left join public.embeddings e
-                on e.item_id = i.id and e.model = %s
-            where i.repo_id = %s
-        """
+        if source == RepresentationSource.RAW:
+            query = """
+                select
+                    i.id as item_id,
+                    i.number,
+                    i.content_version,
+                    (e.item_id is not null) as has_embedding
+                from public.items i
+                left join public.embeddings e
+                    on e.item_id = i.id and e.model = %s
+                where i.repo_id = %s
+            """
+            params: list[Any] = [model, repo_id]
+        elif source == RepresentationSource.INTENT:
+            if not intent_schema_version or not intent_prompt_version:
+                msg = "intent schema/prompt versions are required for source=intent"
+                raise ValueError(msg)
 
-        params: list[Any] = [model, repo_id]
+            query = """
+                with latest_fresh as (
+                    select distinct on (ic.item_id)
+                        ic.id as intent_card_id,
+                        ic.item_id
+                    from public.intent_cards ic
+                    where
+                        ic.schema_version = %s
+                        and ic.prompt_version = %s
+                        and ic.status = 'fresh'
+                    order by ic.item_id, ic.created_at desc, ic.id desc
+                )
+                select
+                    i.id as item_id,
+                    i.number,
+                    i.content_version,
+                    (ie.intent_card_id is not null) as has_embedding
+                from public.items i
+                left join latest_fresh lf
+                    on lf.item_id = i.id
+                left join public.intent_embeddings ie
+                    on ie.intent_card_id = lf.intent_card_id and ie.model = %s
+                where i.repo_id = %s
+            """
+            params = [intent_schema_version, intent_prompt_version, model, repo_id]
+        else:
+            msg = f"unsupported representation source: {source.value}"
+            raise ValueError(msg)
+
         if type_filter != TypeFilter.ALL:
             query += " and i.type = %s"
             params.append(type_filter.value)
@@ -723,32 +765,50 @@ class Database:
             )
         return result
 
-    def count_fresh_candidate_sets_for_item(self, *, item_id: int) -> int:
+    def count_fresh_candidate_sets_for_item(
+        self,
+        *,
+        item_id: int,
+        representation: RepresentationSource | None = None,
+    ) -> int:
+        query = """
+            select count(*) as n
+            from public.candidate_sets
+            where item_id = %s and status = 'fresh'
+        """
+        params: list[Any] = [item_id]
+
+        if representation is not None:
+            query += " and representation = %s"
+            params.append(representation.value)
+
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                """
-                select count(*) as n
-                from public.candidate_sets
-                where item_id = %s and status = 'fresh'
-                """,
-                (item_id,),
-            )
+            cur.execute(query, tuple(params))
             row = cur.fetchone()
 
         if row is None:
             return 0
         return int(row["n"])
 
-    def mark_candidate_sets_stale_for_item(self, *, item_id: int) -> int:
+    def mark_candidate_sets_stale_for_item(
+        self,
+        *,
+        item_id: int,
+        representation: RepresentationSource | None = None,
+    ) -> int:
+        query = """
+            update public.candidate_sets
+            set status = 'stale'
+            where item_id = %s and status = 'fresh'
+        """
+        params: list[Any] = [item_id]
+
+        if representation is not None:
+            query += " and representation = %s"
+            params.append(representation.value)
+
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                update public.candidate_sets
-                set status = 'stale'
-                where item_id = %s and status = 'fresh'
-                """,
-                (item_id,),
-            )
+            cur.execute(query, tuple(params))
             return cur.rowcount
 
     def create_candidate_set(
@@ -852,10 +912,12 @@ class Database:
         include_states: list[str],
         k: int,
         min_score: float,
+        source: RepresentationSource = RepresentationSource.RAW,
+        intent_schema_version: str | None = None,
+        intent_prompt_version: str | None = None,
     ) -> list[CandidateNeighbor]:
-        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                """
+        if source == RepresentationSource.RAW:
+            query = """
                 select
                     e2.item_id as candidate_item_id,
                     (1 - (e1.embedding <=> e2.embedding))::double precision as score
@@ -874,17 +936,73 @@ class Database:
                     and (1 - (e1.embedding <=> e2.embedding)) >= %s
                 order by (e1.embedding <=> e2.embedding) asc
                 limit %s
-                """,
-                (
-                    item_id,
-                    model,
-                    repo_id,
-                    item_type.value,
-                    include_states,
-                    min_score,
-                    k,
-                ),
+            """
+            params: tuple[Any, ...] = (
+                item_id,
+                model,
+                repo_id,
+                item_type.value,
+                include_states,
+                min_score,
+                k,
             )
+        elif source == RepresentationSource.INTENT:
+            if not intent_schema_version or not intent_prompt_version:
+                msg = "intent schema/prompt versions are required for source=intent"
+                raise ValueError(msg)
+
+            query = """
+                with latest_fresh as (
+                    select distinct on (ic.item_id)
+                        ic.id as intent_card_id,
+                        ic.item_id
+                    from public.intent_cards ic
+                    where
+                        ic.schema_version = %s
+                        and ic.prompt_version = %s
+                        and ic.status = 'fresh'
+                    order by ic.item_id, ic.created_at desc, ic.id desc
+                )
+                select
+                    i2.id as candidate_item_id,
+                    (1 - (e1.embedding <=> e2.embedding))::double precision as score
+                from latest_fresh lf1
+                join public.intent_embeddings e1
+                    on e1.intent_card_id = lf1.intent_card_id and e1.model = %s
+                join public.items i1 on i1.id = lf1.item_id
+                join latest_fresh lf2
+                    on lf2.item_id <> lf1.item_id
+                join public.intent_embeddings e2
+                    on e2.intent_card_id = lf2.intent_card_id and e2.model = e1.model
+                join public.items i2 on i2.id = lf2.item_id
+                where
+                    lf1.item_id = %s
+                    and i1.repo_id = %s
+                    and i1.type = %s
+                    and i2.repo_id = i1.repo_id
+                    and i2.type = i1.type
+                    and i2.state = any(%s::text[])
+                    and (1 - (e1.embedding <=> e2.embedding)) >= %s
+                order by (e1.embedding <=> e2.embedding) asc
+                limit %s
+            """
+            params = (
+                intent_schema_version,
+                intent_prompt_version,
+                model,
+                item_id,
+                repo_id,
+                item_type.value,
+                include_states,
+                min_score,
+                k,
+            )
+        else:
+            msg = f"unsupported representation source: {source.value}"
+            raise ValueError(msg)
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
             rows = cur.fetchall()
 
         result: list[CandidateNeighbor] = []
@@ -924,6 +1042,7 @@ class Database:
                 where
                     cs.repo_id = %s
                     and cs.type = %s
+                    and cs.representation = 'raw'
                     and {status_predicate}
                 order by cs.item_id, {freshness_order}
             )
@@ -1020,6 +1139,7 @@ class Database:
                 where
                     cs.repo_id = %s
                     and cs.type = %s
+                    and cs.representation = 'raw'
                     and cs.status = 'fresh'
                     and src.state = 'open'
                     and exists (

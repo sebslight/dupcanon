@@ -21,6 +21,19 @@ def _should_retry(status_code: int | None) -> bool:
 _ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 
+def _build_responses_input(*, system_prompt: str, user_prompt: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "system",
+            "content": [{"type": "input_text", "text": system_prompt}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": user_prompt}],
+        },
+    ]
+
+
 class OpenAIJudgeClient:
     def __init__(
         self,
@@ -45,24 +58,57 @@ class OpenAIJudgeClient:
         self.max_attempts = max_attempts
 
     def judge(self, *, system_prompt: str, user_prompt: str) -> str:
+        return self._judge_with_text_format(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            format_payload={"type": "json_object"},
+        )
+
+    def judge_with_json_schema(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema_name: str,
+        schema: dict[str, object],
+        strict: bool = True,
+    ) -> str:
+        return self._judge_with_text_format(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            format_payload={
+                "type": "json_schema",
+                "name": schema_name,
+                "schema": schema,
+                "strict": strict,
+            },
+        )
+
+    def _judge_with_text_format(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        format_payload: dict[str, Any],
+    ) -> str:
         last_error: OpenAIJudgeError | None = None
 
         for attempt in range(1, self.max_attempts + 1):
             try:
                 request: dict[str, Any] = {
                     "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    "input": _build_responses_input(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                    ),
                     "temperature": 1,
-                    "response_format": {"type": "json_object"},
+                    "text": {"format": format_payload},
                 }
                 if self.reasoning_effort is not None:
-                    request["reasoning_effort"] = self.reasoning_effort
+                    request["reasoning"] = {"effort": self.reasoning_effort}
 
-                response = self.client.chat.completions.create(**request)
-                text = _extract_text(response)
+                response = self.client.responses.create(**request)
+                text = _extract_response_text(response)
                 if text:
                     return text
                 msg = "judge model returned empty text"
@@ -96,26 +142,35 @@ class OpenAIJudgeClient:
         raise OpenAIJudgeError("unreachable judge retry state")
 
 
-def _extract_text(response: Any) -> str:
-    try:
-        choices = getattr(response, "choices", None)
-        if choices and len(choices) > 0:
-            content = getattr(choices[0].message, "content", None)
-            if isinstance(content, str):
-                return content.strip()
-            if isinstance(content, list):
-                chunks: list[str] = []
-                for part in content:
-                    text = getattr(part, "text", None)
-                    if isinstance(text, str):
-                        chunks.append(text)
-                    elif isinstance(part, dict):
-                        value = part.get("text")
-                        if isinstance(value, str):
-                            chunks.append(value)
-                return "".join(chunks).strip()
-    except Exception:  # noqa: BLE001
-        return ""
+
+def _extract_response_text(response: Any) -> str:
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    output = getattr(response, "output", None)
+    if isinstance(output, list):
+        chunks: list[str] = []
+        for item in output:
+            content = getattr(item, "content", None)
+            if content is None and isinstance(item, dict):
+                content = item.get("content")
+            if not isinstance(content, list):
+                continue
+
+            for part in content:
+                text = getattr(part, "text", None)
+                if isinstance(text, str) and text.strip():
+                    chunks.append(text)
+                    continue
+
+                if isinstance(part, dict):
+                    value = part.get("text")
+                    if isinstance(value, str) and value.strip():
+                        chunks.append(value)
+
+        if chunks:
+            return "".join(chunks).strip()
 
     return ""
 

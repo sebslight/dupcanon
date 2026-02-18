@@ -66,10 +66,12 @@ def test_analyze_intent_help_includes_core_options() -> None:
     result = runner.invoke(app, ["analyze-intent", "--help"])
 
     assert result.exit_code == 0
+    assert "--state" in result.stdout
     assert "--only-changed" in result.stdout
     assert "--provider" in result.stdout
     assert "--model" in result.stdout
     assert "--thinking" in result.stdout
+    assert "--workers" in result.stdout
 
 
 def test_embed_help_includes_core_options() -> None:
@@ -80,6 +82,108 @@ def test_embed_help_includes_core_options() -> None:
     assert "--provider" in result.stdout
     assert "--model" in result.stdout
     assert "--source" in result.stdout
+
+
+def test_analyze_intent_defaults_state_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_analyze_intent(**kwargs):
+        captured.update(kwargs)
+
+        class _Stats:
+            def model_dump(self):
+                return {}
+
+        return _Stats()
+
+    monkeypatch.setattr("dupcanon.cli.run_analyze_intent", fake_run_analyze_intent)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "analyze-intent",
+            "--repo",
+            "org/repo",
+            "--provider",
+            "openai",
+        ],
+    )
+
+    assert result.exit_code == 0
+    state_filter = captured.get("state_filter")
+    assert state_filter is not None
+    assert getattr(state_filter, "value", None) == "open"
+    assert captured.get("worker_concurrency") is None
+
+
+def test_analyze_intent_passes_state_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_analyze_intent(**kwargs):
+        captured.update(kwargs)
+
+        class _Stats:
+            def model_dump(self):
+                return {}
+
+        return _Stats()
+
+    monkeypatch.setattr("dupcanon.cli.run_analyze_intent", fake_run_analyze_intent)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "analyze-intent",
+            "--repo",
+            "org/repo",
+            "--provider",
+            "openai",
+            "--state",
+            "closed",
+        ],
+    )
+
+    assert result.exit_code == 0
+    state_filter = captured.get("state_filter")
+    assert state_filter is not None
+    assert getattr(state_filter, "value", None) == "closed"
+
+
+def test_analyze_intent_passes_workers_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_analyze_intent(**kwargs):
+        captured.update(kwargs)
+
+        class _Stats:
+            def model_dump(self):
+                return {}
+
+        return _Stats()
+
+    monkeypatch.setattr("dupcanon.cli.run_analyze_intent", fake_run_analyze_intent)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "analyze-intent",
+            "--repo",
+            "org/repo",
+            "--provider",
+            "openai",
+            "--workers",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured.get("worker_concurrency") == 3
 
 
 def test_analyze_intent_defaults_openai_model_when_provider_openai(
@@ -191,6 +295,7 @@ def test_candidates_help_includes_core_options() -> None:
     assert "--k" in result.stdout
     assert "--min-score" in result.stdout
     assert "--include" in result.stdout
+    assert "--source" in result.stdout
     assert "--dry-run" in result.stdout
     assert "--workers" in result.stdout
 
@@ -219,6 +324,44 @@ def test_candidates_defaults_include_open(monkeypatch: pytest.MonkeyPatch) -> No
     include_filter = captured.get("include_filter")
     assert include_filter is not None
     assert getattr(include_filter, "value", None) == "open"
+
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "raw"
+
+
+def test_candidates_passes_intent_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_candidates(**kwargs):
+        captured.update(kwargs)
+
+        class _Stats:
+            def model_dump(self):
+                return {}
+
+        return _Stats()
+
+    monkeypatch.setattr("dupcanon.cli.run_candidates", fake_run_candidates)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "candidates",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--source",
+            "intent",
+        ],
+    )
+
+    assert result.exit_code == 0
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "intent"
 
 
 def test_judge_help_includes_core_options() -> None:

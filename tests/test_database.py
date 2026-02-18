@@ -9,6 +9,7 @@ from dupcanon.models import (
     IntentFactSource,
     ItemType,
     RepresentationSource,
+    StateFilter,
     TypeFilter,
 )
 
@@ -319,6 +320,126 @@ def test_create_candidate_set_supports_representation_fields(monkeypatch) -> Non
     assert "v1" in params
 
 
+def test_list_candidate_source_items_intent_uses_intent_embeddings(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "item_id": 2,
+                    "number": 99,
+                    "content_version": 5,
+                    "has_embedding": True,
+                }
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    rows = db.list_candidate_source_items(
+        repo_id=1,
+        type_filter=TypeFilter.ISSUE,
+        model="text-embedding-3-large",
+        source=RepresentationSource.INTENT,
+        intent_schema_version="v1",
+        intent_prompt_version="intent-card-v1",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].item_id == 2
+    assert rows[0].has_embedding is True
+
+    query = str(captured.get("query") or "")
+    assert "from public.intent_cards" in query
+    assert "public.intent_embeddings" in query
+    assert "ic.status = 'fresh'" in query
+
+    params = captured.get("params")
+    assert isinstance(params, tuple)
+    assert params[0] == "v1"
+    assert params[1] == "intent-card-v1"
+
+
+def test_find_candidate_neighbors_intent_uses_intent_embeddings(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [{"candidate_item_id": 7, "score": 0.91}]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    rows = db.find_candidate_neighbors(
+        repo_id=3,
+        item_id=5,
+        item_type=ItemType.ISSUE,
+        model="text-embedding-3-large",
+        include_states=["open"],
+        k=4,
+        min_score=0.75,
+        source=RepresentationSource.INTENT,
+        intent_schema_version="v1",
+        intent_prompt_version="intent-card-v1",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].candidate_item_id == 7
+    assert rows[0].score == 0.91
+    assert rows[0].rank == 1
+
+    query = str(captured.get("query") or "")
+    assert "with latest_fresh as" in query
+    assert "public.intent_embeddings e1" in query
+    assert "public.intent_embeddings e2" in query
+
+    params = captured.get("params")
+    assert isinstance(params, tuple)
+    assert params[0] == "v1"
+    assert params[1] == "intent-card-v1"
+
+
 def test_list_items_for_intent_card_extraction_returns_missing_or_stale_items(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -376,6 +497,58 @@ def test_list_items_for_intent_card_extraction_returns_missing_or_stale_items(mo
     query = str(captured.get("query") or "")
     assert "left join lateral" in query.lower()
     assert "latest.source_content_hash" in query
+    assert "i.state = %s" in query
+    params = captured.get("params")
+    assert isinstance(params, tuple)
+    assert StateFilter.OPEN.value in params
+
+
+def test_list_items_for_intent_card_extraction_state_all_skips_state_clause(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    rows = db.list_items_for_intent_card_extraction(
+        repo_id=42,
+        type_filter=TypeFilter.ALL,
+        state_filter=StateFilter.ALL,
+        schema_version="v1",
+        prompt_version="intent-v1",
+    )
+
+    assert rows == []
+
+    query = str(captured.get("query") or "")
+    assert "i.state = %s" not in query
+
+    params = captured.get("params")
+    assert isinstance(params, tuple)
+    assert StateFilter.ALL.value not in params
 
 
 def test_upsert_intent_card_returns_inserted_id(monkeypatch) -> None:
