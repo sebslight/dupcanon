@@ -341,6 +341,7 @@ def test_list_candidate_source_items_intent_uses_intent_embeddings(monkeypatch) 
                     "number": 99,
                     "content_version": 5,
                     "has_embedding": True,
+                    "has_intent_card": True,
                 }
             ]
 
@@ -369,6 +370,7 @@ def test_list_candidate_source_items_intent_uses_intent_embeddings(monkeypatch) 
     assert len(rows) == 1
     assert rows[0].item_id == 2
     assert rows[0].has_embedding is True
+    assert rows[0].has_intent_card is True
 
     query = str(captured.get("query") or "")
     assert "from public.intent_cards" in query
@@ -379,6 +381,56 @@ def test_list_candidate_source_items_intent_uses_intent_embeddings(monkeypatch) 
     assert isinstance(params, tuple)
     assert params[0] == "v1"
     assert params[1] == "intent-card-v1"
+
+
+def test_list_candidate_source_items_applies_source_state_filter(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    rows = db.list_candidate_source_items(
+        repo_id=1,
+        type_filter=TypeFilter.ISSUE,
+        model="text-embedding-3-large",
+        source=RepresentationSource.INTENT,
+        state_filter=StateFilter.OPEN,
+        intent_schema_version="v1",
+        intent_prompt_version="intent-card-v1",
+    )
+
+    assert rows == []
+
+    query = str(captured.get("query") or "")
+    assert "i.state = %s" in query
+
+    params = captured.get("params")
+    assert isinstance(params, tuple)
+    assert StateFilter.OPEN.value in params
 
 
 def test_find_candidate_neighbors_intent_uses_intent_embeddings(monkeypatch) -> None:

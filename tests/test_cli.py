@@ -296,6 +296,7 @@ def test_candidates_help_includes_core_options() -> None:
     assert "--min-score" in result.stdout
     assert "--include" in result.stdout
     assert "--source" in result.stdout
+    assert "--source-state" in result.stdout
     assert "--dry-run" in result.stdout
     assert "--workers" in result.stdout
 
@@ -328,6 +329,10 @@ def test_candidates_defaults_include_open(monkeypatch: pytest.MonkeyPatch) -> No
     source = captured.get("source")
     assert source is not None
     assert getattr(source, "value", None) == "raw"
+
+    source_state_filter = captured.get("source_state_filter")
+    assert source_state_filter is not None
+    assert getattr(source_state_filter, "value", None) == "open"
 
 
 def test_candidates_passes_intent_source(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -362,6 +367,40 @@ def test_candidates_passes_intent_source(monkeypatch: pytest.MonkeyPatch) -> Non
     source = captured.get("source")
     assert source is not None
     assert getattr(source, "value", None) == "intent"
+
+
+def test_candidates_passes_source_state_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_candidates(**kwargs):
+        captured.update(kwargs)
+
+        class _Stats:
+            def model_dump(self):
+                return {}
+
+        return _Stats()
+
+    monkeypatch.setattr("dupcanon.cli.run_candidates", fake_run_candidates)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+
+    result = runner.invoke(
+        app,
+        [
+            "candidates",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--source-state",
+            "closed",
+        ],
+    )
+
+    assert result.exit_code == 0
+    source_state_filter = captured.get("source_state_filter")
+    assert source_state_filter is not None
+    assert getattr(source_state_filter, "value", None) == "closed"
 
 
 def test_judge_help_includes_core_options() -> None:

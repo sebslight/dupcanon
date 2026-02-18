@@ -37,10 +37,12 @@ def test_run_candidates_builds_sets_and_members(monkeypatch) -> None:
             type_filter: TypeFilter,
             model: str,
             source: RepresentationSource,
+            state_filter: StateFilter,
             intent_schema_version: str | None,
             intent_prompt_version: str | None,
         ):
             assert source == RepresentationSource.RAW
+            assert state_filter == StateFilter.OPEN
             assert intent_schema_version is None
             assert intent_prompt_version is None
             return [
@@ -99,6 +101,7 @@ def test_run_candidates_builds_sets_and_members(monkeypatch) -> None:
         k=8,
         min_score=0.75,
         include_filter=StateFilter.ALL,
+        source_state_filter=StateFilter.OPEN,
         dry_run=False,
         worker_concurrency=None,
         console=Console(),
@@ -152,10 +155,12 @@ def test_run_candidates_dry_run_does_not_write(monkeypatch) -> None:
             type_filter: TypeFilter,
             model: str,
             source: RepresentationSource,
+            state_filter: StateFilter,
             intent_schema_version: str | None,
             intent_prompt_version: str | None,
         ):
             assert source == RepresentationSource.RAW
+            assert state_filter == StateFilter.OPEN
             assert intent_schema_version is None
             assert intent_prompt_version is None
             return [
@@ -206,6 +211,7 @@ def test_run_candidates_dry_run_does_not_write(monkeypatch) -> None:
         k=8,
         min_score=0.75,
         include_filter=StateFilter.ALL,
+        source_state_filter=StateFilter.OPEN,
         dry_run=True,
         worker_concurrency=None,
         console=Console(),
@@ -246,10 +252,12 @@ def test_run_candidates_supports_intent_source(monkeypatch) -> None:
             type_filter: TypeFilter,
             model: str,
             source: RepresentationSource,
+            state_filter: StateFilter,
             intent_schema_version: str | None,
             intent_prompt_version: str | None,
         ):
             assert source == RepresentationSource.INTENT
+            assert state_filter == StateFilter.OPEN
             assert intent_schema_version == "v1"
             assert intent_prompt_version == "intent-card-v1"
             return [
@@ -294,6 +302,7 @@ def test_run_candidates_supports_intent_source(monkeypatch) -> None:
         k=4,
         min_score=0.75,
         include_filter=StateFilter.OPEN,
+        source_state_filter=StateFilter.OPEN,
         dry_run=False,
         worker_concurrency=1,
         source=RepresentationSource.INTENT,
@@ -317,6 +326,126 @@ def test_run_candidates_supports_intent_source(monkeypatch) -> None:
     assert len(created_sets) == 1
     assert created_sets[0]["representation"] == RepresentationSource.INTENT
     assert created_sets[0]["representation_version"] == "intent-card-v1"
+
+
+def test_run_candidates_passes_source_state_filter(monkeypatch) -> None:
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_candidate_source_items(
+            self,
+            *,
+            repo_id: int,
+            type_filter: TypeFilter,
+            model: str,
+            source: RepresentationSource,
+            state_filter: StateFilter,
+            intent_schema_version: str | None,
+            intent_prompt_version: str | None,
+        ):
+            assert state_filter == StateFilter.CLOSED
+            return []
+
+    monkeypatch.setattr(candidates_service, "Database", FakeDatabase)
+
+    stats = candidates_service.run_candidates(
+        settings=Settings(supabase_db_url="postgresql://localhost/db"),
+        repo_value="org/repo",
+        type_filter=TypeFilter.ISSUE,
+        k=4,
+        min_score=0.75,
+        include_filter=StateFilter.OPEN,
+        source_state_filter=StateFilter.CLOSED,
+        dry_run=False,
+        worker_concurrency=1,
+        source=RepresentationSource.INTENT,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.discovered == 0
+    assert stats.failed == 0
+
+
+def test_run_candidates_intent_split_missing_reason_counters(monkeypatch) -> None:
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_candidate_source_items(
+            self,
+            *,
+            repo_id: int,
+            type_filter: TypeFilter,
+            model: str,
+            source: RepresentationSource,
+            state_filter: StateFilter,
+            intent_schema_version: str | None,
+            intent_prompt_version: str | None,
+        ):
+            return [
+                CandidateSourceItem(
+                    item_id=1,
+                    number=101,
+                    content_version=1,
+                    has_embedding=False,
+                    has_intent_card=False,
+                ),
+                CandidateSourceItem(
+                    item_id=2,
+                    number=102,
+                    content_version=1,
+                    has_embedding=False,
+                    has_intent_card=True,
+                ),
+            ]
+
+        def mark_candidate_sets_stale_for_item(
+            self,
+            *,
+            item_id: int,
+            representation: RepresentationSource | None,
+        ) -> int:
+            raise AssertionError("should not be called for skipped items")
+
+        def find_candidate_neighbors(self, **kwargs):
+            raise AssertionError("should not be called for skipped items")
+
+        def create_candidate_set(self, **kwargs) -> int:
+            raise AssertionError("should not be called for skipped items")
+
+        def create_candidate_set_members(self, **kwargs) -> None:
+            raise AssertionError("should not be called for skipped items")
+
+    monkeypatch.setattr(candidates_service, "Database", FakeDatabase)
+
+    stats = candidates_service.run_candidates(
+        settings=Settings(supabase_db_url="postgresql://localhost/db"),
+        repo_value="org/repo",
+        type_filter=TypeFilter.ISSUE,
+        k=4,
+        min_score=0.75,
+        include_filter=StateFilter.OPEN,
+        source_state_filter=StateFilter.OPEN,
+        dry_run=False,
+        worker_concurrency=1,
+        source=RepresentationSource.INTENT,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.discovered == 2
+    assert stats.processed == 0
+    assert stats.skipped_missing_fresh_intent_card == 1
+    assert stats.skipped_missing_intent_embedding == 1
+    assert stats.skipped_missing_embedding == 0
 
 
 def test_run_candidates_requires_specific_type() -> None:

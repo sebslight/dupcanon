@@ -105,6 +105,11 @@ CANDIDATES_SOURCE_OPTION = typer.Option(
     "--source",
     help="Candidate retrieval source representation (raw or intent)",
 )
+CANDIDATES_SOURCE_STATE_OPTION = typer.Option(
+    StateFilter.OPEN,
+    "--source-state",
+    help="Source item states to process (open, closed, all). Default is open.",
+)
 CANDIDATES_WORKERS_OPTION = typer.Option(
     None,
     "--workers",
@@ -1143,6 +1148,7 @@ def candidates(
     min_score: float = MIN_SCORE_OPTION,
     include: StateFilter = INCLUDE_OPTION,
     source: RepresentationSource = CANDIDATES_SOURCE_OPTION,
+    source_state: StateFilter = CANDIDATES_SOURCE_STATE_OPTION,
     dry_run: bool = DRY_RUN_OPTION,
     workers: int | None = CANDIDATES_WORKERS_OPTION,
 ) -> None:
@@ -1157,6 +1163,7 @@ def candidates(
             k=k,
             min_score=min_score,
             include_filter=include,
+            source_state_filter=source_state,
             dry_run=dry_run,
             worker_concurrency=workers,
             source=source,
@@ -1176,6 +1183,7 @@ def candidates(
                 "min_score": min_score,
                 "include": include.value,
                 "source": source.value,
+                "source_state": source_state.value,
                 "dry_run": dry_run,
                 "workers": workers,
             },
@@ -1200,6 +1208,7 @@ def candidates(
     table.add_row("min_score", str(min_score))
     table.add_row("include", include.value)
     table.add_row("source", source.value)
+    table.add_row("source_state", source_state.value)
     table.add_row("workers", str(workers or settings.candidate_worker_concurrency))
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))

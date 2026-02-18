@@ -401,6 +401,7 @@ class CandidateSourceItem(BaseModel):
     number: int
     content_version: int
     has_embedding: bool
+    has_intent_card: bool | None = None
 
 
 class CandidateNeighbor(BaseModel):
@@ -419,6 +420,8 @@ class CandidateStats(BaseModel):
     candidate_sets_created: int = 0
     candidate_members_written: int = 0
     skipped_missing_embedding: int = 0
+    skipped_missing_fresh_intent_card: int = 0
+    skipped_missing_intent_embedding: int = 0
     stale_marked: int = 0
     failed: int = 0
 

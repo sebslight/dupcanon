@@ -693,6 +693,7 @@ class Database:
         type_filter: TypeFilter,
         model: str,
         source: RepresentationSource = RepresentationSource.RAW,
+        state_filter: StateFilter = StateFilter.ALL,
         intent_schema_version: str | None = None,
         intent_prompt_version: str | None = None,
     ) -> list[CandidateSourceItem]:
@@ -702,7 +703,8 @@ class Database:
                     i.id as item_id,
                     i.number,
                     i.content_version,
-                    (e.item_id is not null) as has_embedding
+                    (e.item_id is not null) as has_embedding,
+                    null::boolean as has_intent_card
                 from public.items i
                 left join public.embeddings e
                     on e.item_id = i.id and e.model = %s
@@ -730,7 +732,8 @@ class Database:
                     i.id as item_id,
                     i.number,
                     i.content_version,
-                    (ie.intent_card_id is not null) as has_embedding
+                    (ie.intent_card_id is not null) as has_embedding,
+                    (lf.intent_card_id is not null) as has_intent_card
                 from public.items i
                 left join latest_fresh lf
                     on lf.item_id = i.id
@@ -747,6 +750,10 @@ class Database:
             query += " and i.type = %s"
             params.append(type_filter.value)
 
+        if state_filter != StateFilter.ALL:
+            query += " and i.state = %s"
+            params.append(state_filter.value)
+
         query += " order by i.id asc"
 
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -761,6 +768,11 @@ class Database:
                     number=int(row["number"]),
                     content_version=int(row["content_version"]),
                     has_embedding=bool(row["has_embedding"]),
+                    has_intent_card=(
+                        bool(row["has_intent_card"])
+                        if row.get("has_intent_card") is not None
+                        else None
+                    ),
                 )
             )
         return result

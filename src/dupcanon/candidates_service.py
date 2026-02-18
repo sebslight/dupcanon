@@ -33,6 +33,8 @@ class _CandidateItemResult:
     candidate_sets_created: int = 0
     candidate_members_written: int = 0
     skipped_missing_embedding: int = 0
+    skipped_missing_fresh_intent_card: int = 0
+    skipped_missing_intent_embedding: int = 0
     stale_marked: int = 0
     failed: int = 0
 
@@ -90,6 +92,7 @@ def _process_source_item(
     model: str,
     representation_source: RepresentationSource,
     representation_version: str | None,
+    source_state_filter: StateFilter,
     intent_schema_version: str | None,
     intent_prompt_version: str | None,
     include_states: list[str],
@@ -99,6 +102,11 @@ def _process_source_item(
 ) -> _CandidateItemResult:
     try:
         if not source.has_embedding:
+            if representation_source == RepresentationSource.INTENT:
+                if not bool(source.has_intent_card):
+                    return _CandidateItemResult(skipped_missing_fresh_intent_card=1)
+                return _CandidateItemResult(skipped_missing_intent_embedding=1)
+
             return _CandidateItemResult(skipped_missing_embedding=1)
 
         if dry_run:
@@ -166,6 +174,7 @@ def _process_source_item(
                 "min_score": min_score,
                 "include_states": include_states,
                 "source": representation_source.value,
+                "source_state_filter": source_state_filter.value,
                 "dry_run": dry_run,
                 "error_class": type(exc).__name__,
                 "error": str(exc),
@@ -187,6 +196,8 @@ def _accumulate(*, totals: dict[str, int], result: _CandidateItemResult) -> None
     totals["candidate_sets_created"] += result.candidate_sets_created
     totals["candidate_members_written"] += result.candidate_members_written
     totals["skipped_missing_embedding"] += result.skipped_missing_embedding
+    totals["skipped_missing_fresh_intent_card"] += result.skipped_missing_fresh_intent_card
+    totals["skipped_missing_intent_embedding"] += result.skipped_missing_intent_embedding
     totals["stale_marked"] += result.stale_marked
     totals["failed"] += result.failed
 
@@ -199,6 +210,7 @@ def run_candidates(
     k: int,
     min_score: float,
     include_filter: StateFilter,
+    source_state_filter: StateFilter,
     dry_run: bool,
     worker_concurrency: int | None,
     source: RepresentationSource = RepresentationSource.RAW,
@@ -244,6 +256,7 @@ def run_candidates(
         stage="candidates",
         model=model,
         source=selected_source.value,
+        source_state_filter=source_state_filter.value,
     )
     logger.info(
         "candidates.start",
@@ -252,6 +265,7 @@ def run_candidates(
         min_score=min_score,
         include_states=include_states,
         source=selected_source.value,
+        source_state_filter=source_state_filter.value,
         dry_run=dry_run,
         worker_concurrency=effective_worker_concurrency,
     )
@@ -268,6 +282,7 @@ def run_candidates(
         type_filter=type_filter,
         model=model,
         source=selected_source,
+        state_filter=source_state_filter,
         intent_schema_version=intent_schema_version,
         intent_prompt_version=intent_prompt_version,
     )
@@ -277,6 +292,8 @@ def run_candidates(
         "candidate_sets_created": 0,
         "candidate_members_written": 0,
         "skipped_missing_embedding": 0,
+        "skipped_missing_fresh_intent_card": 0,
+        "skipped_missing_intent_embedding": 0,
         "stale_marked": 0,
         "failed": 0,
     }
@@ -307,6 +324,7 @@ def run_candidates(
                     model=model,
                     representation_source=selected_source,
                     representation_version=representation_version,
+                    source_state_filter=source_state_filter,
                     intent_schema_version=intent_schema_version,
                     intent_prompt_version=intent_prompt_version,
                     include_states=include_states,
@@ -331,6 +349,7 @@ def run_candidates(
                         model=model,
                         representation_source=selected_source,
                         representation_version=representation_version,
+                        source_state_filter=source_state_filter,
                         intent_schema_version=intent_schema_version,
                         intent_prompt_version=intent_prompt_version,
                         include_states=include_states,
@@ -359,6 +378,7 @@ def run_candidates(
                                 "min_score": min_score,
                                 "include_states": include_states,
                                 "source": selected_source.value,
+                                "source_state_filter": source_state_filter.value,
                                 "dry_run": dry_run,
                                 "error_class": type(exc).__name__,
                                 "error": str(exc),
@@ -383,6 +403,8 @@ def run_candidates(
         candidate_sets_created=totals["candidate_sets_created"],
         candidate_members_written=totals["candidate_members_written"],
         skipped_missing_embedding=totals["skipped_missing_embedding"],
+        skipped_missing_fresh_intent_card=totals["skipped_missing_fresh_intent_card"],
+        skipped_missing_intent_embedding=totals["skipped_missing_intent_embedding"],
         stale_marked=totals["stale_marked"],
         failed=totals["failed"],
     )
@@ -392,6 +414,7 @@ def run_candidates(
         status="ok",
         dry_run=dry_run,
         source=selected_source.value,
+        source_state_filter=source_state_filter.value,
         worker_concurrency=effective_worker_concurrency,
         duration_ms=int((perf_counter() - stage_started) * 1000),
         **stats.model_dump(),
@@ -403,6 +426,7 @@ def run_candidates(
         min_score=min_score,
         include_states=include_states,
         source=selected_source.value,
+        source_state_filter=source_state_filter.value,
         dry_run=dry_run,
         worker_concurrency=effective_worker_concurrency,
         duration_ms=int((perf_counter() - command_started) * 1000),
