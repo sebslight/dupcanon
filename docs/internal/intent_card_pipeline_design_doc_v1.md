@@ -267,7 +267,7 @@ This is required for audit/replay and A/B analysis.
 ### Existing command extensions
 
 - `embed --source raw|intent`
-- `candidates --source raw|intent`
+- `candidates --source raw|intent [--source-state open|closed|all]`
 - `judge --source raw|intent`
 - `detect-new --source raw|intent` (default remains raw until cutover)
 

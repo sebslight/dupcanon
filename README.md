@@ -63,12 +63,13 @@ Internal deep docs:
 - Apply gate is: reviewed persisted `close_run(mode=plan)` + explicit `--yes`.
 - There is **no approval-file / approve-plan flow** in v1.
 - `refresh` defaults to discovering new items only; use `refresh --refresh-known` to also update known-item metadata.
-- Operational candidate retrieval defaults to open items (`candidates --include open`) with default clustering `k=4`, `min_score=0.75`.
+- Operational candidate retrieval defaults to open source items (`candidates --source-state open`) and open candidate neighbors (`--include open`) with default clustering `k=4`, `min_score=0.75`.
 - Judge acceptance defaults: `min_edge=0.85`, target must be open, and selected candidate score gap vs best alternate must be `>= 0.015`.
 - `plan-close` requires a **direct accepted edge** to canonical and `min_close=0.90`, plus maintainer author/assignee protections.
 - `detect-new` is a precision-first online classifier (`duplicate` / `maybe_duplicate` / `not_duplicate`) with stricter duplicate thresholds and downgrade guardrails.
 - In v1, `detect-new` persists source/corpus state (`items`, source `embeddings` when stale) but does not persist online judge outcomes to `judge_decisions`.
 - Intent sidecar foundations are available in shadow mode: `analyze-intent` persists `intent_cards`, `embed --source intent` writes `intent_embeddings`, and `candidates --source raw|intent` enables retrieval A/B while default source remains raw.
+- `candidates` now reports intent skip root causes separately in summary stats (`skipped_missing_fresh_intent_card` vs `skipped_missing_intent_embedding`).
 - `analyze-intent` defaults to open items (`--state open`) to focus extraction on active issues/PRs and supports `--workers N` for extraction concurrency.
 - Judge prompt/parse/veto/runtime logic is centralized in `src/dupcanon/judge_runtime.py` and reused by `judge`, `judge-audit`, and `detect-new`.
 - Canonical selection priority is:

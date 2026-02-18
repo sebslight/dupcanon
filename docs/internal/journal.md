@@ -1254,3 +1254,42 @@ Validation
 What comes next
 1. Run side-by-side retrieval windows (`candidates --source raw` vs `--source intent`) and produce comparison metrics/artifacts for Phase 4 exit criteria.
 2. Implement representation-aware judging (`judge --source raw|intent`) in Phase 5.
+
+### 2026-02-18 — Entry 50 (candidates source-state filter + intent skip-cause split)
+
+Today we reduced operator confusion in intent retrieval runs by adding explicit source-item state filtering and more precise skip metrics for intent coverage gaps.
+
+What we changed
+- Extended `dupcanon candidates` in `src/dupcanon/cli.py`:
+  - added `--source-state open|closed|all` (default `open`),
+  - passed through to service as `source_state_filter`,
+  - surfaced in failure artifact context and summary table output.
+- Updated `run_candidates(...)` in `src/dupcanon/candidates_service.py`:
+  - added `source_state_filter` input and logger fields,
+  - applied source-state filtering at source-item discovery,
+  - split intent skip outcomes into distinct counters:
+    - `skipped_missing_fresh_intent_card`
+    - `skipped_missing_intent_embedding`
+  - preserved `skipped_missing_embedding` for raw-embedding skips.
+- Updated candidate stats/model contracts in `src/dupcanon/models.py`:
+  - `CandidateSourceItem` now carries `has_intent_card` metadata,
+  - `CandidateStats` now includes split intent skip counters.
+- Updated DB source-item discovery in `src/dupcanon/database.py`:
+  - `list_candidate_source_items(...)` now accepts `state_filter`,
+  - intent path now returns both `has_intent_card` and `has_embedding` to support skip-cause disambiguation.
+- Added/updated tests:
+  - `tests/test_cli.py` for `--source-state` help/default/override propagation,
+  - `tests/test_candidates_service.py` for source-state forwarding and split skip counters,
+  - `tests/test_database.py` for source-state SQL filtering and intent-card presence metadata.
+- Updated docs:
+  - `README.md` behavior notes,
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md` command signature update.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Consider extending similar source-state controls to future `judge --source intent` work in Phase 5.
+2. Add optional operator report output that summarizes intent coverage gaps by state (`missing card` vs `missing embedding`) before large runs.
