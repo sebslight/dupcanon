@@ -1398,3 +1398,27 @@ Validation
 What comes next
 1. Persist explicit judge prompt provenance fields (prompt family/version) on `judge_decisions` and optionally `judge_audit_run_items` for replay-grade analysis.
 2. Add report-level breakdowns comparing raw vs intent prompt-mode outcomes for sampled audits.
+
+### 2026-02-18 — Entry 54 (doc/code alignment pass + raw-fallback regressions)
+
+Today we ran a documentation alignment pass against the live codebase after intent-prompt rollout, and added regressions to lock fallback behavior.
+
+What we changed
+- Documentation alignment updates:
+  - `README.md`: clarified that judge runtime primitives remain in `judge_runtime.py`, while source-aware prompt orchestration now lives in `judge_service.py` / `judge_audit_service.py`.
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`: updated architecture snapshot text to match the current split.
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md`: documented regression-covered raw fallback when fresh intent cards are missing.
+- Regression tests added:
+  - `tests/test_judge_service.py`
+    - verifies `judge --source intent` falls back to raw prompt when intent cards are unavailable.
+  - `tests/test_judge_audit_service.py`
+    - verifies `judge-audit --source intent` falls back to raw prompt for both cheap/strong lanes when intent cards are unavailable.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Persist prompt provenance (`prompt_mode`, prompt version) to DB rows, not only failure artifacts/logs.
+2. Extend report tooling to summarize prompt-mode usage/fallback rates in judge and audit runs.

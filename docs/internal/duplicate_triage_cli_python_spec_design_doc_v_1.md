@@ -6,7 +6,7 @@ Implementation status snapshot (2026-02-14)
 - Implemented commands: `init`, `sync`, `refresh`, `embed`, `candidates`, `judge`, `judge-audit`, `report-audit`, `detect-new`, `canonicalize`, `maintainers`, `plan-close`, `apply-close`.
 - Current apply gate: reviewed persisted `close_run` + explicit `--yes` (no approval-file workflow).
 - Current canonical preference: open-first, then English-language preference, then maintainer preference.
-- Judge runtime path is centralized in `src/dupcanon/judge_runtime.py` and reused by judge/audit/online detect.
+- Judge client + parse/veto primitives are centralized in `src/dupcanon/judge_runtime.py`; batch source-specific prompt orchestration is implemented in judge/judge-audit services.
 - Shared retry/backoff/attempt validation primitives are centralized in `src/dupcanon/llm_retry.py`.
 - Known remaining gaps: no first-class Phase 9 evaluation command yet.
 - Proposed extension planning doc (not yet active default): `docs/internal/intent_card_pipeline_design_doc_v1.md`.

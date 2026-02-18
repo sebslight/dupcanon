@@ -423,6 +423,7 @@ Implementation notes (2026-02-18)
 - `judge --source raw|intent` support with representation-scoped accepted-edge lifecycle.
 - intent-aware judge prompt path for `--source intent` (structured-card input with raw fallback on missing cards).
 - `judge-audit --source raw|intent` support for sampled cheap-vs-strong comparisons, using the same intent-prompt path as `judge` when cards are available.
+- explicit raw-prompt fallback behavior (when fresh intent cards are missing) covered by regression tests in judge + judge-audit suites.
 - `canonicalize --source raw|intent` and `plan-close --source raw|intent` support for source-consistent downstream planning.
 - Representation provenance persisted on `judge_decisions`, `judge_audit_runs`, and `close_runs`.
 

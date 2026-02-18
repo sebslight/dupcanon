@@ -71,7 +71,7 @@ Internal deep docs:
 - Intent sidecar foundations are available in shadow mode: `analyze-intent` persists `intent_cards`, `embed --source intent` writes `intent_embeddings`, and source-aware pipeline steps (`candidates|judge|judge-audit|canonicalize|plan-close --source raw|intent`) enable retrieval/decision/planning A/B while defaults remain raw.
 - `candidates` now reports intent skip root causes separately in summary stats (`skipped_missing_fresh_intent_card` vs `skipped_missing_intent_embedding`).
 - `analyze-intent` defaults to open items (`--state open`) to focus extraction on active issues/PRs and supports `--workers N` for extraction concurrency.
-- Judge prompt/parse/veto/runtime logic is centralized in `src/dupcanon/judge_runtime.py` and reused by `judge`, `judge-audit`, and `detect-new`.
+- Judge client plumbing + parse/veto helpers are centralized in `src/dupcanon/judge_runtime.py`; source-specific prompt orchestration for batch judge/audit lives in `src/dupcanon/judge_service.py` and `src/dupcanon/judge_audit_service.py`.
 - For `judge --source intent` and `judge-audit --source intent`, judging now uses an intent-card-specific prompt (with automatic fallback to raw prompt when fresh intent cards are unavailable).
 - Canonical selection priority is:
   1. open if any open item exists
@@ -250,8 +250,10 @@ rg "validation_alias=\"DUPCANON_" src/dupcanon/config.py
 # provider/model/thinking resolution + guardrails
 rg "def default_judge_model|validate_thinking_for_provider|require_judge_api_key" src/dupcanon/judge_providers.py
 
-# shared judge runtime used by judge + judge-audit + detect-new
-rg "SYSTEM_PROMPT|def get_thread_local_judge_client|def build_user_prompt|def parse_judge_decision" src/dupcanon/judge_runtime.py
+# shared judge runtime primitives + source-specific prompt orchestration
+rg "def get_thread_local_judge_client|def build_user_prompt|def parse_judge_decision" src/dupcanon/judge_runtime.py
+rg "_SYSTEM_PROMPT_INTENT|_build_intent_prompt_or_none" src/dupcanon/judge_service.py
+rg "_process_work_item|system_prompt_override|user_prompt_override" src/dupcanon/judge_audit_service.py
 
 # retry + validation primitives shared across clients
 rg "def should_retry_http_status|def retry_delay_seconds|def validate_max_attempts" src/dupcanon/llm_retry.py
