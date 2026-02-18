@@ -280,7 +280,7 @@ def _bootstrap(command: str) -> tuple[Settings, str, BoundLogger]:
     ensure_runtime_directories(settings)
 
     run_id = uuid.uuid4().hex[:12]
-    configure_logging(log_level=settings.log_level)
+    configure_logging(log_level=settings.log_level, logfire_token=settings.logfire_token)
 
     logger = get_logger("dupcanon").bind(
         run_id=run_id,
@@ -798,6 +798,7 @@ def init() -> None:
         ),
         "pi CLI on PATH (required when judge provider=openai-codex)": bool(shutil.which("pi")),
         "GITHUB_TOKEN (optional if gh auth is used)": bool(settings.github_token),
+        "LOGFIRE_TOKEN (optional for remote logs)": bool(settings.logfire_token),
         "Artifacts dir exists": settings.artifacts_dir.exists(),
     }
 

@@ -17,13 +17,14 @@ def _format_value(value: Any) -> str:
     return str(value)
 
 
-def _configure_logfire_once() -> None:
+def _configure_logfire_once(*, token: str | None = None) -> None:
     global _LOGFIRE_CONFIGURED
     if _LOGFIRE_CONFIGURED:
         return
 
     logfire.configure(
         send_to_logfire="if-token-present",
+        token=token,
         console=False,
     )
     _LOGFIRE_CONFIGURED = True
@@ -56,10 +57,10 @@ class BoundLogger:
         self._log(logging.ERROR, event, **kwargs)
 
 
-def configure_logging(*, log_level: str) -> None:
+def configure_logging(*, log_level: str, logfire_token: str | None = None) -> None:
     """Configure Rich console logging + Logfire sink for remote observability."""
     level = getattr(logging, log_level.upper(), logging.INFO)
-    _configure_logfire_once()
+    _configure_logfire_once(token=logfire_token)
 
     logging.basicConfig(
         level=level,

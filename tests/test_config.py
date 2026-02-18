@@ -14,6 +14,7 @@ def test_load_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
     monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("LOGFIRE_TOKEN", "logfire-token")
     monkeypatch.setenv("DUPCANON_ARTIFACTS_DIR", str(artifacts_dir))
     monkeypatch.setenv("DUPCANON_LOG_LEVEL", "debug")
     monkeypatch.setenv("DUPCANON_EMBEDDING_PROVIDER", "gemini")
@@ -40,6 +41,7 @@ def test_load_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert settings.openai_api_key == "openai-key"
     assert settings.openrouter_api_key == "openrouter-key"
     assert settings.github_token == "gh-token"
+    assert settings.logfire_token == "logfire-token"
     assert settings.artifacts_dir == artifacts_dir
     assert settings.log_level == "DEBUG"
     assert settings.embedding_provider == "gemini"
@@ -66,6 +68,7 @@ def test_load_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("LOGFIRE_TOKEN", raising=False)
     monkeypatch.delenv("DUPCANON_ARTIFACTS_DIR", raising=False)
     monkeypatch.delenv("DUPCANON_LOG_LEVEL", raising=False)
     monkeypatch.delenv("DUPCANON_EMBEDDING_PROVIDER", raising=False)
@@ -92,6 +95,7 @@ def test_load_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert settings.openai_api_key is None
     assert settings.openrouter_api_key is None
     assert settings.github_token is None
+    assert settings.logfire_token is None
     assert str(settings.artifacts_dir) == ".local/artifacts"
     assert settings.log_level == "INFO"
     assert settings.embedding_provider == "openai"

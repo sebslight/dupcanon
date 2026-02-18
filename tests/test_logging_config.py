@@ -34,6 +34,7 @@ def test_configure_logging_wires_logfire_handler_and_rich(monkeypatch) -> None:
 
     assert captured.get("configure_kwargs") == {
         "send_to_logfire": "if-token-present",
+        "token": None,
         "console": False,
     }
     assert isinstance(captured.get("fallback"), logging.NullHandler)
@@ -83,3 +84,29 @@ def test_configure_logging_defaults_invalid_level_to_info(monkeypatch) -> None:
     logging_config.configure_logging(log_level="NOTALEVEL")
 
     assert logging.getLogger().level == logging.INFO
+
+
+def test_configure_logging_passes_explicit_logfire_token(monkeypatch) -> None:
+    _reset_logfire_configured_flag()
+    captured: dict[str, Any] = {}
+
+    class FakeLogfireHandler(logging.Handler):
+        def __init__(self, fallback=None) -> None:
+            super().__init__()
+
+        def emit(self, record: logging.LogRecord) -> None:
+            return
+
+    def fake_configure(**kwargs) -> None:
+        captured["configure_kwargs"] = kwargs
+
+    monkeypatch.setattr(logging_config.logfire, "configure", fake_configure)
+    monkeypatch.setattr(logging_config.logfire, "LogfireLoggingHandler", FakeLogfireHandler)
+
+    logging_config.configure_logging(log_level="INFO", logfire_token="test-token")
+
+    assert captured.get("configure_kwargs") == {
+        "send_to_logfire": "if-token-present",
+        "token": "test-token",
+        "console": False,
+    }

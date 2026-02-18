@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openrouter_api_key: str | None = Field(default=None, validation_alias="OPENROUTER_API_KEY")
     github_token: str | None = Field(default=None, validation_alias="GITHUB_TOKEN")
+    logfire_token: str | None = Field(default=None, validation_alias="LOGFIRE_TOKEN")
     embedding_provider: str = Field(
         default="openai",
         validation_alias="DUPCANON_EMBEDDING_PROVIDER",
