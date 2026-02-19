@@ -9,7 +9,7 @@ Implementation status snapshot (2026-02-14)
 - Judge client + parse/veto primitives are centralized in `src/dupcanon/judge_runtime.py`; batch source-specific prompt orchestration is implemented in judge/judge-audit services.
 - Shared retry/backoff/attempt validation primitives are centralized in `src/dupcanon/llm_retry.py`.
 - Known remaining gaps: no first-class Phase 9 evaluation command yet.
-- Proposed extension planning doc (not yet active default): `docs/internal/intent_card_pipeline_design_doc_v1.md`.
+- Intent-card extension planning doc (now default representation): `docs/internal/intent_card_pipeline_design_doc_v1.md`.
 
 This doc proposes a human-operated CLI that detects duplicate GitHub issues and PRs, canonicalizes duplicates into a single “canonical” item, and optionally closes duplicates. Storage is Supabase (Postgres + pgvector). The key design choice is graph-based canonicalization so we never create “closed in favor of” chains.
 
@@ -154,15 +154,16 @@ Single CLI, subcommands. Example name: dupcanon.
     - single scenario (`--simulate-gates` + gate values)
     - sweep mode (`--simulate-sweep gap ...`) for threshold tuning.
 
-- dupcanon detect-new --repo org/name --type issue|pr --number N [--provider ...] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--k 8] [--min-score 0.75] [--maybe-threshold 0.85] [--duplicate-threshold 0.92] [--json-out path]
+- dupcanon detect-new --repo org/name --type issue|pr --number N [--source raw|intent] [--provider ...] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--k 8] [--min-score 0.75] [--maybe-threshold 0.85] [--duplicate-threshold 0.92] [--json-out path]
   - Runs one-item online duplicate detection using the same provider/model/thinking controls as judge.
   - Model resolution matches judge behavior (`--model` override, otherwise configured-provider match, otherwise provider defaults).
 
 - dupcanon canonicalize --repo org/name --type issue|pr [--source raw|intent]
   - Computes canonical statistics on the fly from accepted edges (no canonical table materialization in v1).
 
-- dupcanon plan-close --repo org/name --type issue|pr [--source raw|intent] [--min-close 0.90] [--maintainers-source collaborators] [--dry-run]
+- dupcanon plan-close --repo org/name --type issue|pr [--source raw|intent] [--min-close 0.90] [--maintainers-source collaborators] [--target-policy canonical-only|direct-fallback] [--dry-run]
   - Produces a close_run and close_run_items for explicit human review.
+  - Default target policy is `canonical-only`; optional `direct-fallback` closes to the source item's direct accepted target when source->canonical evidence is missing.
 
 - dupcanon apply-close --close-run <id> [--yes]
   - Executes GitHub close operations for a reviewed plan run.
@@ -422,11 +423,13 @@ Important note about canonical drift
 - v1 policy: we accept drift (we do not go reopen and re-close previously closed items). We document this as a known limitation.
 
 Closing rule
-- When closing an item, always close it in favor of the current computed canonical for its cluster.
-- Never close in favor of a non-canonical intermediate.
-- Safety hardening: only plan/apply a close when there is a **direct accepted edge**
-  `from_item -> canonical_item` with confidence `>= min_close`.
+- Default (`--target-policy canonical-only`): close in favor of the current computed canonical for the cluster.
+  - Safety hardening: only plan/apply a close when there is a **direct accepted edge**
+    `from_item -> canonical_item` with confidence `>= min_close`.
   - A transitive path through intermediate nodes is not sufficient for close eligibility.
+- Optional (`--target-policy direct-fallback`): when `from_item -> canonical_item` is missing,
+  allow close to the source item's direct accepted target (`from_item -> to_item`) if confidence
+  meets `min_close` and other guardrails pass.
 
 
 ## Similarity retrieval
@@ -558,6 +561,7 @@ Staleness propagation
 - Embed worker concurrency: 2 (configurable)
 - Candidates concurrency: 4 (configurable)
 - Judge concurrency: 4 (configurable)
+- Default representation source: `intent` for `embed|candidates|judge|judge-audit|canonicalize|plan-close|detect-new` (use `--source raw` for rollback/A-B)
 
 
 ## Error handling and retries

@@ -1422,3 +1422,109 @@ Validation
 What comes next
 1. Persist prompt provenance (`prompt_mode`, prompt version) to DB rows, not only failure artifacts/logs.
 2. Extend report tooling to summarize prompt-mode usage/fallback rates in judge and audit runs.
+
+### 2026-02-18 — Entry 55 (plan-close target policy flag: canonical-only default + direct-fallback option)
+
+Today we added an explicit close-target policy control to `plan-close` to recover transitive-only duplicate cases without changing the default precision-first behavior.
+
+What we changed
+- Added new enum `PlanCloseTargetPolicy` (`canonical-only`, `direct-fallback`) in `src/dupcanon/models.py`.
+- Extended `dupcanon plan-close` CLI with `--target-policy`:
+  - default: `canonical-only`
+  - optional: `direct-fallback`
+- Threaded target-policy handling through `src/dupcanon/cli.py` and `src/dupcanon/plan_close_service.py`:
+  - default behavior unchanged (`canonical-only` still requires direct source->canonical accepted edge)
+  - under `direct-fallback`, when source->canonical is missing, close planning can use the source item’s direct accepted target edge if confidence meets `--min-close`
+  - persisted close-plan rows now store the selected close target (canonical or fallback target)
+  - added `close_actions_direct_fallback` summary metric for operator visibility.
+- Test coverage updates:
+  - `tests/test_plan_close_service.py`: new regression validating transitive-chain recovery with `direct-fallback`.
+  - `tests/test_cli.py`: verifies `--target-policy` override propagation and help surface.
+- Documentation updates:
+  - `README.md`
+  - `docs/evaluation.mdx`
+  - `docs/architecture.mdx`
+  - `docs/index.mdx`
+  - `docs/internal/operator_runbook_v1.md`
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md`
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest` (315 passed)
+
+What comes next
+1. Add operator reporting to break down close-plan actions by target mode (`canonical` vs `direct-fallback`) and confidence buckets.
+2. Evaluate whether `direct-fallback` should enforce additional target-state constraints (for example, open-only fallback target) in future hardening.
+
+### 2026-02-18 — Entry 56 (online intent source path: `detect-new --source raw|intent`)
+
+Today we implemented the planned online source-selection extension so `detect-new` can run with intent-card retrieval (`--source intent`) while preserving safe fallback behavior.
+
+What we changed
+- Extended CLI in `src/dupcanon/cli.py`:
+  - added `detect-new --source raw|intent` (default `raw`),
+  - threaded source into `run_detect_new(...)` call and failure-artifact context.
+- Updated online service in `src/dupcanon/detect_new_service.py`:
+  - added `source: RepresentationSource` to `run_detect_new(...)` with default raw,
+  - added online intent path for source item:
+    - reuses latest fresh intent card when source hash matches,
+    - otherwise attempts extraction and persists a fresh intent card,
+    - writes a failed fallback intent card on extraction failure,
+    - embeds source intent card when hash changed,
+  - candidate retrieval now runs against the selected source representation (`raw` or `intent`) using existing DB representation-aware neighbor lookup,
+  - when `source=intent`, detect-new attempts the structured intent-card judge prompt path and falls back to raw prompt with explicit fallback metadata when intent prompt prerequisites are missing,
+  - result payload now includes source provenance fields:
+    - `requested_source`,
+    - `effective_source`,
+    - `source_fallback_reason`.
+- Added DB helper in `src/dupcanon/database.py`:
+  - `get_intent_embedding_hash(intent_card_id, model)` for cheap source intent-embedding freshness checks.
+- Added/updated tests:
+  - `tests/test_cli.py`:
+    - detect-new help includes `--source`,
+    - detect-new source default and override propagation.
+  - `tests/test_detect_new_service.py`:
+    - intent source path uses intent neighbor retrieval + structured intent prompt,
+    - intent extraction failure falls back to raw retrieval and reports fallback metadata.
+- Updated docs:
+  - `README.md` detect-new behavior notes,
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md` (`detect-new --source` status),
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md` command signature.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest` (319 passed)
+
+What comes next
+1. Add reporting helpers that summarize online fallback rates (`requested_source=intent` but `effective_source=raw`) by reason.
+2. Run side-by-side online shadow samples (`detect-new --source raw` vs `--source intent`) and compare precision-oriented outcomes before any default-source decision.
+
+### 2026-02-18 — Entry 57 (intent defaults across batch + online commands)
+
+Today we promoted intent to the default representation for all source-aware commands (batch + online), while keeping `--source raw` available for rollback/A-B.
+
+What we changed
+- Updated CLI defaults in `src/dupcanon/cli.py`:
+  - `embed`, `candidates`, `judge`, `judge-audit`, `canonicalize`, `plan-close`, `detect-new` now default to `--source intent`.
+- Updated service defaults:
+  - `run_embed`, `run_candidates`, `run_judge`, `run_judge_audit`, `run_canonicalize`, `run_plan_close`, and `run_detect_new` now default to `RepresentationSource.INTENT`.
+  - model/record defaults (`DetectNewResult`, `JudgeAuditRunReport`, `CloseRunRecord`) now default to intent representations.
+- Updated tests to keep raw-path coverage explicit where needed and to assert new CLI defaults.
+- Documentation updates for intent-as-default:
+  - `README.md` behavior notes + examples
+  - `docs/architecture.mdx`, `docs/evaluation.mdx`
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md`
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+  - `docs/internal/operator_runbook_v1.md`
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Add online fallback reporting to quantify intent fallback rates by reason.
+2. Schedule an explicit cutover review once A/B metrics are collected (keep `--source raw` rollback ready).

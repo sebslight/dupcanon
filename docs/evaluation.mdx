@@ -48,7 +48,7 @@ For each item we ingest:
 - Issues use `comments` as `comment_count`.
 - PRs use `comments` as `comment_count`; `review_comment_count` is populated when PR-specific review counts are available from the fetch path.
 - PR online detection only (`detect-new`) additionally fetches changed files + bounded patch excerpts for judge context.
-- Modeling for retrieval and batch judge is based on `title + body`. Comments are intentionally not part of semantic modeling in v1.
+- Modeling for retrieval and batch judge now defaults to intent cards (derived from `title + body`, plus PR context when available). Raw title/body remains the fallback when `--source raw` is selected.
 
 ## 2) Derived modeling data
 
@@ -245,8 +245,10 @@ Item is **close-eligible** only if:
 1. source item is open
 2. author is known and not maintainer
 3. assignees are known and none is maintainer
-4. direct accepted edge exists from source to canonical
-5. direct edge confidence >= `min_close` (default 0.90)
+4. edge evidence satisfies the selected target policy:
+   - `canonical-only` (default): direct accepted edge exists from source to canonical
+   - `direct-fallback`: if source->canonical is missing, allow source->direct-accepted-target
+5. selected edge confidence >= `min_close` (default 0.90)
 
 Otherwise action is `skip` with explicit reason:
 
@@ -292,8 +294,8 @@ This is the single-item classifier used for workflow automation.
 
 1. fetch source issue/PR from GitHub
 2. upsert source into `items`
-3. ensure source embedding freshness (embed only if stale/missing)
-4. retrieve open same-type neighbors (`k=8`, `min_score=0.75` defaults)
+3. ensure source intent-card + intent-embedding freshness (extract/embed when stale/missing; fall back to raw embeddings on intent failure)
+4. retrieve open same-type neighbors from intent embeddings by default (`k=8`, `min_score=0.75` defaults)
 
 ### PR-specific online context
 
@@ -344,7 +346,9 @@ If judge output is invalid:
 
 - `repos` upsert
 - source `items` upsert
-- source `embeddings` update (when stale/missing)
+- source `intent_cards` upsert (intent default)
+- source `intent_embeddings` update (when stale/missing)
+- source `embeddings` update when `--source raw` is selected or fallback occurs
 
 It does **not** persist:
 

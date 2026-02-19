@@ -198,6 +198,12 @@ Dry-run first:
 uv run dupcanon plan-close --repo <org/repo> --type issue --min-close 0.90 --dry-run
 ```
 
+Optional transitive-recovery mode (still review before apply):
+
+```bash
+uv run dupcanon plan-close --repo <org/repo> --type issue --min-close 0.90 --target-policy direct-fallback --dry-run
+```
+
 Persist reviewed plan:
 
 ```bash
@@ -216,10 +222,16 @@ uv run dupcanon apply-close --close-run <plan_run_id> --yes
 
 ### 8) Online single-item detection (shadow mode)
 
-Manual one-off check for a newly opened item:
+Manual one-off check for a newly opened item (default source is `intent`):
 
 ```bash
 uv run dupcanon detect-new --repo <org/repo> --type issue --number <n> --thinking low
+```
+
+Use `--source raw` for rollback/A-B or when intent extraction is unavailable:
+
+```bash
+uv run dupcanon detect-new --repo <org/repo> --type issue --number <n> --source raw
 ```
 
 PR example (includes changed-file + bounded patch excerpt context in judge prompt):
@@ -261,8 +273,9 @@ GitHub Actions shadow workflow
 ## Guardrails to remember
 
 - Maintainer-author and maintainer-assignee protections are applied during `plan-close`.
-- `plan-close` requires a **direct accepted edge** from source -> chosen canonical with confidence `>= min_close`.
-  - Accepted edges are now read from `judge_decisions` rows where `final_status='accepted'`.
+- `plan-close` default policy (`--target-policy canonical-only`) requires a **direct accepted edge** from source -> chosen canonical with confidence `>= min_close`.
+  - Optional `--target-policy direct-fallback` allows source -> direct-accepted-target when source -> canonical is missing.
+  - Accepted edges are read from `judge_decisions` rows where `final_status='accepted'`.
 - `apply-close` only accepts `close_run.mode = plan`.
 - There is no approval-file workflow in current v1.
 - Judge uncertainty handling:
