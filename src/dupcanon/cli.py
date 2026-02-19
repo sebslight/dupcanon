@@ -34,6 +34,7 @@ from dupcanon.models import (
     ItemType,
     JudgeAuditRunReport,
     JudgeAuditSimulationRow,
+    PlanCloseTargetPolicy,
     RepresentationSource,
     StateFilter,
     TypeFilter,
@@ -88,7 +89,7 @@ EMBED_PROVIDER_OPTION = typer.Option(
 )
 EMBED_MODEL_OPTION = typer.Option(None, "--model", help="Embedding model override")
 EMBED_SOURCE_OPTION = typer.Option(
-    RepresentationSource.RAW,
+    RepresentationSource.INTENT,
     "--source",
     help="Embedding source representation (raw or intent)",
 )
@@ -101,7 +102,7 @@ INCLUDE_OPTION = typer.Option(
     help="Include candidate item states (open, closed, all). Default is open.",
 )
 CANDIDATES_SOURCE_OPTION = typer.Option(
-    RepresentationSource.RAW,
+    RepresentationSource.INTENT,
     "--source",
     help="Candidate retrieval source representation (raw or intent)",
 )
@@ -117,7 +118,7 @@ CANDIDATES_WORKERS_OPTION = typer.Option(
 )
 JUDGE_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 JUDGE_SOURCE_OPTION = typer.Option(
-    RepresentationSource.RAW,
+    RepresentationSource.INTENT,
     "--source",
     help="Judge source representation (raw or intent)",
 )
@@ -146,7 +147,7 @@ JUDGE_WORKERS_OPTION = typer.Option(
 )
 JUDGE_AUDIT_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 JUDGE_AUDIT_SOURCE_OPTION = typer.Option(
-    RepresentationSource.RAW,
+    RepresentationSource.INTENT,
     "--source",
     help="Judge-audit source representation (raw or intent)",
 )
@@ -265,6 +266,11 @@ REPORT_AUDIT_SWEEP_STEP_OPTION = typer.Option(
 )
 DETECT_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 DETECT_NUMBER_OPTION = typer.Option(..., "--number", help="Issue/PR number to evaluate")
+DETECT_SOURCE_OPTION = typer.Option(
+    RepresentationSource.INTENT,
+    "--source",
+    help="Online retrieval source representation (raw or intent)",
+)
 DETECT_PROVIDER_OPTION = typer.Option(
     None,
     "--provider",
@@ -291,13 +297,13 @@ DETECT_DUPLICATE_THRESHOLD_OPTION = typer.Option(
 DETECT_JSON_OUT_OPTION = typer.Option(None, "--json-out", help="Write JSON result to this path")
 CANONICAL_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 CANONICAL_SOURCE_OPTION = typer.Option(
-    RepresentationSource.RAW,
+    RepresentationSource.INTENT,
     "--source",
     help="Canonicalization source representation (raw or intent)",
 )
 PLAN_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 PLAN_SOURCE_OPTION = typer.Option(
-    RepresentationSource.RAW,
+    RepresentationSource.INTENT,
     "--source",
     help="Plan-close source representation (raw or intent)",
 )
@@ -310,6 +316,15 @@ MAINTAINERS_SOURCE_OPTION = typer.Option(
     "collaborators",
     "--maintainers-source",
     help="Maintainer resolution source (v1: collaborators)",
+)
+PLAN_TARGET_POLICY_OPTION = typer.Option(
+    PlanCloseTargetPolicy.CANONICAL_ONLY,
+    "--target-policy",
+    help=(
+        "Close target policy: canonical-only (default) requires direct source->canonical "
+        "edge; direct-fallback allows source->direct-accepted-target when canonical "
+        "edge is missing"
+    ),
 )
 CLOSE_RUN_OPTION = typer.Option(..., help="Close run id")
 YES_OPTION = typer.Option(False, "--yes", help="Confirm apply-close execution")
@@ -1594,6 +1609,7 @@ def detect_new(
     repo: str = REPO_OPTION,
     item_type: ItemType = DETECT_TYPE_OPTION,
     number: int = DETECT_NUMBER_OPTION,
+    source: RepresentationSource = DETECT_SOURCE_OPTION,
     provider: str | None = DETECT_PROVIDER_OPTION,
     model: str | None = DETECT_MODEL_OPTION,
     thinking: str | None = DETECT_THINKING_OPTION,
@@ -1621,6 +1637,7 @@ def detect_new(
             repo_value=repo,
             item_type=item_type,
             number=number,
+            source=source,
             provider=effective_provider,
             model=effective_model,
             thinking_level=effective_thinking,
@@ -1641,6 +1658,7 @@ def detect_new(
                 "repo": repo,
                 "type": item_type.value,
                 "number": number,
+                "source": source.value,
                 "provider": effective_provider,
                 "model": effective_model,
                 "thinking": effective_thinking,
@@ -1739,6 +1757,7 @@ def plan_close(
     min_close: float = MIN_CLOSE_OPTION,
     maintainers_source: str = MAINTAINERS_SOURCE_OPTION,
     source: RepresentationSource = PLAN_SOURCE_OPTION,
+    target_policy: PlanCloseTargetPolicy = PLAN_TARGET_POLICY_OPTION,
     dry_run: bool = DRY_RUN_OPTION,
 ) -> None:
     """Build a close plan with guardrails."""
@@ -1752,6 +1771,7 @@ def plan_close(
             min_close=min_close,
             maintainers_source=maintainers_source,
             source=source,
+            target_policy=target_policy,
             dry_run=dry_run,
             console=console,
             logger=logger,
@@ -1768,6 +1788,7 @@ def plan_close(
                 "min_close": min_close,
                 "maintainers_source": maintainers_source,
                 "source": source.value,
+                "target_policy": target_policy.value,
                 "dry_run": dry_run,
             },
         )
@@ -1789,6 +1810,7 @@ def plan_close(
     table.add_row("min_close", str(min_close))
     table.add_row("maintainers_source", maintainers_source)
     table.add_row("source", source.value)
+    table.add_row("target_policy", target_policy.value)
     for key, value in stats.model_dump().items():
         table.add_row(key, str(value))
 

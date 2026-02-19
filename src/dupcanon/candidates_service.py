@@ -213,7 +213,7 @@ def run_candidates(
     source_state_filter: StateFilter,
     dry_run: bool,
     worker_concurrency: int | None,
-    source: RepresentationSource = RepresentationSource.RAW,
+    source: RepresentationSource = RepresentationSource.INTENT,
     console: Console,
     logger: BoundLogger,
 ) -> CandidateStats:

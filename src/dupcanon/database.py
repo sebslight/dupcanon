@@ -725,6 +725,30 @@ class Database:
                 ),
             )
 
+    def get_intent_embedding_hash(
+        self,
+        *,
+        intent_card_id: int,
+        model: str,
+    ) -> str | None:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select embedded_card_hash
+                from public.intent_embeddings
+                where intent_card_id = %s and model = %s
+                limit 1
+                """,
+                (intent_card_id, model),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        embedded_card_hash = row.get("embedded_card_hash")
+        return str(embedded_card_hash) if embedded_card_hash is not None else None
+
     def list_candidate_source_items(
         self,
         *,

@@ -1445,7 +1445,7 @@ def run_judge(
     console: Console,
     logger: BoundLogger,
     thinking_level: str | None = None,
-    source: RepresentationSource = RepresentationSource.RAW,
+    source: RepresentationSource = RepresentationSource.INTENT,
 ) -> JudgeStats:
     command_started = perf_counter()
 

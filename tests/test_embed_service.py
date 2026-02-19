@@ -86,6 +86,7 @@ def test_run_embed_only_changed_skips_unchanged(
         repo_value="org/repo",
         type_filter=TypeFilter.ISSUE,
         only_changed=True,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -161,6 +162,7 @@ def test_run_embed_batch_failure_falls_back_to_single_items(
         repo_value="org/repo",
         type_filter=TypeFilter.ISSUE,
         only_changed=False,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -221,6 +223,7 @@ def test_run_embed_openai_provider_works(monkeypatch: pytest.MonkeyPatch, tmp_pa
         repo_value="org/repo",
         type_filter=TypeFilter.ISSUE,
         only_changed=False,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -248,6 +251,7 @@ def test_run_embed_openai_provider_requires_api_key(
             repo_value="org/repo",
             type_filter=TypeFilter.ISSUE,
             only_changed=False,
+            source=RepresentationSource.RAW,
             console=Console(),
             logger=get_logger("test"),
         )

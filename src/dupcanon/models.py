@@ -32,6 +32,11 @@ class RepresentationSource(StrEnum):
     INTENT = "intent"
 
 
+class PlanCloseTargetPolicy(StrEnum):
+    CANONICAL_ONLY = "canonical-only"
+    DIRECT_FALLBACK = "direct-fallback"
+
+
 class IntentCardStatus(StrEnum):
     FRESH = "fresh"
     STALE = "stale"
@@ -574,7 +579,7 @@ class JudgeAuditRunReport(BaseModel):
     sample_size_actual: int
     candidate_set_status: str
     source_state_filter: str
-    representation: RepresentationSource = RepresentationSource.RAW
+    representation: RepresentationSource = RepresentationSource.INTENT
     min_edge: float
     cheap_provider: str
     cheap_model: str
@@ -655,6 +660,9 @@ class DetectNewResult(BaseModel):
     top_matches: list[DetectTopMatch] = Field(default_factory=list)
     provider: str
     model: str
+    requested_source: RepresentationSource = RepresentationSource.INTENT
+    effective_source: RepresentationSource = RepresentationSource.INTENT
+    source_fallback_reason: str | None = None
     run_id: str
     timestamp: datetime
     error_class: str | None = None
@@ -760,6 +768,7 @@ class PlanCloseStats(BaseModel):
     clusters: int = 0
     considered: int = 0
     close_actions: int = 0
+    close_actions_direct_fallback: int = 0
     skip_actions: int = 0
     skipped_not_open: int = 0
     skipped_low_confidence: int = 0
@@ -779,7 +788,7 @@ class CloseRunRecord(BaseModel):
     item_type: ItemType
     mode: Literal["plan", "apply"]
     min_confidence_close: float
-    representation: RepresentationSource = RepresentationSource.RAW
+    representation: RepresentationSource = RepresentationSource.INTENT
 
 
 class ClosePlanEntry(BaseModel):

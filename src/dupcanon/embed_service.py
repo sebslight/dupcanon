@@ -145,7 +145,7 @@ def run_embed(
     logger: BoundLogger,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
-    source: RepresentationSource = RepresentationSource.RAW,
+    source: RepresentationSource = RepresentationSource.INTENT,
 ) -> EmbedStats:
     command_started = perf_counter()
 

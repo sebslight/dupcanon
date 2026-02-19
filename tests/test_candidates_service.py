@@ -104,6 +104,7 @@ def test_run_candidates_builds_sets_and_members(monkeypatch) -> None:
         source_state_filter=StateFilter.OPEN,
         dry_run=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -214,6 +215,7 @@ def test_run_candidates_dry_run_does_not_write(monkeypatch) -> None:
         source_state_filter=StateFilter.OPEN,
         dry_run=True,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )

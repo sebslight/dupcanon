@@ -330,7 +330,7 @@ def test_candidates_defaults_include_open(monkeypatch: pytest.MonkeyPatch) -> No
 
     source = captured.get("source")
     assert source is not None
-    assert getattr(source, "value", None) == "raw"
+    assert getattr(source, "value", None) == "intent"
 
     source_state_filter = captured.get("source_state_filter")
     assert source_state_filter is not None
@@ -462,6 +462,7 @@ def test_detect_new_help_includes_core_options() -> None:
     assert result.exit_code == 0
     assert "--type" in result.stdout
     assert "--number" in result.stdout
+    assert "--source" in result.stdout
     assert "--provider" in result.stdout
     assert "--model" in result.stdout
     assert "--k" in result.stdout
@@ -469,6 +470,100 @@ def test_detect_new_help_includes_core_options() -> None:
     assert "--maybe-threshold" in result.stdout
     assert "--duplicate-threshold" in result.stdout
     assert "--json-out" in result.stdout
+
+
+def test_detect_new_defaults_source_intent(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_detect_new(**kwargs):
+        captured.update(kwargs)
+        return DetectNewResult(
+            repo="org/repo",
+            type=ItemType.ISSUE,
+            source=DetectSource(number=1, title="Issue 1"),
+            verdict=DetectVerdict.NOT_DUPLICATE,
+            is_duplicate=False,
+            confidence=0.12,
+            duplicate_of=None,
+            reasoning="No match",
+            top_matches=[],
+            provider="openai",
+            model="gpt-5-mini",
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+        )
+
+    monkeypatch.setattr("dupcanon.cli.run_detect_new", fake_run_detect_new)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "detect-new",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--number",
+            "1",
+            "--provider",
+            "openai",
+        ],
+    )
+
+    assert result.exit_code == 0
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "intent"
+
+
+def test_detect_new_passes_source_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_detect_new(**kwargs):
+        captured.update(kwargs)
+        return DetectNewResult(
+            repo="org/repo",
+            type=ItemType.ISSUE,
+            source=DetectSource(number=1, title="Issue 1"),
+            verdict=DetectVerdict.NOT_DUPLICATE,
+            is_duplicate=False,
+            confidence=0.12,
+            duplicate_of=None,
+            reasoning="No match",
+            top_matches=[],
+            provider="openai",
+            model="gpt-5-mini",
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+        )
+
+    monkeypatch.setattr("dupcanon.cli.run_detect_new", fake_run_detect_new)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    result = runner.invoke(
+        app,
+        [
+            "detect-new",
+            "--repo",
+            "org/repo",
+            "--type",
+            "issue",
+            "--number",
+            "1",
+            "--source",
+            "intent",
+            "--provider",
+            "openai",
+        ],
+    )
+
+    assert result.exit_code == 0
+    source = captured.get("source")
+    assert source is not None
+    assert getattr(source, "value", None) == "intent"
 
 
 def test_judge_defaults_openai_model_when_provider_openai(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -492,7 +587,7 @@ def test_judge_defaults_openai_model_when_provider_openai(monkeypatch: pytest.Mo
     assert captured.get("model") == "gpt-5-mini"
     source = captured.get("source")
     assert source is not None
-    assert getattr(source, "value", None) == "raw"
+    assert getattr(source, "value", None) == "intent"
 
 
 def test_judge_defaults_gemini_model_when_provider_gemini(
@@ -667,7 +762,7 @@ def test_judge_audit_invokes_service(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured.get("sample_seed") == 7
     source = captured.get("source")
     assert source is not None
-    assert getattr(source, "value", None) == "raw"
+    assert getattr(source, "value", None) == "intent"
     assert captured.get("cheap_provider") == "gemini"
     assert captured.get("cheap_thinking_level") == "low"
     assert captured.get("strong_provider") == "openai"
@@ -1258,7 +1353,9 @@ def test_canonicalize_passes_source_override(monkeypatch: pytest.MonkeyPatch) ->
     assert getattr(source, "value", None) == "intent"
 
 
-def test_plan_close_passes_source_override(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_plan_close_passes_source_and_target_policy_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, object] = {}
 
     def fake_run_plan_close(**kwargs):
@@ -1278,6 +1375,8 @@ def test_plan_close_passes_source_override(monkeypatch: pytest.MonkeyPatch) -> N
             "issue",
             "--source",
             "intent",
+            "--target-policy",
+            "direct-fallback",
             "--dry-run",
         ],
     )
@@ -1286,6 +1385,10 @@ def test_plan_close_passes_source_override(monkeypatch: pytest.MonkeyPatch) -> N
     source = captured.get("source")
     assert source is not None
     assert getattr(source, "value", None) == "intent"
+
+    target_policy = captured.get("target_policy")
+    assert target_policy is not None
+    assert getattr(target_policy, "value", None) == "direct-fallback"
 
 
 def test_canonicalize_help_includes_type() -> None:
@@ -1304,6 +1407,7 @@ def test_plan_close_help_includes_core_options() -> None:
     assert "--min-close" in result.stdout
     assert "--maintainers-source" in result.stdout
     assert "--source" in result.stdout
+    assert "--target-policy" in result.stdout
     assert "--dry-run" in result.stdout
 
 
