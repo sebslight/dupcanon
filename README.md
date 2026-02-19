@@ -51,6 +51,7 @@ Internal deep docs:
 - `dupcanon judge`
 - `dupcanon judge-audit`
 - `dupcanon report-audit`
+- `dupcanon search`
 - `dupcanon detect-new`
 - `dupcanon canonicalize`
 - `dupcanon maintainers`
@@ -66,6 +67,12 @@ Internal deep docs:
 - Operational candidate retrieval defaults to open source items (`candidates --source-state open`) and open candidate neighbors (`--include open`) with default clustering `k=4`, `min_score=0.75`.
 - Judge acceptance defaults: `min_edge=0.85`, target must be open, and selected candidate score gap vs best alternate must be `>= 0.015`; accepted-edge uniqueness is enforced per source representation.
 - `plan-close` defaults to `--target-policy canonical-only`, which requires a **direct accepted edge** to canonical (`>= min_close`, default `0.90`) plus maintainer author/assignee protections; optional `--target-policy direct-fallback` allows closing to the item's direct accepted target when canonical edge evidence is missing.
+- `search` provides one-shot semantic retrieval over issues/PRs (`--source intent` default, optional `--source raw`) with default human-readable table output and optional `--json` output.
+- `search` base signal requires exactly one of `--query "..."` or `--similar-to <number>`; optional repeatable `--include` / `--exclude` terms add flexible semantic constraints.
+- `search` include behavior defaults to `--include-mode boost` (soft rerank) and can be switched to `--include-mode filter` (hard gate).
+- Include influence is tunable via `--include-weight` (default `0.15`) and semantic constraint thresholds are tunable via `--include-threshold` (default `0.20`) and `--exclude-threshold` (default `0.20`).
+- `--debug-constraints` surfaces per-hit include/exclude semantic scores (JSON and summary table columns) for threshold tuning.
+- `search` is read-only in v1 and does not persist search runs to DB tables.
 - `detect-new` is a precision-first online classifier (`duplicate` / `maybe_duplicate` / `not_duplicate`) with stricter duplicate thresholds and downgrade guardrails.
 - `detect-new` now supports `--source raw|intent` (default `intent`). In `intent` mode it attempts online intent extraction + intent embedding retrieval, and falls back to raw mode with explicit result metadata when intent extraction/prompt prerequisites are unavailable.
 - In v1, `detect-new` persists source/corpus state (`items`, source `embeddings` when stale) but does not persist online judge outcomes to `judge_decisions`.
@@ -163,6 +170,20 @@ uv run dupcanon detect-new --repo openclaw/openclaw --type issue --number 123 --
 # optional online raw fallback
 # uv run dupcanon detect-new --repo openclaw/openclaw --type issue --number 123 --source raw --thinking low
 
+# one-shot semantic search (read-only)
+uv run dupcanon search --repo openclaw/openclaw --query "cron scheduler regressions" --type all
+# anchor-based search with semantic constraints
+uv run dupcanon search --repo openclaw/openclaw --similar-to 128 --type issue --exclude whatsapp
+# optional threshold tuning for constraints
+# uv run dupcanon search --repo openclaw/openclaw --similar-to 128 --type issue \
+#   --exclude whatsapp --exclude-threshold 0.15 --include scheduler --include-mode boost \
+#   --include-weight 0.20 --include-threshold 0.20
+# optional per-hit constraint diagnostics
+# uv run dupcanon search --repo openclaw/openclaw --query "cron nextwake" \
+#   --exclude gateway --debug-constraints --json
+# optional machine-readable output
+# uv run dupcanon search --repo openclaw/openclaw --query "cron scheduler regressions" --json
+
 # optional sampled cheap-vs-strong audit
 # uv run dupcanon judge-audit --repo openclaw/openclaw --type issue --sample-size 100 --seed 42 \
 #   --cheap-provider gemini --cheap-thinking low --strong-provider openai --strong-thinking high --workers 4
@@ -198,7 +219,8 @@ All LLM-using commands support explicit CLI flags and env-backed defaults.
 - `report-audit`
   - flags: `--run-id`, `--show-disagreements/--no-show-disagreements`, `--disagreements-limit`, `--simulate-gates`, `--gate-rank-max`, `--gate-score-min`, `--gate-gap-min`, `--simulate-sweep gap`, `--sweep-from`, `--sweep-to`, `--sweep-step`
   - uses persisted `judge_audit_runs` + `judge_audit_run_items` data only (no LLM calls)
-- Non-LLM downstream source controls:
+- Non-LLM source controls:
+  - `search --source raw|intent [--query ... | --similar-to N] [--include term] [--exclude term] [--include-mode boost|filter] [--include-weight 0..1] [--include-threshold 0..1] [--exclude-threshold 0..1] [--debug-constraints] [--type issue|pr|all] [--state open|closed|all]`
   - `canonicalize --source raw|intent`
   - `plan-close --source raw|intent [--target-policy canonical-only|direct-fallback]`
 

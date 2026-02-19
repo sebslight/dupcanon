@@ -10,6 +10,7 @@ Implementation status snapshot (2026-02-14)
 - Shared retry/backoff/attempt validation primitives are centralized in `src/dupcanon/llm_retry.py`.
 - Known remaining gaps: no first-class Phase 9 evaluation command yet.
 - Intent-card extension planning doc (now default representation): `docs/internal/intent_card_pipeline_design_doc_v1.md`.
+- Semantic query CLI extension planning doc: `docs/internal/semantic_search_cli_design_doc_v1.md`.
 
 This doc proposes a human-operated CLI that detects duplicate GitHub issues and PRs, canonicalizes duplicates into a single “canonical” item, and optionally closes duplicates. Storage is Supabase (Postgres + pgvector). The key design choice is graph-based canonicalization so we never create “closed in favor of” chains.
 
@@ -153,6 +154,16 @@ Single CLI, subcommands. Example name: dupcanon.
   - Optional non-LLM simulation modes let operators estimate precision/recall tradeoffs from stored rows:
     - single scenario (`--simulate-gates` + gate values)
     - sweep mode (`--simulate-sweep gap ...`) for threshold tuning.
+
+- dupcanon search --repo org/name [--query "..." | --similar-to N] [--include TERM] [--exclude TERM] [--include-mode boost|filter] [--include-weight 0..1] [--include-threshold 0..1] [--exclude-threshold 0..1] [--debug-constraints] [--type issue|pr|all] [--state open|closed|all] [--limit 10] [--min-score 0.30] [--source raw|intent] [--json] [--show-body-snippet/--no-show-body-snippet]
+  - Read-only one-shot semantic retrieval across issues/PRs.
+  - Base signal requires exactly one of `--query` or `--similar-to`.
+  - Optional repeatable `--include` / `--exclude` terms apply semantic constraint filtering.
+  - Include behavior defaults to `--include-mode boost` (soft rerank) and can be switched to `--include-mode filter` (hard include gate).
+  - Constraint tuning defaults: `--include-weight 0.15`, `--include-threshold 0.20`, `--exclude-threshold 0.20`.
+  - `--debug-constraints` prints per-hit include/exclude score diagnostics.
+  - Defaults: `--type all`, `--state open`, `--source intent`, table output.
+  - `--json` prints full JSON result payload to stdout (no DB search-run persistence in v1).
 
 - dupcanon detect-new --repo org/name --type issue|pr --number N [--source raw|intent] [--provider ...] [--model ...] [--thinking off|minimal|low|medium|high|xhigh] [--k 8] [--min-score 0.75] [--maybe-threshold 0.85] [--duplicate-threshold 0.92] [--json-out path]
   - Runs one-item online duplicate detection using the same provider/model/thinking controls as judge.
