@@ -1232,7 +1232,7 @@ def test_run_detect_new_openai_codex_uses_passed_model_without_api_key(
         number=77,
         source=RepresentationSource.RAW,
         provider="openai-codex",
-        model="gpt-5.1-mini-codex",
+        model="gpt-5.1-codex-mini",
         thinking_level="low",
         k=8,
         min_score=0.75,
@@ -1244,7 +1244,7 @@ def test_run_detect_new_openai_codex_uses_passed_model_without_api_key(
 
     assert result.verdict.value == "duplicate"
     assert captured["provider"] == "openai-codex"
-    assert captured["model"] == "gpt-5.1-mini-codex"
+    assert captured["model"] == "gpt-5.1-codex-mini"
     assert captured["api_key"] == ""
     assert captured["thinking_level"] == "low"
 
