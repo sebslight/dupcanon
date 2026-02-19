@@ -36,10 +36,12 @@ from dupcanon.models import (
     JudgeAuditSimulationRow,
     PlanCloseTargetPolicy,
     RepresentationSource,
+    SearchIncludeMode,
     StateFilter,
     TypeFilter,
 )
 from dupcanon.plan_close_service import run_plan_close
+from dupcanon.search_service import run_search
 from dupcanon.sync_service import run_refresh, run_sync
 from dupcanon.thinking import normalize_thinking_level
 
@@ -263,6 +265,70 @@ REPORT_AUDIT_SWEEP_STEP_OPTION = typer.Option(
     0.005,
     "--sweep-step",
     help="Sweep step value",
+)
+SEARCH_QUERY_OPTION = typer.Option(None, "--query", help="Natural-language search query")
+SEARCH_SIMILAR_TO_OPTION = typer.Option(
+    None,
+    "--similar-to",
+    help="Anchor item number for similarity search",
+)
+SEARCH_INCLUDE_OPTION = typer.Option(
+    None,
+    "--include",
+    help="Additional concept to require (repeatable)",
+)
+SEARCH_EXCLUDE_OPTION = typer.Option(
+    None,
+    "--exclude",
+    help="Concept to exclude (repeatable)",
+)
+SEARCH_TYPE_OPTION = typer.Option(TypeFilter.ALL, "--type", help="Item type filter")
+SEARCH_STATE_OPTION = typer.Option(
+    StateFilter.OPEN,
+    "--state",
+    help="Item state filter (open, closed, all). Default is open.",
+)
+SEARCH_LIMIT_OPTION = typer.Option(10, "--limit", help="Maximum search hits to return")
+SEARCH_MIN_SCORE_OPTION = typer.Option(0.30, "--min-score", help="Minimum similarity score")
+SEARCH_INCLUDE_THRESHOLD_OPTION = typer.Option(
+    0.20,
+    "--include-threshold",
+    help="Minimum semantic score required for include terms",
+)
+SEARCH_EXCLUDE_THRESHOLD_OPTION = typer.Option(
+    0.20,
+    "--exclude-threshold",
+    help="Maximum semantic score allowed for exclude terms",
+)
+SEARCH_INCLUDE_MODE_OPTION = typer.Option(
+    SearchIncludeMode.BOOST,
+    "--include-mode",
+    help="Include behavior: filter (hard gate) or boost (soft rerank)",
+)
+SEARCH_INCLUDE_WEIGHT_OPTION = typer.Option(
+    0.15,
+    "--include-weight",
+    help="Boost weight for include-mode=boost",
+)
+SEARCH_DEBUG_CONSTRAINTS_OPTION = typer.Option(
+    False,
+    "--debug-constraints/--no-debug-constraints",
+    help="Include per-hit include/exclude scores in JSON output and summaries",
+)
+SEARCH_SOURCE_OPTION = typer.Option(
+    RepresentationSource.INTENT,
+    "--source",
+    help="Search representation source (raw or intent)",
+)
+SEARCH_JSON_OPTION = typer.Option(
+    False,
+    "--json",
+    help="Print full JSON result to stdout",
+)
+SEARCH_SHOW_BODY_SNIPPET_OPTION = typer.Option(
+    False,
+    "--show-body-snippet/--no-show-body-snippet",
+    help="Include body snippets in output",
 )
 DETECT_TYPE_OPTION = typer.Option(..., "--type", help="Item type (issue or pr)")
 DETECT_NUMBER_OPTION = typer.Option(..., "--number", help="Issue/PR number to evaluate")
@@ -1601,6 +1667,160 @@ def report_audit(
                 console.print(f"[red]report-audit failed:[/red] {_friendly_error_message(exc)}")
                 raise typer.Exit(code=1) from exc
 
+    console.print(f"run_id: [bold]{run_id}[/bold]")
+
+
+@app.command()
+def search(
+    repo: str = REPO_OPTION,
+    query: str | None = SEARCH_QUERY_OPTION,
+    similar_to: int | None = SEARCH_SIMILAR_TO_OPTION,
+    include: list[str] | None = SEARCH_INCLUDE_OPTION,
+    exclude: list[str] | None = SEARCH_EXCLUDE_OPTION,
+    type_filter: TypeFilter = SEARCH_TYPE_OPTION,
+    state_filter: StateFilter = SEARCH_STATE_OPTION,
+    limit: int = SEARCH_LIMIT_OPTION,
+    min_score: float = SEARCH_MIN_SCORE_OPTION,
+    include_threshold: float = SEARCH_INCLUDE_THRESHOLD_OPTION,
+    exclude_threshold: float = SEARCH_EXCLUDE_THRESHOLD_OPTION,
+    include_mode: SearchIncludeMode = SEARCH_INCLUDE_MODE_OPTION,
+    include_weight: float = SEARCH_INCLUDE_WEIGHT_OPTION,
+    debug_constraints: bool = SEARCH_DEBUG_CONSTRAINTS_OPTION,
+    source: RepresentationSource = SEARCH_SOURCE_OPTION,
+    json_output: bool = SEARCH_JSON_OPTION,
+    show_body_snippet: bool = SEARCH_SHOW_BODY_SNIPPET_OPTION,
+) -> None:
+    """Run one-shot semantic search over issues/PRs."""
+    settings, run_id, logger = _bootstrap("search")
+
+    try:
+        result = run_search(
+            settings=settings,
+            repo_value=repo,
+            query=query,
+            similar_to_number=similar_to,
+            include_terms=include,
+            exclude_terms=exclude,
+            type_filter=type_filter,
+            state_filter=state_filter,
+            limit=limit,
+            min_score=min_score,
+            include_threshold=include_threshold,
+            exclude_threshold=exclude_threshold,
+            include_mode=include_mode,
+            include_weight=include_weight,
+            debug_constraints=debug_constraints,
+            source=source,
+            include_body_snippet=show_body_snippet,
+            run_id=run_id,
+            logger=logger,
+        )
+    except Exception as exc:  # noqa: BLE001
+        artifact_path = _persist_command_failure_artifact(
+            settings=settings,
+            logger=logger,
+            command="search",
+            error=exc,
+            context={
+                "repo": repo,
+                "query": query,
+                "similar_to": similar_to,
+                "include": include,
+                "exclude": exclude,
+                "type": type_filter.value,
+                "state": state_filter.value,
+                "limit": limit,
+                "min_score": min_score,
+                "include_threshold": include_threshold,
+                "exclude_threshold": exclude_threshold,
+                "include_mode": include_mode.value,
+                "include_weight": include_weight,
+                "debug_constraints": debug_constraints,
+                "source": source.value,
+                "json_output": json_output,
+                "show_body_snippet": show_body_snippet,
+            },
+        )
+        logger.error(
+            "search.failed",
+            stage="search",
+            status="error",
+            error_class=type(exc).__name__,
+            artifact_path=artifact_path,
+        )
+        console.print(f"[red]search failed:[/red] {_friendly_error_message(exc)}")
+        if artifact_path is not None:
+            console.print(f"artifact: [bold]{artifact_path}[/bold]")
+        raise typer.Exit(code=1) from exc
+
+    result_payload = result.model_dump(mode="json")
+    if json_output:
+        console.print(json.dumps(result_payload, indent=2, sort_keys=True))
+        return
+
+    table = Table(title="search results")
+    table.add_column("Rank", justify="right")
+    table.add_column("Type")
+    table.add_column("Number", justify="right")
+    table.add_column("State")
+    table.add_column("Score", justify="right")
+    table.add_column("Title")
+    table.add_column("URL")
+    if debug_constraints and (result.include_terms or result.exclude_terms):
+        table.add_column("IncMax", justify="right")
+        table.add_column("ExcMax", justify="right")
+    if show_body_snippet:
+        table.add_column("Body snippet")
+
+    for hit in result.hits:
+        row = [
+            str(hit.rank),
+            hit.type.value,
+            str(hit.number),
+            hit.state.value,
+            f"{hit.score:.3f}",
+            hit.title,
+            hit.url,
+        ]
+        if debug_constraints and (result.include_terms or result.exclude_terms):
+            inc_max = (
+                hit.constraint_debug.include_max_score
+                if hit.constraint_debug is not None
+                else None
+            )
+            exc_max = (
+                hit.constraint_debug.exclude_max_score
+                if hit.constraint_debug is not None
+                else None
+            )
+            row.append(f"{inc_max:.3f}" if inc_max is not None else "-")
+            row.append(f"{exc_max:.3f}" if exc_max is not None else "-")
+        if show_body_snippet:
+            row.append(hit.body_snippet or "")
+        table.add_row(*row)
+
+    console.print(table)
+    console.print(f"query: [bold]{result.query}[/bold]")
+    if result.similar_to_number is not None:
+        console.print(f"similar_to: [bold]#{result.similar_to_number}[/bold]")
+    if result.include_terms:
+        console.print(f"include: {', '.join(result.include_terms)}")
+        console.print(f"include_mode: {result.include_mode.value}")
+        console.print(f"include_weight: {result.include_weight:.3f}")
+        console.print(f"include_threshold: {result.include_threshold:.3f}")
+    if result.exclude_terms:
+        console.print(f"exclude: {', '.join(result.exclude_terms)}")
+        console.print(f"exclude_threshold: {result.exclude_threshold:.3f}")
+    if debug_constraints and (result.include_terms or result.exclude_terms):
+        console.print("debug_constraints: on")
+    console.print(
+        "source: "
+        f"requested={result.requested_source.value} "
+        f"effective={result.effective_source.value}"
+    )
+    if result.source_fallback_reason:
+        console.print(f"fallback_reason: [yellow]{result.source_fallback_reason}[/yellow]")
+    console.print(f"hits: [bold]{len(result.hits)}[/bold]")
     console.print(f"run_id: [bold]{run_id}[/bold]")
 
 

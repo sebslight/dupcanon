@@ -623,6 +623,219 @@ class CandidateItemContext(BaseModel):
     body: str | None = None
 
 
+class SearchAnchorItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    item_id: int
+    type: ItemType
+    number: int
+    title: str
+    body: str | None = None
+    url: str
+    state: StateFilter
+
+
+class SearchMatch(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    rank: int
+    item_id: int
+    type: ItemType
+    number: int
+    state: StateFilter
+    title: str
+    url: str
+    body: str | None = None
+    score: float
+
+    @field_validator("rank")
+    @classmethod
+    def validate_rank(cls, value: int) -> int:
+        if value <= 0:
+            msg = "rank must be > 0"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("score")
+    @classmethod
+    def validate_score(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            msg = "score must be between 0 and 1"
+            raise ValueError(msg)
+        return value
+
+
+class SearchConstraintDebug(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    include_scores: dict[str, float] = Field(default_factory=dict)
+    exclude_scores: dict[str, float] = Field(default_factory=dict)
+    include_max_score: float | None = None
+    exclude_max_score: float | None = None
+
+
+class SearchHit(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    rank: int
+    item_id: int
+    type: ItemType
+    number: int
+    state: StateFilter
+    title: str
+    url: str
+    score: float
+    body_snippet: str | None = None
+    constraint_debug: SearchConstraintDebug | None = None
+
+    @field_validator("rank")
+    @classmethod
+    def validate_rank(cls, value: int) -> int:
+        if value <= 0:
+            msg = "rank must be > 0"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("score")
+    @classmethod
+    def validate_score(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            msg = "score must be between 0 and 1"
+            raise ValueError(msg)
+        return value
+
+
+class SearchAnswer(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    citations: list[int] = Field(default_factory=list)
+    provider: str
+    model: str
+
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            msg = "text cannot be blank"
+            raise ValueError(msg)
+        return text
+
+
+class SearchIncludeMode(StrEnum):
+    FILTER = "filter"
+    BOOST = "boost"
+
+
+class SearchResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: str = "v1"
+    repo: str
+    query: str
+    similar_to_number: int | None = None
+    include_terms: list[str] = Field(default_factory=list)
+    exclude_terms: list[str] = Field(default_factory=list)
+    include_mode: SearchIncludeMode = SearchIncludeMode.BOOST
+    include_weight: float = 0.15
+    include_threshold: float = 0.20
+    exclude_threshold: float = 0.20
+    type_filter: TypeFilter
+    state_filter: StateFilter
+    requested_source: RepresentationSource
+    effective_source: RepresentationSource
+    source_fallback_reason: str | None = None
+    limit: int
+    min_score: float
+    hits: list[SearchHit] = Field(default_factory=list)
+    answer: SearchAnswer | None = None
+    run_id: str
+    timestamp: datetime
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            msg = "query cannot be blank"
+            raise ValueError(msg)
+        return text
+
+    @field_validator("similar_to_number")
+    @classmethod
+    def validate_similar_to_number(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if value <= 0:
+            msg = "similar_to_number must be > 0"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("limit")
+    @classmethod
+    def validate_limit(cls, value: int) -> int:
+        if value <= 0:
+            msg = "limit must be > 0"
+            raise ValueError(msg)
+        if value > 50:
+            msg = "limit must be <= 50"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("min_score")
+    @classmethod
+    def validate_min_score(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            msg = "min_score must be between 0 and 1"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("include_weight")
+    @classmethod
+    def validate_include_weight(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            msg = "include_weight must be between 0 and 1"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("include_threshold", "exclude_threshold")
+    @classmethod
+    def validate_term_thresholds(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            msg = "include/exclude thresholds must be between 0 and 1"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("include_terms", "exclude_terms")
+    @classmethod
+    def validate_terms(cls, values: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = normalize_text(value)
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(text)
+        return result
+
+    @model_validator(mode="after")
+    def validate_answer_citations(self) -> SearchResult:
+        if self.answer is None:
+            return self
+
+        hit_numbers = {hit.number for hit in self.hits}
+        for citation in self.answer.citations:
+            if citation not in hit_numbers:
+                msg = "answer citations must reference returned hit numbers"
+                raise ValueError(msg)
+        return self
+
+
 class DetectVerdict(StrEnum):
     DUPLICATE = "duplicate"
     MAYBE_DUPLICATE = "maybe_duplicate"

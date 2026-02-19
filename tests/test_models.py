@@ -14,6 +14,13 @@ from dupcanon.models import (
     ItemType,
     JudgeDecision,
     RepoRef,
+    RepresentationSource,
+    SearchAnswer,
+    SearchHit,
+    SearchIncludeMode,
+    SearchResult,
+    StateFilter,
+    TypeFilter,
     parse_since,
     render_intent_card_text_for_embedding,
     semantic_content_hash,
@@ -173,6 +180,141 @@ def test_detect_new_result_not_duplicate_rejects_duplicate_target() -> None:
             reasoning="Different issue.",
             provider="openai",
             model="gpt-5-mini",
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+        )
+
+
+def test_search_result_accepts_valid_citations() -> None:
+    result = SearchResult(
+        repo="org/repo",
+        query="cron failures",
+        type_filter=TypeFilter.ALL,
+        state_filter=StateFilter.OPEN,
+        requested_source=RepresentationSource.INTENT,
+        effective_source=RepresentationSource.INTENT,
+        limit=10,
+        min_score=0.6,
+        hits=[
+            SearchHit(
+                rank=1,
+                item_id=10,
+                type=ItemType.ISSUE,
+                number=123,
+                state=StateFilter.OPEN,
+                title="Cron job timeout",
+                url="https://github.com/org/repo/issues/123",
+                score=0.91,
+            )
+        ],
+        answer=SearchAnswer(
+            text="Most related item is #123.",
+            citations=[123],
+            provider="openai",
+            model="gpt-5-mini",
+        ),
+        run_id="run123",
+        timestamp=datetime.now(tz=UTC),
+    )
+
+    assert result.answer is not None
+    assert result.answer.citations == [123]
+
+
+def test_search_result_rejects_missing_citation_hit() -> None:
+    with pytest.raises(ValueError):
+        SearchResult(
+            repo="org/repo",
+            query="cron failures",
+            type_filter=TypeFilter.ALL,
+            state_filter=StateFilter.OPEN,
+            requested_source=RepresentationSource.INTENT,
+            effective_source=RepresentationSource.INTENT,
+            limit=10,
+            min_score=0.6,
+            hits=[
+                SearchHit(
+                    rank=1,
+                    item_id=10,
+                    type=ItemType.ISSUE,
+                    number=123,
+                    state=StateFilter.OPEN,
+                    title="Cron job timeout",
+                    url="https://github.com/org/repo/issues/123",
+                    score=0.91,
+                )
+            ],
+            answer=SearchAnswer(
+                text="Related to #999.",
+                citations=[999],
+                provider="openai",
+                model="gpt-5-mini",
+            ),
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+        )
+
+
+def test_search_result_normalizes_include_exclude_terms() -> None:
+    result = SearchResult(
+        repo="org/repo",
+        query="cron failures",
+        similar_to_number=128,
+        include_terms=[" cron ", "Cron", "scheduler"],
+        exclude_terms=["whatsapp", "  ", "WhatsApp"],
+        include_mode=SearchIncludeMode.FILTER,
+        include_weight=0.35,
+        include_threshold=0.4,
+        exclude_threshold=0.2,
+        type_filter=TypeFilter.ALL,
+        state_filter=StateFilter.OPEN,
+        requested_source=RepresentationSource.INTENT,
+        effective_source=RepresentationSource.INTENT,
+        limit=10,
+        min_score=0.6,
+        hits=[],
+        run_id="run123",
+        timestamp=datetime.now(tz=UTC),
+    )
+
+    assert result.similar_to_number == 128
+    assert result.include_terms == ["cron", "scheduler"]
+    assert result.exclude_terms == ["whatsapp"]
+    assert result.include_mode == SearchIncludeMode.FILTER
+    assert result.include_weight == 0.35
+    assert result.include_threshold == 0.4
+    assert result.exclude_threshold == 0.2
+
+
+def test_search_result_rejects_invalid_term_thresholds() -> None:
+    with pytest.raises(ValueError):
+        SearchResult(
+            repo="org/repo",
+            query="cron failures",
+            include_threshold=1.2,
+            type_filter=TypeFilter.ALL,
+            state_filter=StateFilter.OPEN,
+            requested_source=RepresentationSource.INTENT,
+            effective_source=RepresentationSource.INTENT,
+            limit=10,
+            min_score=0.6,
+            hits=[],
+            run_id="run123",
+            timestamp=datetime.now(tz=UTC),
+        )
+
+    with pytest.raises(ValueError):
+        SearchResult(
+            repo="org/repo",
+            query="cron failures",
+            include_weight=-0.1,
+            type_filter=TypeFilter.ALL,
+            state_filter=StateFilter.OPEN,
+            requested_source=RepresentationSource.INTENT,
+            effective_source=RepresentationSource.INTENT,
+            limit=10,
+            min_score=0.6,
+            hits=[],
             run_id="run123",
             timestamp=datetime.now(tz=UTC),
         )
