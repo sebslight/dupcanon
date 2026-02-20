@@ -205,7 +205,7 @@ def run_canonicalize(
     settings: Settings,
     repo_value: str,
     item_type: ItemType,
-    source: RepresentationSource = RepresentationSource.RAW,
+    source: RepresentationSource = RepresentationSource.INTENT,
     console: Console,
     logger: BoundLogger,
 ) -> CanonicalizeStats:

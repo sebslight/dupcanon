@@ -171,6 +171,8 @@ sequenceDiagram
 
 `detect-new` classifies one newly opened issue/PR into `duplicate`, `maybe_duplicate`, or `not_duplicate`.
 
+Default source is now `intent`. When intent extraction or prompt prerequisites fail, the run falls back to the raw-text path and records the fallback reason in the JSON output.
+
 ```mermaid
 flowchart TD
   A[GitHub issue/pr opened] --> B[detect-new --repo --type --number]
@@ -194,7 +196,9 @@ flowchart TD
     **Persists in v1:**
 
     - source row in `items` (upsert)
-    - source embedding in `embeddings` when stale/missing
+    - source intent card in `intent_cards` (intent mode)
+    - source intent embedding in `intent_embeddings` when stale/missing (intent mode)
+    - source embedding in `embeddings` when raw mode is selected or fallback is triggered
 
     **Does not persist in v1:**
 
@@ -220,20 +224,24 @@ flowchart TD
 This table is the operational truth for **what each command reads and writes**.
 </Warning>
 
+<Info>
+Default `--source` is now `intent` for source-aware commands. When `--source raw` is selected or fallback is triggered, replace intent-card/intent-embedding paths with the raw `embeddings` equivalents.
+</Info>
+
 | Command | Primary input | Reads | Writes | Output role |
 |---|---|---|---|---|
 | `init` | local env/runtime | env + local runtime checks | none | readiness checks only |
 | `maintainers` | `--repo` | GitHub collaborators/permissions | none | maintainer list for policy checks |
 | `sync` | repo + type/state/since | GitHub issues/PRs | `repos` (upsert), `items` (upsert + content hash/version) | corpus ingest |
 | `refresh` | repo + type | GitHub + existing `items` | `items` (discover new; optional metadata refresh) | incremental freshness |
-| `embed` | repo + type | `items` needing vectors | `embeddings` | semantic retrieval substrate |
-| `candidates` | repo + type + k/min_score | `items`, `embeddings` | `candidate_sets`, `candidate_set_members` (plus stale marking) | reproducible retrieval snapshot |
+| `embed` | repo + type | `items` needing vectors | `intent_embeddings` (default) / `embeddings` (raw) | semantic retrieval substrate |
+| `candidates` | repo + type + k/min_score | `items`, `intent_embeddings`/`embeddings` | `candidate_sets`, `candidate_set_members` (plus stale marking) | reproducible retrieval snapshot |
 | `judge` | repo + type + provider/model | `candidate_sets` + source/candidate item context | `judge_decisions` (`accepted/rejected/skipped`) | accepted-edge graph source |
 | `judge-audit` | sampled candidate sets | candidate sets + same judge runtime (cheap/strong lanes) | `judge_audit_runs`, `judge_audit_run_items` | evaluation + disagreement analysis |
 | `report-audit` | audit run id | `judge_audit_runs`, `judge_audit_run_items` | none | reporting/simulation only |
-| `detect-new` | single item number | GitHub item + DB corpus embeddings | `repos` (upsert), `items` (source upsert), `embeddings` (source if stale) | online JSON verdict |
+| `detect-new` | single item number | GitHub item + DB corpus intent/raw embeddings | `repos` (upsert), `items` (source upsert), `intent_cards` + `intent_embeddings` (intent default), `embeddings` (raw fallback) | online JSON verdict |
 | `canonicalize` | repo + type | accepted edges + item metadata + maintainer list | none (stats output) | canonical cluster computation |
-| `plan-close` | repo + type + min_close | accepted edges + item metadata + maintainer list | `close_runs(mode=plan)`, `close_run_items` (unless dry-run) | reviewable close plan |
+| `plan-close` | repo + type + min_close + target_policy | accepted edges + item metadata + maintainer list | `close_runs(mode=plan)`, `close_run_items` (unless dry-run) | reviewable close plan |
 | `apply-close` | `close_run_id` + `--yes` | close plan rows + GitHub | `close_runs(mode=apply)`, `close_run_items` apply results | executed mutations |
 
 ## Command-to-state map (Mermaid)
@@ -304,7 +312,7 @@ flowchart LR
     Duplicate edges require valid structured response, candidate membership, <code>confidence >= 0.85</code>, open target, and score-gap <code>>= 0.015</code>.
   </Card>
   <Card title="Close planning gate">
-    Close eligibility requires direct accepted edge to canonical, direct confidence <code>>= 0.90</code>, and maintainer author/assignee protections.
+    Default close policy requires direct accepted edge to canonical (<code>--target-policy canonical-only</code>); optional <code>direct-fallback</code> can use the source item's direct accepted target when canonical evidence is missing. Confidence stays <code>>= 0.90</code> and maintainer protections still apply.
   </Card>
   <Card title="Apply mutation gate">
     No mutation happens without persisted <code>mode=plan</code> run and explicit <code>--yes</code>.

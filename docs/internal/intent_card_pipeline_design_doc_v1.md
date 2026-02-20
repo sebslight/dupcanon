@@ -1,6 +1,6 @@
 # Intent-Card Representation Pipeline (v1 Proposal)
 
-Status: Phase 5 source-aware batch pipeline support in progress (`candidates|judge|judge-audit|canonicalize|plan-close --source` implemented; A/B quality reporting pending)
+Status: Phase 6/7 cutover complete (intent default for batch + online; raw remains rollback, A/B reporting still recommended)
 Owner: dupcanon
 Date: 2026-02-15
 
@@ -31,7 +31,7 @@ This doc proposes **how** to introduce intent cards without breaking existing sa
 
 ### Out of scope (for this proposal phase)
 
-1. Replacing v1 raw-text pipeline immediately.
+1. Full removal of the raw-text pipeline (raw rollback remains supported).
 2. Auto-closing directly from online/event inference.
 3. Unbounded autonomous repo exploration during extraction.
 4. Multi-repo orchestration.
@@ -271,8 +271,8 @@ This is required for audit/replay and A/B analysis.
 - `judge --source raw|intent`
 - `judge-audit --source raw|intent`
 - `canonicalize --source raw|intent`
-- `plan-close --source raw|intent`
-- `detect-new --source raw|intent` (planned; default remains raw until cutover)
+- `plan-close --source raw|intent [--target-policy canonical-only|direct-fallback]`
+- `detect-new --source raw|intent` (implemented; default is intent)
 
 ### Service modules
 
@@ -295,7 +295,7 @@ This is required for audit/replay and A/B analysis.
    - require `fact_provenance` so extracted facts are inspectable.
 5. **Fallback policy (Phase 0 lock)**:
    - extraction failure => mark `intent_cards.status=failed` + artifact.
-   - batch path: skip intent candidate generation for failed cards and continue raw path when `--source raw` (default) or explicit fallback mode is enabled.
+   - batch path: skip intent candidate generation for failed cards and continue raw path when `--source raw` is explicitly selected or fallback mode is enabled.
    - online path (`detect-new`): if intent extraction fails, continue with raw retrieval and emit result metadata indicating fallback reason.
    - never silently drop failed items without status/metadata.
 6. **No new destructive action path** introduced by intent mode.
@@ -304,7 +304,7 @@ This is required for audit/replay and A/B analysis.
 
 ## 10) Phased execution plan
 
-This section is the implementation sequence for the intent-card extension. Follow phases in order and keep default behavior non-destructive until cutover criteria are met.
+This section is the implementation sequence for the intent-card extension. Cutover is now complete with intent as default; raw remains the rollback path.
 
 ### Phase 0 — Contract lock (no behavior change)
 
@@ -433,6 +433,8 @@ Implementation notes (2026-02-18)
 
 ### Phase 6 — Controlled cutover decision
 
+**Status**: Complete — intent is now the default retrieval source for batch commands; `--source raw` remains the rollback path.
+
 **Goal**
 - Decide whether intent becomes default retrieval source.
 
@@ -447,11 +449,13 @@ Implementation notes (2026-02-18)
 
 ### Phase 7 — Online path promotion
 
+**Status**: Complete — `detect-new` now defaults to intent; raw remains available via `--source raw`.
+
 **Goal**
 - Promote online detection (`detect-new`) to intent mode only after batch path validation.
 
 **Deliverables**
-- `detect-new` default source update (optional, explicit decision).
+- `detect-new` default source update (completed).
 - Continued non-destructive online behavior with JSON-first outputs.
 
 **Exit criteria**
@@ -488,11 +492,10 @@ The following decisions are locked for implementation start:
 2. Embedding rendering contract (`card_json` vs `card_text_for_embedding`) is fixed as documented in Sections 5.3–5.6.
 3. PR context budget defaults are fixed as documented in Section 6.
 4. Extraction failure fallback behavior is fixed as documented in Section 9.
-5. Rollout starts in shadow/flagged mode with raw path as default until cutover criteria are met.
+5. Rollout starts in shadow/flagged mode with raw path as default until cutover criteria are met (now superseded by Phase 6/7 cutover).
 
 Non-blocking future decisions (post-Phase-0):
-- long-term deprecation plan for raw embeddings (if any),
-- timing for making intent source default in online detection after batch validation.
+- long-term deprecation plan for raw embeddings (if any).
 
 ---
 
@@ -520,7 +523,8 @@ Status: Complete (2026-02-15)
 - [x] PR context budgets finalized.
 - [x] Extraction fallback policy finalized.
 - [x] Cutover/rollback criteria finalized.
-- [x] Rollout mode set to shadow/flagged with raw default.
+- [x] Rollout mode set to shadow/flagged with raw default (Phase 0).
+- [x] Phase 6/7 cutover completed; intent is now default with raw rollback available.
 
 Phase 1 is now authorized to start (storage foundation only; no behavior switch).
 
@@ -528,9 +532,9 @@ Phase 1 is now authorized to start (storage foundation only; no behavior switch)
 
 ## 15) Relationship to current v1 spec
 
-This document proposes a staged extension and does **not** immediately replace v1 locked decisions.
+This document proposes a staged extension and now reflects the completed cutover to intent defaults.
 
-Current v1 defaults remain the operational baseline until a documented cutover decision is approved.
+Current v1 defaults now assume intent-first operation; raw remains available as an explicit rollback path.
 
 ---
 

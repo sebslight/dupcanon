@@ -71,8 +71,9 @@ All key artifacts are persisted for replay, audit, and threshold tuning.
   <Accordion title="Close planning gates">
     - maintainer author protection
     - maintainer assignee protection
-    - direct accepted edge to canonical required
-    - **close threshold:** direct edge confidence `>= 0.90` (`min_close` default)
+    - default `canonical-only`: direct accepted edge to canonical required
+    - optional `direct-fallback`: use source item's direct accepted target when canonical edge is missing
+    - **close threshold:** selected direct edge confidence `>= 0.90` (`min_close` default)
   </Accordion>
   <Accordion title="Online detect-new gates">
     - default thresholds: `maybe=0.85`, `duplicate=0.92`

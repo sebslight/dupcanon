@@ -280,6 +280,7 @@ def test_run_canonicalize_aggregates_cluster_stats(monkeypatch) -> None:
         settings=Settings(supabase_db_url="postgresql://localhost/db"),
         repo_value="org/repo",
         item_type=ItemType.ISSUE,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )

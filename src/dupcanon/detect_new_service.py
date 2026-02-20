@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 from time import perf_counter
-from typing import Any
+from typing import Any, cast
 
 from dupcanon.config import Settings
 from dupcanon.database import Database, utc_now
 from dupcanon.embed_service import build_embedding_text
 from dupcanon.gemini_embeddings import GeminiEmbeddingsClient
 from dupcanon.github_client import GitHubClient
+from dupcanon.intent_card_service import (
+    _EMBEDDING_RENDER_VERSION as _INTENT_EMBEDDING_RENDER_VERSION,
+)
+from dupcanon.intent_card_service import _PROMPT_VERSION as _INTENT_PROMPT_VERSION
+from dupcanon.intent_card_service import _SCHEMA_VERSION as _INTENT_SCHEMA_VERSION
+from dupcanon.intent_card_service import _bounded_pr_context as _build_intent_pr_context
+from dupcanon.intent_card_service import _build_failed_fallback_card as _build_failed_intent_card
+from dupcanon.intent_card_service import _extract_intent_card as _extract_intent_card_for_online
 from dupcanon.judge_providers import (
     default_judge_model,
     normalize_judge_client_model,
@@ -36,6 +44,10 @@ from dupcanon.judge_runtime import (
 from dupcanon.judge_runtime import (
     parse_judge_decision as _parse_judge_decision,
 )
+from dupcanon.judge_service import _SYSTEM_PROMPT_INTENT as _SYSTEM_PROMPT_INTENT
+from dupcanon.judge_service import (
+    _build_user_prompt_from_intent_cards as _build_user_prompt_from_intent_cards,
+)
 from dupcanon.logging_config import BoundLogger
 from dupcanon.models import (
     CandidateItemContext,
@@ -43,11 +55,16 @@ from dupcanon.models import (
     DetectSource,
     DetectTopMatch,
     DetectVerdict,
+    IntentCard,
+    IntentCardStatus,
     ItemType,
     JudgeDecision,
     PullRequestFileChange,
     RepoRef,
+    RepresentationSource,
+    intent_card_text_hash,
     normalize_text,
+    render_intent_card_text_for_embedding,
 )
 from dupcanon.openai_embeddings import OpenAIEmbeddingsClient
 from dupcanon.sync_service import require_postgres_dsn
@@ -246,12 +263,61 @@ def _online_duplicate_guardrail_reason(
     return None
 
 
+def _build_online_intent_prompt_or_none(
+    *,
+    db: Database,
+    source_item_id: int,
+    source_number: int,
+    candidate_rows: list[dict[str, Any]],
+    candidate_number_to_item_id: dict[int, int],
+) -> tuple[str | None, str | None]:
+    list_cards = getattr(db, "list_latest_fresh_intent_cards_for_items", None)
+    if not callable(list_cards):
+        return None, "db_missing_intent_card_lookup"
+
+    item_ids = [source_item_id]
+    item_ids.extend(candidate_number_to_item_id[number] for number in candidate_number_to_item_id)
+
+    cards_by_item_id = cast(
+        dict[int, IntentCard],
+        list_cards(
+            item_ids=item_ids,
+            schema_version=_INTENT_SCHEMA_VERSION,
+            prompt_version=_INTENT_PROMPT_VERSION,
+        ),
+    )
+
+    source_card = cards_by_item_id.get(source_item_id)
+    if not isinstance(source_card, IntentCard):
+        return None, "missing_source_intent_card"
+
+    candidate_cards_by_number: dict[int, IntentCard] = {}
+    for candidate in candidate_rows:
+        number = int(candidate["number"])
+        candidate_item_id = candidate_number_to_item_id.get(number)
+        if candidate_item_id is None:
+            return None, "missing_candidate_item"
+        card = cards_by_item_id.get(candidate_item_id)
+        if not isinstance(card, IntentCard):
+            return None, "missing_candidate_intent_card"
+        candidate_cards_by_number[number] = card
+
+    prompt = _build_user_prompt_from_intent_cards(
+        source_number=source_number,
+        source_card=source_card,
+        candidates=candidate_rows,
+        candidate_cards_by_number=candidate_cards_by_number,
+    )
+    return prompt, None
+
+
 def run_detect_new(
     *,
     settings: Settings,
     repo_value: str,
     item_type: ItemType,
     number: int,
+    source: RepresentationSource = RepresentationSource.INTENT,
     provider: str,
     model: str | None,
     k: int,
@@ -299,11 +365,13 @@ def run_detect_new(
         item_id=number,
         provider=normalized_provider,
         model=judge_model,
+        source=source.value,
         thinking=normalized_thinking_level,
     )
     logger.info(
         "detect_new.start",
         status="started",
+        source=source.value,
         k=k,
         min_score=min_score,
         maybe_threshold=maybe_threshold,
@@ -347,24 +415,175 @@ def run_detect_new(
         msg = f"source item #{number} not found after sync"
         raise ValueError(msg)
 
-    source_needs_embedding = (
-        source_embedding_item.embedded_content_hash != source_embedding_item.content_hash
-    )
-    if source_needs_embedding:
-        embed_client = _embedding_client(settings=settings)
-        text = build_embedding_text(
-            title=source_embedding_item.title,
-            body=source_embedding_item.body,
+    requested_source = source
+    effective_source = source
+    source_fallback_reason: str | None = None
+
+    judge_api_key: str | None = None
+
+    def _resolve_judge_api_key() -> str:
+        nonlocal judge_api_key
+        if judge_api_key is not None:
+            return judge_api_key
+        judge_api_key = require_judge_api_key(
+            provider=normalized_provider,
+            gemini_api_key=settings.gemini_api_key,
+            openai_api_key=settings.openai_api_key,
+            openrouter_api_key=settings.openrouter_api_key,
+            context="detect-new",
+            provider_label="--provider",
         )
-        vector = embed_client.embed_texts([text])[0]
-        db.upsert_embedding(
+        return judge_api_key
+
+    if source == RepresentationSource.INTENT:
+        latest_intent_card = db.get_latest_intent_card(
             item_id=source_embedding_item.item_id,
-            model=settings.embedding_model,
-            dim=settings.embedding_dim,
-            embedding=vector,
-            embedded_content_hash=source_embedding_item.content_hash,
-            created_at=utc_now(),
+            schema_version=_INTENT_SCHEMA_VERSION,
+            prompt_version=_INTENT_PROMPT_VERSION,
         )
+        source_card_is_fresh = (
+            latest_intent_card is not None
+            and latest_intent_card.status == IntentCardStatus.FRESH
+            and latest_intent_card.source_content_hash == source_embedding_item.content_hash
+        )
+
+        if not source_card_is_fresh:
+            try:
+                pr_intent_context: str | None = None
+                if item_type == ItemType.PR:
+                    pr_files = gh.fetch_pull_request_files(repo=repo, number=number)
+                    pr_intent_context = _build_intent_pr_context(files=pr_files)
+
+                extraction = _extract_intent_card_for_online(
+                    provider=normalized_provider,
+                    model=judge_model,
+                    api_key=_resolve_judge_api_key(),
+                    thinking_level=normalized_thinking_level,
+                    item_type=item_type,
+                    number=number,
+                    title=source_embedding_item.title,
+                    body=source_embedding_item.body,
+                    pr_context=pr_intent_context,
+                )
+                card_text = render_intent_card_text_for_embedding(extraction.card)
+                db.upsert_intent_card(
+                    item_id=source_embedding_item.item_id,
+                    source_content_hash=source_embedding_item.content_hash,
+                    schema_version=_INTENT_SCHEMA_VERSION,
+                    extractor_provider=normalized_provider,
+                    extractor_model=judge_model,
+                    prompt_version=_INTENT_PROMPT_VERSION,
+                    card_json=extraction.card,
+                    card_text_for_embedding=card_text,
+                    embedding_render_version=_INTENT_EMBEDDING_RENDER_VERSION,
+                    status=IntentCardStatus.FRESH,
+                    insufficient_context=extraction.card.insufficient_context,
+                    error_class=None,
+                    error_message=None,
+                    created_at=utc_now(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                fallback_card = _build_failed_intent_card(
+                    item_type=item_type,
+                    title=source_embedding_item.title,
+                )
+                fallback_text = render_intent_card_text_for_embedding(fallback_card)
+                try:
+                    db.upsert_intent_card(
+                        item_id=source_embedding_item.item_id,
+                        source_content_hash=source_embedding_item.content_hash,
+                        schema_version=_INTENT_SCHEMA_VERSION,
+                        extractor_provider=normalized_provider,
+                        extractor_model=judge_model,
+                        prompt_version=_INTENT_PROMPT_VERSION,
+                        card_json=fallback_card,
+                        card_text_for_embedding=fallback_text,
+                        embedding_render_version=_INTENT_EMBEDDING_RENDER_VERSION,
+                        status=IntentCardStatus.FAILED,
+                        insufficient_context=True,
+                        error_class=type(exc).__name__,
+                        error_message=str(exc),
+                        created_at=utc_now(),
+                    )
+                except Exception as persist_exc:  # noqa: BLE001
+                    logger.warning(
+                        "detect_new.intent_failure_upsert_failed",
+                        status="warn",
+                        error_class=type(persist_exc).__name__,
+                    )
+                effective_source = RepresentationSource.RAW
+                source_fallback_reason = "intent_extraction_failed"
+                logger.warning(
+                    "detect_new.intent_fallback",
+                    status="warn",
+                    requested_source=requested_source.value,
+                    effective_source=effective_source.value,
+                    source_fallback_reason=source_fallback_reason,
+                    error_class=type(exc).__name__,
+                )
+
+        if effective_source == RepresentationSource.INTENT:
+            latest_intent_card = db.get_latest_intent_card(
+                item_id=source_embedding_item.item_id,
+                schema_version=_INTENT_SCHEMA_VERSION,
+                prompt_version=_INTENT_PROMPT_VERSION,
+                status=IntentCardStatus.FRESH,
+            )
+            if latest_intent_card is None:
+                effective_source = RepresentationSource.RAW
+                source_fallback_reason = "missing_fresh_source_intent_card"
+                logger.warning(
+                    "detect_new.intent_fallback",
+                    status="warn",
+                    requested_source=requested_source.value,
+                    effective_source=effective_source.value,
+                    source_fallback_reason=source_fallback_reason,
+                )
+            else:
+                card_hash = intent_card_text_hash(latest_intent_card.card_text_for_embedding)
+                get_intent_hash = getattr(db, "get_intent_embedding_hash", None)
+                embedded_hash = (
+                    get_intent_hash(
+                        intent_card_id=latest_intent_card.intent_card_id,
+                        model=settings.embedding_model,
+                    )
+                    if callable(get_intent_hash)
+                    else None
+                )
+
+                if embedded_hash != card_hash:
+                    embed_client = _embedding_client(settings=settings)
+                    vector = embed_client.embed_texts(
+                        [latest_intent_card.card_text_for_embedding]
+                    )[0]
+                    db.upsert_intent_embedding(
+                        intent_card_id=latest_intent_card.intent_card_id,
+                        model=settings.embedding_model,
+                        dim=settings.embedding_dim,
+                        embedding=vector,
+                        embedded_card_hash=card_hash,
+                        created_at=utc_now(),
+                    )
+
+    if effective_source == RepresentationSource.RAW:
+        source_needs_embedding = (
+            source_embedding_item.embedded_content_hash != source_embedding_item.content_hash
+        )
+        if source_needs_embedding:
+            embed_client = _embedding_client(settings=settings)
+            text = build_embedding_text(
+                title=source_embedding_item.title,
+                body=source_embedding_item.body,
+            )
+            vector = embed_client.embed_texts([text])[0]
+            db.upsert_embedding(
+                item_id=source_embedding_item.item_id,
+                model=settings.embedding_model,
+                dim=settings.embedding_dim,
+                embedding=vector,
+                embedded_content_hash=source_embedding_item.content_hash,
+                created_at=utc_now(),
+            )
 
     neighbors = db.find_candidate_neighbors(
         repo_id=repo_id,
@@ -374,6 +593,13 @@ def run_detect_new(
         include_states=["open"],
         k=k,
         min_score=min_score,
+        source=effective_source,
+        intent_schema_version=(
+            _INTENT_SCHEMA_VERSION if effective_source == RepresentationSource.INTENT else None
+        ),
+        intent_prompt_version=(
+            _INTENT_PROMPT_VERSION if effective_source == RepresentationSource.INTENT else None
+        ),
     )
 
     candidate_context = db.list_item_context_by_ids(
@@ -408,6 +634,9 @@ def run_detect_new(
             top_matches=top_matches,
             provider=normalized_provider,
             model=judge_model,
+            requested_source=requested_source,
+            effective_source=effective_source,
+            source_fallback_reason=source_fallback_reason,
             run_id=run_id,
             timestamp=utc_now(),
             reason="no_candidates",
@@ -433,6 +662,7 @@ def run_detect_new(
         candidate_rows.append(
             {
                 "number": context.number,
+                "rank": neighbor.rank,
                 "state": context.state.value,
                 "score": neighbor.score,
                 "title": context.title,
@@ -453,6 +683,9 @@ def run_detect_new(
             top_matches=top_matches,
             provider=normalized_provider,
             model=judge_model,
+            requested_source=requested_source,
+            effective_source=effective_source,
+            source_fallback_reason=source_fallback_reason,
             run_id=run_id,
             timestamp=utc_now(),
             reason="no_candidates",
@@ -465,28 +698,47 @@ def run_detect_new(
         )
         return result
 
-    api_key = require_judge_api_key(
-        provider=normalized_provider,
-        gemini_api_key=settings.gemini_api_key,
-        openai_api_key=settings.openai_api_key,
-        openrouter_api_key=settings.openrouter_api_key,
-        context="detect-new",
-        provider_label="--provider",
-    )
     client_model = normalize_judge_client_model(provider=normalized_provider, model=judge_model)
     client = _get_thread_local_judge_client(
         provider=normalized_provider,
-        api_key=api_key,
+        api_key=_resolve_judge_api_key(),
         model=client_model,
         thinking_level=normalized_thinking_level,
     )
 
+    system_prompt = _SYSTEM_PROMPT
     user_prompt = _build_online_user_prompt(
         source_title=source_item.title,
         source_body=source_body_for_judge,
         candidates=candidate_rows,
     )
-    raw_response = client.judge(system_prompt=_SYSTEM_PROMPT, user_prompt=user_prompt)
+
+    if effective_source == RepresentationSource.INTENT:
+        intent_prompt, intent_fallback_reason = _build_online_intent_prompt_or_none(
+            db=db,
+            source_item_id=source_embedding_item.item_id,
+            source_number=source_item.number,
+            candidate_rows=candidate_rows,
+            candidate_number_to_item_id=candidate_number_to_item_id,
+        )
+        if intent_prompt is not None:
+            system_prompt = _SYSTEM_PROMPT_INTENT
+            user_prompt = intent_prompt
+        else:
+            source_fallback_reason = source_fallback_reason or (
+                f"intent_prompt_fallback:{intent_fallback_reason}"
+                if intent_fallback_reason is not None
+                else "intent_prompt_fallback"
+            )
+            logger.warning(
+                "detect_new.intent_prompt_fallback",
+                status="warn",
+                requested_source=requested_source.value,
+                effective_source=effective_source.value,
+                source_fallback_reason=source_fallback_reason,
+            )
+
+    raw_response = client.judge(system_prompt=system_prompt, user_prompt=user_prompt)
 
     try:
         decision = _parse_judge_decision(
@@ -508,6 +760,9 @@ def run_detect_new(
                 top_matches=top_matches,
                 provider=normalized_provider,
                 model=judge_model,
+                requested_source=requested_source,
+                effective_source=effective_source,
+                source_fallback_reason=source_fallback_reason,
                 run_id=run_id,
                 timestamp=utc_now(),
                 error_class=type(exc).__name__,
@@ -526,6 +781,9 @@ def run_detect_new(
                 top_matches=top_matches,
                 provider=normalized_provider,
                 model=judge_model,
+                requested_source=requested_source,
+                effective_source=effective_source,
+                source_fallback_reason=source_fallback_reason,
                 run_id=run_id,
                 timestamp=utc_now(),
                 error_class=type(exc).__name__,
@@ -559,6 +817,9 @@ def run_detect_new(
             top_matches=top_matches,
             provider=normalized_provider,
             model=judge_model,
+            requested_source=requested_source,
+            effective_source=effective_source,
+            source_fallback_reason=source_fallback_reason,
             run_id=run_id,
             timestamp=utc_now(),
             reason="model_not_duplicate",
@@ -585,6 +846,9 @@ def run_detect_new(
             top_matches=top_matches,
             provider=normalized_provider,
             model=judge_model,
+            requested_source=requested_source,
+            effective_source=effective_source,
+            source_fallback_reason=source_fallback_reason,
             run_id=run_id,
             timestamp=utc_now(),
             reason="invalid_duplicate_target",
@@ -611,6 +875,9 @@ def run_detect_new(
             top_matches=top_matches,
             provider=normalized_provider,
             model=judge_model,
+            requested_source=requested_source,
+            effective_source=effective_source,
+            source_fallback_reason=source_fallback_reason,
             run_id=run_id,
             timestamp=utc_now(),
             reason="invalid_duplicate_target",
@@ -679,6 +946,9 @@ def run_detect_new(
         top_matches=top_matches,
         provider=normalized_provider,
         model=judge_model,
+        requested_source=requested_source,
+        effective_source=effective_source,
+        source_fallback_reason=source_fallback_reason,
         run_id=run_id,
         timestamp=utc_now(),
         reason=reason,

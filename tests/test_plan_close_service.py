@@ -10,6 +10,7 @@ from dupcanon.models import (
     AcceptedDuplicateEdge,
     ItemType,
     PlanCloseItem,
+    PlanCloseTargetPolicy,
     RepresentationSource,
     StateFilter,
 )
@@ -98,6 +99,7 @@ def test_run_plan_close_dry_run_uses_guardrails_and_threshold(monkeypatch) -> No
         item_type=ItemType.ISSUE,
         min_close=0.90,
         maintainers_source="collaborators",
+        source=RepresentationSource.RAW,
         dry_run=True,
         console=Console(),
         logger=get_logger("test"),
@@ -265,6 +267,7 @@ def test_run_plan_close_persists_close_run_items(monkeypatch) -> None:
         item_type=ItemType.ISSUE,
         min_close=0.90,
         maintainers_source="collaborators",
+        source=RepresentationSource.RAW,
         dry_run=False,
         console=Console(),
         logger=get_logger("test"),
@@ -353,6 +356,7 @@ def test_run_plan_close_requires_direct_edge_to_canonical(monkeypatch) -> None:
         item_type=ItemType.ISSUE,
         min_close=0.90,
         maintainers_source="collaborators",
+        source=RepresentationSource.RAW,
         dry_run=True,
         console=Console(),
         logger=get_logger("test"),
@@ -364,6 +368,84 @@ def test_run_plan_close_requires_direct_edge_to_canonical(monkeypatch) -> None:
     assert stats.skipped_missing_edge == 1
 
 
+def test_run_plan_close_direct_fallback_policy_allows_non_canonical_direct_target(
+    monkeypatch,
+) -> None:
+    class FakeDatabase:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_repo_id(self, repo) -> int | None:
+            return 42
+
+        def list_accepted_duplicate_edges_with_confidence(
+            self, *, repo_id: int, item_type: ItemType
+        ):
+            return [
+                AcceptedDuplicateEdge(from_item_id=1, to_item_id=2, confidence=0.95),
+                AcceptedDuplicateEdge(from_item_id=2, to_item_id=3, confidence=0.95),
+            ]
+
+        def list_items_for_close_planning(self, *, repo_id: int, item_type: ItemType):
+            return [
+                _item(
+                    item_id=1,
+                    number=101,
+                    state=StateFilter.OPEN,
+                    author_login="alice",
+                    comment_count=1,
+                ),
+                _item(
+                    item_id=2,
+                    number=102,
+                    state=StateFilter.OPEN,
+                    author_login="bob",
+                    comment_count=2,
+                ),
+                _item(
+                    item_id=3,
+                    number=103,
+                    state=StateFilter.OPEN,
+                    author_login="carol",
+                    comment_count=10,
+                ),
+            ]
+
+        def create_close_run(self, **kwargs) -> int:
+            msg = "create_close_run should not be called in dry-run"
+            raise AssertionError(msg)
+
+        def create_close_run_item(self, **kwargs) -> None:
+            msg = "create_close_run_item should not be called in dry-run"
+            raise AssertionError(msg)
+
+    class FakeGitHubClient:
+        def fetch_maintainers(self, *, repo):
+            return set()
+
+    monkeypatch.setattr(plan_close_service, "Database", FakeDatabase)
+    monkeypatch.setattr(plan_close_service, "GitHubClient", FakeGitHubClient)
+
+    stats = plan_close_service.run_plan_close(
+        settings=Settings(supabase_db_url="postgresql://localhost/db"),
+        repo_value="org/repo",
+        item_type=ItemType.ISSUE,
+        min_close=0.90,
+        maintainers_source="collaborators",
+        source=RepresentationSource.RAW,
+        target_policy=PlanCloseTargetPolicy.DIRECT_FALLBACK,
+        dry_run=True,
+        console=Console(),
+        logger=get_logger("test"),
+    )
+
+    assert stats.considered == 2
+    assert stats.close_actions == 2
+    assert stats.close_actions_direct_fallback == 1
+    assert stats.skip_actions == 0
+    assert stats.skipped_missing_edge == 0
+
+
 def test_run_plan_close_validates_maintainer_source() -> None:
     with pytest.raises(ValueError):
         plan_close_service.run_plan_close(
@@ -372,6 +454,7 @@ def test_run_plan_close_validates_maintainer_source() -> None:
             item_type=ItemType.ISSUE,
             min_close=0.9,
             maintainers_source="codeowners",
+            source=RepresentationSource.RAW,
             dry_run=True,
             console=Console(),
             logger=get_logger("test"),

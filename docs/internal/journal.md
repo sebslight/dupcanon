@@ -1422,3 +1422,351 @@ Validation
 What comes next
 1. Persist prompt provenance (`prompt_mode`, prompt version) to DB rows, not only failure artifacts/logs.
 2. Extend report tooling to summarize prompt-mode usage/fallback rates in judge and audit runs.
+
+### 2026-02-18 — Entry 55 (plan-close target policy flag: canonical-only default + direct-fallback option)
+
+Today we added an explicit close-target policy control to `plan-close` to recover transitive-only duplicate cases without changing the default precision-first behavior.
+
+What we changed
+- Added new enum `PlanCloseTargetPolicy` (`canonical-only`, `direct-fallback`) in `src/dupcanon/models.py`.
+- Extended `dupcanon plan-close` CLI with `--target-policy`:
+  - default: `canonical-only`
+  - optional: `direct-fallback`
+- Threaded target-policy handling through `src/dupcanon/cli.py` and `src/dupcanon/plan_close_service.py`:
+  - default behavior unchanged (`canonical-only` still requires direct source->canonical accepted edge)
+  - under `direct-fallback`, when source->canonical is missing, close planning can use the source item’s direct accepted target edge if confidence meets `--min-close`
+  - persisted close-plan rows now store the selected close target (canonical or fallback target)
+  - added `close_actions_direct_fallback` summary metric for operator visibility.
+- Test coverage updates:
+  - `tests/test_plan_close_service.py`: new regression validating transitive-chain recovery with `direct-fallback`.
+  - `tests/test_cli.py`: verifies `--target-policy` override propagation and help surface.
+- Documentation updates:
+  - `README.md`
+  - `docs/evaluation.mdx`
+  - `docs/architecture.mdx`
+  - `docs/index.mdx`
+  - `docs/internal/operator_runbook_v1.md`
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md`
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest` (315 passed)
+
+What comes next
+1. Add operator reporting to break down close-plan actions by target mode (`canonical` vs `direct-fallback`) and confidence buckets.
+2. Evaluate whether `direct-fallback` should enforce additional target-state constraints (for example, open-only fallback target) in future hardening.
+
+### 2026-02-18 — Entry 56 (online intent source path: `detect-new --source raw|intent`)
+
+Today we implemented the planned online source-selection extension so `detect-new` can run with intent-card retrieval (`--source intent`) while preserving safe fallback behavior.
+
+What we changed
+- Extended CLI in `src/dupcanon/cli.py`:
+  - added `detect-new --source raw|intent` (default `raw`),
+  - threaded source into `run_detect_new(...)` call and failure-artifact context.
+- Updated online service in `src/dupcanon/detect_new_service.py`:
+  - added `source: RepresentationSource` to `run_detect_new(...)` with default raw,
+  - added online intent path for source item:
+    - reuses latest fresh intent card when source hash matches,
+    - otherwise attempts extraction and persists a fresh intent card,
+    - writes a failed fallback intent card on extraction failure,
+    - embeds source intent card when hash changed,
+  - candidate retrieval now runs against the selected source representation (`raw` or `intent`) using existing DB representation-aware neighbor lookup,
+  - when `source=intent`, detect-new attempts the structured intent-card judge prompt path and falls back to raw prompt with explicit fallback metadata when intent prompt prerequisites are missing,
+  - result payload now includes source provenance fields:
+    - `requested_source`,
+    - `effective_source`,
+    - `source_fallback_reason`.
+- Added DB helper in `src/dupcanon/database.py`:
+  - `get_intent_embedding_hash(intent_card_id, model)` for cheap source intent-embedding freshness checks.
+- Added/updated tests:
+  - `tests/test_cli.py`:
+    - detect-new help includes `--source`,
+    - detect-new source default and override propagation.
+  - `tests/test_detect_new_service.py`:
+    - intent source path uses intent neighbor retrieval + structured intent prompt,
+    - intent extraction failure falls back to raw retrieval and reports fallback metadata.
+- Updated docs:
+  - `README.md` detect-new behavior notes,
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md` (`detect-new --source` status),
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md` command signature.
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest` (319 passed)
+
+What comes next
+1. Add reporting helpers that summarize online fallback rates (`requested_source=intent` but `effective_source=raw`) by reason.
+2. Run side-by-side online shadow samples (`detect-new --source raw` vs `--source intent`) and compare precision-oriented outcomes before any default-source decision.
+
+### 2026-02-18 — Entry 57 (intent defaults across batch + online commands)
+
+Today we promoted intent to the default representation for all source-aware commands (batch + online), while keeping `--source raw` available for rollback/A-B.
+
+What we changed
+- Updated CLI defaults in `src/dupcanon/cli.py`:
+  - `embed`, `candidates`, `judge`, `judge-audit`, `canonicalize`, `plan-close`, `detect-new` now default to `--source intent`.
+- Updated service defaults:
+  - `run_embed`, `run_candidates`, `run_judge`, `run_judge_audit`, `run_canonicalize`, `run_plan_close`, and `run_detect_new` now default to `RepresentationSource.INTENT`.
+  - model/record defaults (`DetectNewResult`, `JudgeAuditRunReport`, `CloseRunRecord`) now default to intent representations.
+- Updated tests to keep raw-path coverage explicit where needed and to assert new CLI defaults.
+- Documentation updates for intent-as-default:
+  - `README.md` behavior notes + examples
+  - `docs/architecture.mdx`, `docs/evaluation.mdx`
+  - `docs/internal/intent_card_pipeline_design_doc_v1.md`
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+  - `docs/internal/operator_runbook_v1.md`
+
+Validation
+- `uv run ruff check`
+- `uv run pyright`
+- `uv run pytest`
+
+What comes next
+1. Add online fallback reporting to quantify intent fallback rates by reason.
+2. Schedule an explicit cutover review once A/B metrics are collected (keep `--source raw` rollback ready).
+
+### 2026-02-18 — Entry 58 (semantic query CLI spec + architecture design)
+
+Today we drafted a full implementation-oriented design doc for a new CLI semantic search surface that is aligned with the current intent-first codebase.
+
+What we changed
+- Added new design/spec doc:
+  - `docs/internal/semantic_search_cli_design_doc_v1.md`
+- Updated the main CLI design spec cross-reference list:
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+    now links the semantic query doc.
+
+Doc highlights
+- New command proposal: `dupcanon search`.
+- Intent-first retrieval default with explicit `--source raw` rollback.
+- Read-only safety model (no mutation paths from query mode).
+- Optional chat-style grounded answer mode (`--answer`) with required citations.
+- Proposed typed contracts (`SearchHit`, `SearchAnswer`, `SearchResult`) and CLI/service/database changes.
+- Production hardening plan: observability fields, evaluation metrics (Recall@K/MRR/nDCG), and phased rollout.
+
+Validation
+- Documentation-only changes; no runtime behavior changed.
+
+What comes next
+1. Resolve open product defaults (`--state`, `--answer`, persistence toggle, interactive mode scope).
+2. Convert doc decisions into implementation tasks: migration, database methods, `search_service`, CLI wiring, tests.
+
+### 2026-02-18 — Entry 59 (semantic query defaults locked)
+
+We finalized product defaults for `dupcanon search` v1 and updated the semantic query design doc accordingly.
+
+Locked defaults
+- `--state open` by default.
+- `--answer` is opt-in only; default output is ranked issue/PR results.
+- `--json` is optional for machine-readable output; default remains human-readable table output.
+- Search run persistence in DB is out of scope for v1.
+- Interaction model is one-shot only for v1 (no interactive chat loop).
+
+Doc updates
+- Updated `docs/internal/semantic_search_cli_design_doc_v1.md` to reflect the locked defaults:
+  - product decisions,
+  - output flag semantics,
+  - no-persistence decision,
+  - resolved defaults section,
+  - implementation/test notes.
+
+Validation
+- Documentation-only updates; no runtime behavior changed.
+
+What comes next
+1. Break implementation into concrete tasks (`models`, `database retrieval methods`, `search_service`, `cli`, `tests`).
+2. Implement retrieval-only `search` first, then optional grounded `--answer` mode.
+
+### 2026-02-18 — Entry 60 (`search` retrieval implementation, CLI-first v1)
+
+Implemented retrieval-only semantic query support as `dupcanon search`, aligned with locked v1 defaults.
+
+What we changed
+- Added new service: `src/dupcanon/search_service.py`
+  - one-shot read-only search orchestration (`run_search(...)`),
+  - query embedding via configured embedding provider/model,
+  - intent-first retrieval with explicit raw fallback when intent corpus is unavailable,
+  - typed `SearchResult` output with `requested_source`, `effective_source`, and fallback reason metadata.
+- Added data contracts in `src/dupcanon/models.py`:
+  - `SearchMatch`, `SearchHit`, `SearchAnswer`, `SearchResult`.
+- Extended database retrieval APIs in `src/dupcanon/database.py`:
+  - `count_searchable_items(...)`,
+  - `search_similar_items_raw(...)`,
+  - `search_similar_items_intent(...)`.
+- Added CLI command in `src/dupcanon/cli.py`:
+  - `dupcanon search --repo ... --query ...`
+  - defaults: `--type all`, `--state open`, `--source intent`
+  - output modes: human-readable table (default) or `--json` to stdout
+  - optional `--show-body-snippet`.
+- Tests added/updated:
+  - `tests/test_search_service.py`
+  - `tests/test_database.py` (new search/count query coverage)
+  - `tests/test_models.py` (search result validation)
+  - `tests/test_cli.py` (search command help/defaults/option propagation)
+- Docs updated:
+  - `README.md` command surface + behavior + examples
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md` command interface section
+
+Validation
+- `uv run ruff check src tests`
+- `uv run pyright`
+- `uv run pytest` (330 passed)
+
+What comes next
+1. Optional v1.1: add grounded `--answer` mode with strict citation validation.
+2. Build a small labeled query relevance set for Recall@K/MRR/nDCG baseline tracking.
+
+### 2026-02-18 — Entry 61 (`search` default min-score tuned to 0.30)
+
+Adjusted the default `dupcanon search` retrieval threshold from `0.60` to `0.30` after observing empty result sets for short natural queries (for example, `"cron"`) under intent retrieval.
+
+What we changed
+- Code:
+  - `src/dupcanon/cli.py`
+    - `SEARCH_MIN_SCORE_OPTION` default changed `0.60 -> 0.30`.
+- Tests:
+  - `tests/test_cli.py`
+    - updated search-default assertion to expect `min_score=0.3`.
+- Docs:
+  - `docs/internal/semantic_search_cli_design_doc_v1.md`
+  - `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`
+
+Rationale
+- `0.60` worked as a precision-oriented threshold for duplicate decisioning contexts, but is too strict for broad semantic search discovery.
+- `0.30` yields useful ranked retrieval for short query intents while preserving caller control via explicit `--min-score` overrides.
+
+Validation
+- `uv run ruff check src tests`
+- `uv run pyright`
+- `uv run pytest`
+
+### 2026-02-18 — Entry 62 (`search` adds `--similar-to`, `--include`, `--exclude`)
+
+Extended the retrieval-only semantic search command so agents/operators can express anchor-based and constrained search requests without introducing a fixed topic taxonomy.
+
+What we changed
+- CLI (`src/dupcanon/cli.py`)
+  - `search` now accepts:
+    - `--query <text>` (optional),
+    - `--similar-to <number>` (optional),
+    - repeatable `--include <term>`,
+    - repeatable `--exclude <term>`.
+  - Validation contract: exactly one base signal (`--query` xor `--similar-to`).
+- Search service (`src/dupcanon/search_service.py`)
+  - supports anchor-derived search text from `--similar-to` item,
+  - intent-anchor fallback to raw when fresh anchor intent card is unavailable,
+  - applies semantic include/exclude filtering over retrieved candidates,
+  - excludes anchor item itself from anchor-mode results.
+- Database layer (`src/dupcanon/database.py`)
+  - added `get_search_anchor_item(...)`,
+  - added per-item scoring helpers used by include/exclude filtering:
+    - `score_search_items_raw(...)`,
+    - `score_search_items_intent(...)`.
+- Models (`src/dupcanon/models.py`)
+  - added `SearchAnchorItem` and enriched `SearchResult` fields:
+    - `similar_to_number`, `include_terms`, `exclude_terms`.
+- Tests
+  - updated `tests/test_cli.py`, `tests/test_search_service.py`, `tests/test_database.py`, `tests/test_models.py` for new flags/behavior.
+- Docs
+  - updated `README.md`,
+  - updated `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`,
+  - updated `docs/internal/semantic_search_cli_design_doc_v1.md`.
+
+Validation
+- `uv run ruff check src tests`
+- `uv run pyright`
+- `uv run pytest` (336 passed)
+
+### 2026-02-18 — Entry 63 (`search` adds include/exclude threshold flags)
+
+Added explicit tuning controls for semantic constraint strictness in the new `search` command.
+
+What we changed
+- CLI (`src/dupcanon/cli.py`)
+  - added `--include-threshold` (default `0.25`),
+  - added `--exclude-threshold` (default `0.30`),
+  - wired both flags into `run_search(...)` and failure artifact context.
+- Search service (`src/dupcanon/search_service.py`)
+  - thresholds are validated (`0..1`),
+  - include/exclude filtering now uses run-provided thresholds instead of fixed constants,
+  - thresholds are logged in start/complete events.
+- Models (`src/dupcanon/models.py`)
+  - `SearchResult` now persists `include_threshold` and `exclude_threshold` for JSON/audit transparency.
+- Tests
+  - updated CLI tests for help/default/override propagation,
+  - updated service tests for threshold validation,
+  - updated model tests for threshold fields + validation.
+- Docs
+  - updated `README.md`,
+  - updated `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`,
+  - updated `docs/internal/semantic_search_cli_design_doc_v1.md`.
+
+Validation
+- `uv run ruff check src tests`
+- `uv run pyright`
+- `uv run pytest` (336 passed)
+
+### 2026-02-18 — Entry 64 (`search` adds `--include-mode` with default boost)
+
+Implemented configurable include semantics for search constraints, with **boost mode as default**.
+
+What we changed
+- CLI (`src/dupcanon/cli.py`)
+  - added `--include-mode boost|filter` (default `boost`),
+  - added `--include-weight` (default `0.15`),
+  - wired both into `run_search(...)`, artifacts, and operator output.
+- Models (`src/dupcanon/models.py`)
+  - added `SearchIncludeMode` enum,
+  - `SearchResult` now includes:
+    - `include_mode`,
+    - `include_weight`.
+- Search service (`src/dupcanon/search_service.py`)
+  - include constraints now support two modes:
+    - `filter`: hard include gate (`score >= include_threshold`),
+    - `boost`: soft rerank by `base_score + include_weight * include_score` when include score passes threshold.
+  - excludes remain hard filters.
+- Tests
+  - updated CLI/help/default/override coverage,
+  - added boost-mode rerank coverage in search service tests,
+  - updated model validation coverage for include mode/weight fields.
+- Docs
+  - updated `README.md`,
+  - updated `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`,
+  - updated `docs/internal/semantic_search_cli_design_doc_v1.md`.
+
+Validation
+- `uv run ruff check src tests`
+- `uv run pyright`
+- `uv run pytest` (338 passed)
+
+### 2026-02-18 — Entry 65 (`search` default thresholds lowered + debug constraints)
+
+Adjusted default semantic constraint thresholds and added explicit per-hit constraint diagnostics for operator tuning.
+
+What we changed
+- Defaults adjusted:
+  - `--include-threshold` default `0.25 -> 0.20`
+  - `--exclude-threshold` default `0.30 -> 0.20`
+  - reflected in CLI option defaults, service defaults, and `SearchResult` defaults.
+- Added CLI diagnostics switch:
+  - `--debug-constraints/--no-debug-constraints` (default off).
+- Search service (`src/dupcanon/search_service.py`)
+  - computes per-hit include/exclude term scores when debug mode is enabled,
+  - emits `constraint_debug` payload on each hit (JSON),
+  - table output shows `IncMax` / `ExcMax` columns when debug mode is active and constraints are present.
+- Models (`src/dupcanon/models.py`)
+  - added `SearchConstraintDebug`,
+  - `SearchHit` now has optional `constraint_debug`.
+- Docs
+  - updated `README.md`,
+  - updated `docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md`,
+  - updated `docs/internal/semantic_search_cli_design_doc_v1.md`.
+
+Validation
+- `uv run ruff check src tests`
+- `uv run pyright`
+- `uv run pytest` (338 passed)

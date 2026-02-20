@@ -118,6 +118,7 @@ def test_run_judge_accepts_edge_when_confident(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -476,6 +477,7 @@ def test_run_judge_skips_closed_source_items(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -540,6 +542,7 @@ def test_run_judge_vetoes_partial_overlap_duplicates(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -609,6 +612,7 @@ def test_run_judge_rejects_uncertain_duplicates(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -708,6 +712,7 @@ def test_run_judge_vetoes_bug_feature_mismatch(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -774,6 +779,7 @@ def test_run_judge_records_rejected_edge_below_threshold(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -846,6 +852,7 @@ def test_run_judge_rejects_closed_duplicate_targets(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -946,6 +953,7 @@ def test_run_judge_vetoes_small_candidate_gap(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -1010,6 +1018,7 @@ def test_run_judge_skips_when_existing_edge_and_not_rejudge(monkeypatch) -> None
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -1078,6 +1087,7 @@ def test_run_judge_skips_vague_source_without_calling_model(monkeypatch) -> None
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -1143,6 +1153,7 @@ def test_run_judge_invalid_candidate_number_is_skipped(monkeypatch, tmp_path) ->
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -1201,6 +1212,7 @@ def test_run_judge_invalid_response_persists_skipped_decision(monkeypatch) -> No
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -1268,6 +1280,7 @@ def test_run_judge_rejudge_replaces_existing_accepted_edge(monkeypatch) -> None:
         allow_stale=False,
         rejudge=True,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -1336,6 +1349,7 @@ def test_run_judge_handles_unique_conflict_as_skip(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -1398,6 +1412,7 @@ def test_run_judge_openai_provider_works(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -1461,6 +1476,7 @@ def test_run_judge_passes_thinking_to_openai_client(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
         thinking_level="off",
@@ -1482,6 +1498,7 @@ def test_run_judge_rejects_xhigh_for_gemini(monkeypatch: pytest.MonkeyPatch) -> 
             allow_stale=False,
             rejudge=False,
             worker_concurrency=None,
+            source=RepresentationSource.RAW,
             console=Console(),
             logger=get_logger("test"),
             thinking_level="xhigh",
@@ -1503,6 +1520,7 @@ def test_run_judge_openai_requires_api_key(monkeypatch: pytest.MonkeyPatch, tmp_
             allow_stale=False,
             rejudge=False,
             worker_concurrency=None,
+            source=RepresentationSource.RAW,
             console=Console(),
             logger=get_logger("test"),
         )
@@ -1561,6 +1579,7 @@ def test_run_judge_openrouter_provider_works(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -1625,6 +1644,7 @@ def test_run_judge_defaults_openrouter_model_when_omitted(monkeypatch) -> None:
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -1650,6 +1670,7 @@ def test_run_judge_openrouter_requires_api_key(
             allow_stale=False,
             rejudge=False,
             worker_concurrency=None,
+            source=RepresentationSource.RAW,
             console=Console(),
             logger=get_logger("test"),
         )
@@ -1708,6 +1729,7 @@ def test_run_judge_openai_codex_provider_works_without_api_key(monkeypatch) -> N
         allow_stale=False,
         rejudge=False,
         worker_concurrency=None,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
         thinking_level="high",

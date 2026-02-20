@@ -587,6 +587,305 @@ def test_find_candidate_neighbors_intent_uses_intent_embeddings(monkeypatch) -> 
     assert params[1] == "intent-card-v1"
 
 
+def test_count_searchable_items_intent_uses_latest_fresh_cards(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchone(self) -> dict[str, object]:
+            return {"n": 12}
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    count = db.count_searchable_items(
+        repo_id=1,
+        model="text-embedding-3-large",
+        type_filter=TypeFilter.PR,
+        state_filter=StateFilter.OPEN,
+        source=RepresentationSource.INTENT,
+        intent_schema_version="v1",
+        intent_prompt_version="intent-card-v1",
+    )
+
+    assert count == 12
+    query = str(captured.get("query") or "")
+    assert "with latest_fresh as" in query
+    assert "public.intent_embeddings ie" in query
+    assert "i.type = %s" in query
+    assert "i.state = %s" in query
+
+
+def test_search_similar_items_raw_queries_embeddings(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "item_id": 22,
+                    "type": "issue",
+                    "number": 77,
+                    "state": "open",
+                    "title": "Cron timeout",
+                    "url": "https://github.com/org/repo/issues/77",
+                    "body": "fails on Sundays",
+                    "score": 0.89,
+                }
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    rows = db.search_similar_items_raw(
+        repo_id=9,
+        model="text-embedding-3-large",
+        query_embedding=[0.1, 0.2],
+        type_filter=TypeFilter.ISSUE,
+        state_filter=StateFilter.OPEN,
+        min_score=0.6,
+        limit=5,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].rank == 1
+    assert rows[0].number == 77
+    assert rows[0].score == 0.89
+
+    query = str(captured.get("query") or "")
+    assert "from public.embeddings e" in query
+    assert "i.type = %s" in query
+    assert "i.state = %s" in query
+
+
+def test_search_similar_items_intent_queries_intent_embeddings(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "item_id": 30,
+                    "type": "pr",
+                    "number": 44,
+                    "state": "open",
+                    "title": "Cron scheduler fix",
+                    "url": "https://github.com/org/repo/pull/44",
+                    "body": "rewires cron parser",
+                    "score": 0.92,
+                }
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    rows = db.search_similar_items_intent(
+        repo_id=9,
+        model="text-embedding-3-large",
+        query_embedding=[0.1, 0.2],
+        type_filter=TypeFilter.PR,
+        state_filter=StateFilter.OPEN,
+        min_score=0.6,
+        limit=5,
+        intent_schema_version="v1",
+        intent_prompt_version="intent-card-v1",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].rank == 1
+    assert rows[0].number == 44
+    assert rows[0].score == 0.92
+
+    query = str(captured.get("query") or "")
+    assert "with latest_fresh as" in query
+    assert "public.intent_embeddings ie" in query
+
+
+def test_get_search_anchor_item_returns_match(monkeypatch) -> None:
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            _ = (query, params)
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "item_id": 10,
+                    "type": "issue",
+                    "number": 128,
+                    "title": "Cron crash",
+                    "body": "fails hourly",
+                    "url": "https://github.com/org/repo/issues/128",
+                    "state": "open",
+                }
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    anchor = db.get_search_anchor_item(repo_id=1, number=128, type_filter=TypeFilter.ISSUE)
+
+    assert anchor is not None
+    assert anchor.item_id == 10
+    assert anchor.number == 128
+
+
+def test_score_search_items_raw_returns_map(monkeypatch) -> None:
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            _ = (query, params)
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [
+                {"item_id": 10, "score": 0.88},
+                {"item_id": 11, "score": 0.21},
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    scores = db.score_search_items_raw(
+        repo_id=1,
+        model="text-embedding-3-large",
+        query_embedding=[0.1, 0.2],
+        item_ids=[10, 11],
+    )
+
+    assert scores[10] == 0.88
+    assert scores[11] == 0.21
+
+
+def test_score_search_items_intent_returns_map(monkeypatch) -> None:
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            _ = (query, params)
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [
+                {"item_id": 12, "score": 0.77},
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self, row_factory=None):
+            return FakeCursor()
+
+    monkeypatch.setattr(database_module, "connect", lambda conninfo, **kwargs: FakeConnection())
+
+    db = Database("postgresql://localhost/db")
+    scores = db.score_search_items_intent(
+        repo_id=1,
+        model="text-embedding-3-large",
+        query_embedding=[0.1, 0.2],
+        item_ids=[12],
+        intent_schema_version="v1",
+        intent_prompt_version="intent-card-v1",
+    )
+
+    assert scores[12] == 0.77
+
+
 def test_list_items_for_intent_card_extraction_returns_missing_or_stale_items(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

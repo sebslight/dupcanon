@@ -160,6 +160,7 @@ def test_run_judge_audit_target_disagreement_can_become_fp_with_gap_guardrail(
         worker_concurrency=1,
         verbose=False,
         debug_rpc=False,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )
@@ -652,6 +653,7 @@ def test_run_judge_audit_counts_tp_fp_fn_tn(monkeypatch) -> None:
         worker_concurrency=2,
         verbose=False,
         debug_rpc=False,
+        source=RepresentationSource.RAW,
         console=Console(),
         logger=get_logger("test"),
     )

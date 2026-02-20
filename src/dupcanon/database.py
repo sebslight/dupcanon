@@ -32,6 +32,8 @@ from dupcanon.models import (
     RepoMetadata,
     RepoRef,
     RepresentationSource,
+    SearchAnchorItem,
+    SearchMatch,
     StateFilter,
     TypeFilter,
     UpsertResult,
@@ -725,6 +727,30 @@ class Database:
                 ),
             )
 
+    def get_intent_embedding_hash(
+        self,
+        *,
+        intent_card_id: int,
+        model: str,
+    ) -> str | None:
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select embedded_card_hash
+                from public.intent_embeddings
+                where intent_card_id = %s and model = %s
+                limit 1
+                """,
+                (intent_card_id, model),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        embedded_card_hash = row.get("embedded_card_hash")
+        return str(embedded_card_hash) if embedded_card_hash is not None else None
+
     def list_candidate_source_items(
         self,
         *,
@@ -1063,6 +1089,358 @@ class Database:
                     candidate_item_id=int(row["candidate_item_id"]),
                     score=float(row["score"]),
                     rank=idx,
+                )
+            )
+        return result
+
+    def count_searchable_items(
+        self,
+        *,
+        repo_id: int,
+        model: str,
+        type_filter: TypeFilter,
+        state_filter: StateFilter,
+        source: RepresentationSource,
+        intent_schema_version: str | None = None,
+        intent_prompt_version: str | None = None,
+    ) -> int:
+        if source == RepresentationSource.RAW:
+            query = """
+                select count(*) as n
+                from public.embeddings e
+                join public.items i on i.id = e.item_id
+                where e.model = %s and i.repo_id = %s
+            """
+            params: list[Any] = [model, repo_id]
+        elif source == RepresentationSource.INTENT:
+            if not intent_schema_version or not intent_prompt_version:
+                msg = "intent schema/prompt versions are required for source=intent"
+                raise ValueError(msg)
+
+            query = """
+                with latest_fresh as (
+                    select distinct on (ic.item_id)
+                        ic.id as intent_card_id,
+                        ic.item_id
+                    from public.intent_cards ic
+                    where
+                        ic.schema_version = %s
+                        and ic.prompt_version = %s
+                        and ic.status = 'fresh'
+                    order by ic.item_id, ic.created_at desc, ic.id desc
+                )
+                select count(*) as n
+                from latest_fresh lf
+                join public.intent_embeddings ie
+                    on ie.intent_card_id = lf.intent_card_id and ie.model = %s
+                join public.items i on i.id = lf.item_id
+                where i.repo_id = %s
+            """
+            params = [intent_schema_version, intent_prompt_version, model, repo_id]
+        else:
+            msg = f"unsupported representation source: {source.value}"
+            raise ValueError(msg)
+
+        if type_filter != TypeFilter.ALL:
+            query += " and i.type = %s"
+            params.append(type_filter.value)
+
+        if state_filter != StateFilter.ALL:
+            query += " and i.state = %s"
+            params.append(state_filter.value)
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, tuple(params))
+            row = cur.fetchone()
+
+        if row is None:
+            return 0
+        return int(row["n"])
+
+    def get_search_anchor_item(
+        self,
+        *,
+        repo_id: int,
+        number: int,
+        type_filter: TypeFilter,
+    ) -> SearchAnchorItem | None:
+        query = """
+            select
+                i.id as item_id,
+                i.type,
+                i.number,
+                i.title,
+                i.body,
+                i.url,
+                i.state
+            from public.items i
+            where i.repo_id = %s and i.number = %s
+        """
+        params: list[Any] = [repo_id, number]
+
+        if type_filter != TypeFilter.ALL:
+            query += " and i.type = %s"
+            params.append(type_filter.value)
+
+        query += " order by i.id asc"
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, tuple(params))
+            rows = cur.fetchall()
+
+        if not rows:
+            return None
+
+        if len(rows) > 1:
+            msg = f"multiple items matched number {number}; pass --type issue|pr"
+            raise DatabaseError(msg)
+
+        row = rows[0]
+        return SearchAnchorItem(
+            item_id=int(row["item_id"]),
+            type=ItemType(str(row["type"])),
+            number=int(row["number"]),
+            title=str(row["title"]),
+            body=row.get("body"),
+            url=str(row["url"]),
+            state=StateFilter(str(row["state"])),
+        )
+
+    def score_search_items_raw(
+        self,
+        *,
+        repo_id: int,
+        model: str,
+        query_embedding: list[float],
+        item_ids: list[int],
+    ) -> dict[int, float]:
+        if not item_ids:
+            return {}
+
+        query_vector = _vector_literal(query_embedding)
+        query = """
+            select
+                i.id as item_id,
+                (1 - (e.embedding <=> %s::vector))::double precision as score
+            from public.items i
+            join public.embeddings e
+                on e.item_id = i.id and e.model = %s
+            where
+                i.repo_id = %s
+                and i.id = any(%s::bigint[])
+        """
+        params: tuple[Any, ...] = (query_vector, model, repo_id, item_ids)
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+        result: dict[int, float] = {}
+        for row in rows:
+            result[int(row["item_id"])] = float(row["score"])
+        return result
+
+    def score_search_items_intent(
+        self,
+        *,
+        repo_id: int,
+        model: str,
+        query_embedding: list[float],
+        item_ids: list[int],
+        intent_schema_version: str,
+        intent_prompt_version: str,
+    ) -> dict[int, float]:
+        if not item_ids:
+            return {}
+
+        query_vector = _vector_literal(query_embedding)
+        query = """
+            with latest_fresh as (
+                select distinct on (ic.item_id)
+                    ic.id as intent_card_id,
+                    ic.item_id
+                from public.intent_cards ic
+                where
+                    ic.schema_version = %s
+                    and ic.prompt_version = %s
+                    and ic.status = 'fresh'
+                    and ic.item_id = any(%s::bigint[])
+                order by ic.item_id, ic.created_at desc, ic.id desc
+            )
+            select
+                i.id as item_id,
+                (1 - (ie.embedding <=> %s::vector))::double precision as score
+            from latest_fresh lf
+            join public.intent_embeddings ie
+                on ie.intent_card_id = lf.intent_card_id and ie.model = %s
+            join public.items i on i.id = lf.item_id
+            where i.repo_id = %s
+        """
+        params: tuple[Any, ...] = (
+            intent_schema_version,
+            intent_prompt_version,
+            item_ids,
+            query_vector,
+            model,
+            repo_id,
+        )
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+        result: dict[int, float] = {}
+        for row in rows:
+            result[int(row["item_id"])] = float(row["score"])
+        return result
+
+    def search_similar_items_raw(
+        self,
+        *,
+        repo_id: int,
+        model: str,
+        query_embedding: list[float],
+        type_filter: TypeFilter,
+        state_filter: StateFilter,
+        min_score: float,
+        limit: int,
+    ) -> list[SearchMatch]:
+        query_vector = _vector_literal(query_embedding)
+        query = """
+            select
+                i.id as item_id,
+                i.type,
+                i.number,
+                i.state,
+                i.title,
+                i.url,
+                i.body,
+                (1 - (e.embedding <=> %s::vector))::double precision as score
+            from public.embeddings e
+            join public.items i on i.id = e.item_id
+            where
+                e.model = %s
+                and i.repo_id = %s
+        """
+        params: list[Any] = [query_vector, model, repo_id]
+
+        if type_filter != TypeFilter.ALL:
+            query += " and i.type = %s"
+            params.append(type_filter.value)
+
+        if state_filter != StateFilter.ALL:
+            query += " and i.state = %s"
+            params.append(state_filter.value)
+
+        query += """
+            and (1 - (e.embedding <=> %s::vector)) >= %s
+            order by (e.embedding <=> %s::vector) asc
+            limit %s
+        """
+        params.extend([query_vector, min_score, query_vector, limit])
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, tuple(params))
+            rows = cur.fetchall()
+
+        result: list[SearchMatch] = []
+        for idx, row in enumerate(rows, start=1):
+            result.append(
+                SearchMatch(
+                    rank=idx,
+                    item_id=int(row["item_id"]),
+                    type=ItemType(str(row["type"])),
+                    number=int(row["number"]),
+                    state=StateFilter(str(row["state"])),
+                    title=str(row["title"]),
+                    url=str(row["url"]),
+                    body=row.get("body"),
+                    score=float(row["score"]),
+                )
+            )
+        return result
+
+    def search_similar_items_intent(
+        self,
+        *,
+        repo_id: int,
+        model: str,
+        query_embedding: list[float],
+        type_filter: TypeFilter,
+        state_filter: StateFilter,
+        min_score: float,
+        limit: int,
+        intent_schema_version: str,
+        intent_prompt_version: str,
+    ) -> list[SearchMatch]:
+        query_vector = _vector_literal(query_embedding)
+        query = """
+            with latest_fresh as (
+                select distinct on (ic.item_id)
+                    ic.id as intent_card_id,
+                    ic.item_id
+                from public.intent_cards ic
+                where
+                    ic.schema_version = %s
+                    and ic.prompt_version = %s
+                    and ic.status = 'fresh'
+                order by ic.item_id, ic.created_at desc, ic.id desc
+            )
+            select
+                i.id as item_id,
+                i.type,
+                i.number,
+                i.state,
+                i.title,
+                i.url,
+                i.body,
+                (1 - (ie.embedding <=> %s::vector))::double precision as score
+            from latest_fresh lf
+            join public.intent_embeddings ie
+                on ie.intent_card_id = lf.intent_card_id and ie.model = %s
+            join public.items i on i.id = lf.item_id
+            where i.repo_id = %s
+        """
+        params: list[Any] = [
+            intent_schema_version,
+            intent_prompt_version,
+            query_vector,
+            model,
+            repo_id,
+        ]
+
+        if type_filter != TypeFilter.ALL:
+            query += " and i.type = %s"
+            params.append(type_filter.value)
+
+        if state_filter != StateFilter.ALL:
+            query += " and i.state = %s"
+            params.append(state_filter.value)
+
+        query += """
+            and (1 - (ie.embedding <=> %s::vector)) >= %s
+            order by (ie.embedding <=> %s::vector) asc
+            limit %s
+        """
+        params.extend([query_vector, min_score, query_vector, limit])
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, tuple(params))
+            rows = cur.fetchall()
+
+        result: list[SearchMatch] = []
+        for idx, row in enumerate(rows, start=1):
+            result.append(
+                SearchMatch(
+                    rank=idx,
+                    item_id=int(row["item_id"]),
+                    type=ItemType(str(row["type"])),
+                    number=int(row["number"]),
+                    state=StateFilter(str(row["state"])),
+                    title=str(row["title"]),
+                    url=str(row["url"]),
+                    body=row.get("body"),
+                    score=float(row["score"]),
                 )
             )
         return result

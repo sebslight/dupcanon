@@ -417,7 +417,7 @@ def run_judge_audit(
     worker_concurrency: int | None,
     verbose: bool,
     debug_rpc: bool,
-    source: RepresentationSource = RepresentationSource.RAW,
+    source: RepresentationSource = RepresentationSource.INTENT,
     console: Console,
     logger: BoundLogger,
 ) -> JudgeAuditStats:

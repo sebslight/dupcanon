@@ -16,6 +16,7 @@ from dupcanon.models import (
     CanonicalNode,
     ItemType,
     PlanCloseStats,
+    PlanCloseTargetPolicy,
     RepoRef,
     RepresentationSource,
     StateFilter,
@@ -57,7 +58,8 @@ def run_plan_close(
     item_type: ItemType,
     min_close: float,
     maintainers_source: str,
-    source: RepresentationSource = RepresentationSource.RAW,
+    source: RepresentationSource = RepresentationSource.INTENT,
+    target_policy: PlanCloseTargetPolicy = PlanCloseTargetPolicy.CANONICAL_ONLY,
     dry_run: bool,
     console: Console,
     logger: BoundLogger,
@@ -81,6 +83,7 @@ def run_plan_close(
         type=item_type.value,
         stage="plan_close",
         source=source.value,
+        target_policy=target_policy.value,
     )
     logger.info(
         "plan_close.start",
@@ -88,6 +91,7 @@ def run_plan_close(
         min_close=min_close,
         maintainers_source=normalized_maintainers_source,
         source=source.value,
+        target_policy=target_policy.value,
         dry_run=dry_run,
     )
 
@@ -129,6 +133,14 @@ def run_plan_close(
         (edge.from_item_id, edge.to_item_id): edge.confidence
         for edge in edges
     }
+    accepted_outgoing_target_by_source = {
+        edge.from_item_id: edge.to_item_id
+        for edge in edges
+    }
+    accepted_outgoing_confidence_by_source = {
+        edge.from_item_id: edge.confidence
+        for edge in edges
+    }
 
     components = _components_from_edges([(edge.from_item_id, edge.to_item_id) for edge in edges])
 
@@ -156,6 +168,7 @@ def run_plan_close(
 
     considered = 0
     close_actions = 0
+    close_actions_direct_fallback = 0
     skip_actions = 0
     skipped_not_open = 0
     skipped_low_confidence = 0
@@ -209,6 +222,7 @@ def run_plan_close(
                     considered += 1
                     action = "close"
                     skip_reason: str | None = None
+                    close_target_item_id = canonical_item_id
 
                     if item.state != StateFilter.OPEN:
                         action = "skip"
@@ -232,8 +246,31 @@ def run_plan_close(
                         skipped_maintainer_assignee += 1
                     else:
                         confidence = confidence_by_direct_edge.get(
-                            (item.item_id, canonical_item_id)
+                            (item.item_id, close_target_item_id)
                         )
+                        if (
+                            confidence is None
+                            and target_policy == PlanCloseTargetPolicy.DIRECT_FALLBACK
+                        ):
+                            fallback_target_item_id = accepted_outgoing_target_by_source.get(
+                                item.item_id
+                            )
+                            fallback_confidence = accepted_outgoing_confidence_by_source.get(
+                                item.item_id
+                            )
+                            fallback_target = (
+                                items_by_id.get(fallback_target_item_id)
+                                if fallback_target_item_id is not None
+                                else None
+                            )
+                            if (
+                                fallback_target_item_id is not None
+                                and fallback_confidence is not None
+                                and fallback_target is not None
+                            ):
+                                close_target_item_id = fallback_target_item_id
+                                confidence = fallback_confidence
+
                         if confidence is None:
                             action = "skip"
                             skip_reason = "missing_accepted_edge"
@@ -245,6 +282,8 @@ def run_plan_close(
 
                     if action == "close":
                         close_actions += 1
+                        if close_target_item_id != canonical_item_id:
+                            close_actions_direct_fallback += 1
                     else:
                         skip_actions += 1
 
@@ -252,7 +291,7 @@ def run_plan_close(
                         db.create_close_run_item(
                             close_run_id=close_run_id,
                             item_id=item.item_id,
-                            canonical_item_id=canonical_item_id,
+                            canonical_item_id=close_target_item_id,
                             action=action,
                             skip_reason=skip_reason,
                             created_at=utc_now(),
@@ -271,6 +310,7 @@ def run_plan_close(
                         "source": source.value,
                         "component_item_ids": component,
                         "min_close": min_close,
+                        "target_policy": target_policy.value,
                         "dry_run": dry_run,
                         "error_class": type(exc).__name__,
                         "error": str(exc),
@@ -292,6 +332,7 @@ def run_plan_close(
         clusters=len(components),
         considered=considered,
         close_actions=close_actions,
+        close_actions_direct_fallback=close_actions_direct_fallback,
         skip_actions=skip_actions,
         skipped_not_open=skipped_not_open,
         skipped_low_confidence=skipped_low_confidence,
