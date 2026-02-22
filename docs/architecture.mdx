@@ -259,6 +259,7 @@ Default `--source` is now `intent` for source-aware commands. When `--source raw
 | Command | Primary input | Reads | Writes | Output role |
 |---|---|---|---|---|
 | `init` | local env/runtime | env + local runtime checks | none | readiness checks only |
+| `llm` | local CLI metadata | CLI command tree + settings defaults | none | machine-readable CLI reference |
 | `maintainers` | `--repo` | GitHub collaborators/permissions | none | maintainer list for policy checks |
 | `sync` | repo + type/state/since | GitHub issues/PRs | `repos` (upsert), `items` (upsert + content hash/version) | corpus ingest |
 | `refresh` | repo + type | GitHub + existing `items` | `items` (discover new; optional metadata refresh) | incremental freshness |
