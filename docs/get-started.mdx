@@ -143,21 +143,28 @@ Use a repo you can safely test against.
 # 1) ingest recent items
 uv run dupcanon sync --repo openclaw/openclaw --since 3d
 
-# 2) embed changed/new items
+# 2) extract intent cards (default modeling source)
+uv run dupcanon analyze-intent --repo openclaw/openclaw --type issue --state open
+
+# 3) embed changed/new intent cards
 uv run dupcanon embed --repo openclaw/openclaw --type issue --only-changed
 
-# 3) build candidate sets (open-only by default for operations)
+# 4) build candidate sets (open-only by default for operations)
 uv run dupcanon candidates --repo openclaw/openclaw --type issue --include open
 
-# 4) run duplicate judge
+# 5) run duplicate judge
 uv run dupcanon judge --repo openclaw/openclaw --type issue --thinking low
 
-# 5) compute canonical stats (optional but recommended)
+# 6) compute canonical stats (optional but recommended)
 uv run dupcanon canonicalize --repo openclaw/openclaw --type issue
 
-# 6) generate close plan safely (dry run)
+# 7) generate close plan safely (dry run)
 uv run dupcanon plan-close --repo openclaw/openclaw --type issue --dry-run
 ```
+
+<Note>
+If you want to skip intent extraction, use raw embeddings instead: add `--source raw` to `embed`, `candidates`, and `judge` (and omit `analyze-intent`).
+</Note>
 
 <Note>
 Every command prints a summary table with counters, making it easy to verify each stage before moving on.
@@ -248,6 +255,24 @@ uv run dupcanon report-audit --run-id <id> --simulate-gates --gate-gap-min 0.02
 ```
 
   </Tab>
+  <Tab title="Semantic search (read-only)">
+
+```bash
+# query-driven search (intent is default source)
+uv run dupcanon search --repo openclaw/openclaw --query "oauth error" --type issue
+
+# anchor-driven search with include/exclude constraints
+uv run dupcanon search \
+  --repo openclaw/openclaw \
+  --similar-to 1234 \
+  --include "websocket" \
+  --exclude "android" \
+  --include-mode boost \
+  --include-weight 0.15 \
+  --debug-constraints
+```
+
+  </Tab>
 </Tabs>
 
 ## Common troubleshooting
@@ -287,15 +312,17 @@ uv run dupcanon report-audit --run-id <id> --simulate-gates --gate-gap-min 0.02
 A practical scheduled sequence is:
 
 1. `refresh --refresh-known`
-2. `embed --only-changed`
-3. `candidates --include open`
-4. `judge`
-5. `canonicalize`
-6. `plan-close` (and apply only under review policy)
+2. `analyze-intent --only-changed`
+3. `embed --only-changed`
+4. `candidates --include open`
+5. `judge`
+6. `canonicalize`
+7. `plan-close` (and apply only under review policy)
 
 For event-driven online checks, trigger `detect-new` from issue/pr opened events.
 
 ## Next docs to read
 
 - Overview: `/`
+- Semantic search: `/search`
 - Internal runbook/specs: `docs/internal/`

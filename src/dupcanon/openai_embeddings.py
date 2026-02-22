@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import time
-
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
 
-from dupcanon.llm_retry import retry_delay_seconds, should_retry_http_status, validate_max_attempts
+from dupcanon.llm_retry import retry_with_backoff, should_retry_http_status, validate_max_attempts
 
 
 class OpenAIEmbeddingError(RuntimeError):
@@ -40,43 +38,32 @@ class OpenAIEmbeddingsClient:
         if not texts:
             return []
 
-        last_error: OpenAIEmbeddingError | None = None
+        def _attempt() -> list[list[float]]:
+            response = self.client.embeddings.create(
+                model=self.model,
+                input=texts,
+                dimensions=self.output_dimensionality,
+            )
+            return self._parse_embeddings(response=response, expected_count=len(texts))
 
-        for attempt in range(1, self.max_attempts + 1):
-            try:
-                response = self.client.embeddings.create(
-                    model=self.model,
-                    input=texts,
-                    dimensions=self.output_dimensionality,
-                )
-                return self._parse_embeddings(response=response, expected_count=len(texts))
-            except RateLimitError as exc:
-                err = OpenAIEmbeddingError(str(exc), status_code=429)
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
-            except APIStatusError as exc:
+        def _map_error(exc: Exception) -> tuple[bool, OpenAIEmbeddingError]:
+            if isinstance(exc, OpenAIEmbeddingError):
+                return True, exc
+            if isinstance(exc, RateLimitError):
+                return True, OpenAIEmbeddingError(str(exc), status_code=429)
+            if isinstance(exc, APIStatusError):
                 status_code = _status_code(exc)
                 err = OpenAIEmbeddingError(str(exc), status_code=status_code)
-                last_error = err
-                if attempt >= self.max_attempts or not _should_retry(status_code):
-                    raise err from exc
-            except (APIConnectionError, APITimeoutError) as exc:
-                err = OpenAIEmbeddingError(str(exc))
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
-            except Exception as exc:  # noqa: BLE001
-                err = OpenAIEmbeddingError(str(exc))
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
+                return _should_retry(status_code), err
+            if isinstance(exc, (APIConnectionError, APITimeoutError)):
+                return True, OpenAIEmbeddingError(str(exc))
+            return True, OpenAIEmbeddingError(str(exc))
 
-            time.sleep(retry_delay_seconds(attempt))
-
-        if last_error is not None:
-            raise last_error
-        raise OpenAIEmbeddingError("unreachable embedding retry state")
+        return retry_with_backoff(
+            max_attempts=self.max_attempts,
+            attempt=_attempt,
+            on_error=_map_error,
+        )
 
     def _parse_embeddings(self, *, response: object, expected_count: int) -> list[list[float]]:
         data = getattr(response, "data", None)

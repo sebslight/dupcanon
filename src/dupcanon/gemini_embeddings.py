@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import time
 from urllib import error, request
 
-from dupcanon.llm_retry import retry_delay_seconds, should_retry_http_status, validate_max_attempts
+from dupcanon.llm_retry import retry_with_backoff, should_retry_http_status, validate_max_attempts
 
 
 class GeminiEmbeddingError(RuntimeError):
@@ -63,9 +62,7 @@ class GeminiEmbeddingsClient:
             f"models/{self.model}:batchEmbedContents?key={self.api_key}"
         )
 
-        last_error: GeminiEmbeddingError | None = None
-
-        for attempt in range(1, self.max_attempts + 1):
+        def _attempt() -> list[list[float]]:
             req = request.Request(
                 url,
                 data=payload,
@@ -73,27 +70,26 @@ class GeminiEmbeddingsClient:
                 method="POST",
             )
 
-            try:
-                with request.urlopen(req, timeout=self.timeout_seconds) as response:
-                    raw = response.read()
-                return self._parse_embeddings(raw=raw, expected_count=len(texts))
-            except error.HTTPError as exc:
+            with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                raw = response.read()
+            return self._parse_embeddings(raw=raw, expected_count=len(texts))
+
+        def _map_error(exc: Exception) -> tuple[bool, GeminiEmbeddingError]:
+            if isinstance(exc, GeminiEmbeddingError):
+                return False, exc
+            if isinstance(exc, error.HTTPError):
                 body = exc.read().decode("utf-8", errors="replace")
                 err = GeminiEmbeddingError(body or str(exc), status_code=exc.code)
-                last_error = err
-                if attempt >= self.max_attempts or not _should_retry(exc.code):
-                    raise err from exc
-            except (error.URLError, TimeoutError) as exc:
-                err = GeminiEmbeddingError(str(exc))
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
+                return _should_retry(exc.code), err
+            if isinstance(exc, (error.URLError, TimeoutError)):
+                return True, GeminiEmbeddingError(str(exc))
+            return True, GeminiEmbeddingError(str(exc))
 
-            time.sleep(retry_delay_seconds(attempt))
-
-        if last_error is not None:
-            raise last_error
-        raise GeminiEmbeddingError("unreachable embedding retry state")
+        return retry_with_backoff(
+            max_attempts=self.max_attempts,
+            attempt=_attempt,
+            on_error=_map_error,
+        )
 
     def _parse_embeddings(self, *, raw: bytes, expected_count: int) -> list[list[float]]:
         try:

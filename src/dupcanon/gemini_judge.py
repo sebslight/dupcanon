@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import time
 from typing import cast
 
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
 
-from dupcanon.llm_retry import retry_delay_seconds, should_retry_http_status, validate_max_attempts
+from dupcanon.llm_retry import retry_with_backoff, should_retry_http_status, validate_max_attempts
 from dupcanon.thinking import normalize_thinking_level
 
 
@@ -57,37 +56,32 @@ class GeminiJudgeClient:
             thinking_config=thinking_config,
         )
 
-        last_error: GeminiJudgeError | None = None
+        def _attempt() -> str:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=user_prompt,
+                config=config,
+            )
+            text = (response.text or "").strip()
+            if text:
+                return text
+            msg = "judge model returned empty text"
+            raise GeminiJudgeError(msg)
 
-        for attempt in range(1, self.max_attempts + 1):
-            try:
-                response = self.client.models.generate_content(
-                    model=self.model,
-                    contents=user_prompt,
-                    config=config,
-                )
-                text = (response.text or "").strip()
-                if text:
-                    return text
-                msg = "judge model returned empty text"
-                raise GeminiJudgeError(msg)
-            except APIError as exc:
+        def _map_error(exc: Exception) -> tuple[bool, GeminiJudgeError]:
+            if isinstance(exc, GeminiJudgeError):
+                return True, exc
+            if isinstance(exc, APIError):
                 status_code = _status_code(exc)
                 err = GeminiJudgeError(str(exc), status_code=status_code)
-                last_error = err
-                if attempt >= self.max_attempts or not _should_retry(status_code):
-                    raise err from exc
-            except Exception as exc:  # noqa: BLE001
-                err = GeminiJudgeError(str(exc))
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
+                return _should_retry(status_code), err
+            return True, GeminiJudgeError(str(exc))
 
-            time.sleep(retry_delay_seconds(attempt))
-
-        if last_error is not None:
-            raise last_error
-        raise GeminiJudgeError("unreachable judge retry state")
+        return retry_with_backoff(
+            max_attempts=self.max_attempts,
+            attempt=_attempt,
+            on_error=_map_error,
+        )
 
 
 def _status_code(exc: APIError) -> int | None:

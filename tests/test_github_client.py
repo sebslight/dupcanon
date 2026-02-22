@@ -98,6 +98,62 @@ def test_gh_api_paginated_collect_batches_and_flushes(monkeypatch) -> None:
     assert batches == [100, 100, 5]
 
 
+def test_gh_api_paginated_collect_rolls_back_on_retry(monkeypatch) -> None:
+    class _LineStream:
+        def __init__(self, lines: list[str]) -> None:
+            self.lines = lines
+
+        def __iter__(self) -> _LineStream:
+            return self
+
+        def __next__(self) -> str:
+            if not self.lines:
+                raise StopIteration
+            return self.lines.pop(0)
+
+    class _ErrStream:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def read(self) -> str:
+            return self.text
+
+    class _Proc:
+        def __init__(self, line_count: int, return_code: int, stderr_text: str) -> None:
+            self.stdout = _LineStream([f'{{"id":{i}}}\n' for i in range(1, line_count + 1)])
+            self.stderr = _ErrStream(stderr_text)
+            self.return_code = return_code
+
+        def wait(self) -> int:
+            return self.return_code
+
+    attempts = iter(
+        [
+            _Proc(150, 1, "HTTP 502 Bad Gateway"),
+            _Proc(150, 0, ""),
+        ]
+    )
+
+    monkeypatch.setattr(
+        github_client.subprocess,
+        "Popen",
+        lambda *args, **kwargs: next(attempts),
+    )
+    monkeypatch.setattr(github_client.time, "sleep", lambda *_: None)
+
+    batches: list[int] = []
+    client = GitHubClient(max_attempts=2)
+    rows = client._gh_api_paginated_collect(
+        "repos/org/repo/issues",
+        params={"state": "all"},
+        row_mapper=lambda row: row,
+        on_batch_count=batches.append,
+    )
+
+    assert len(rows) == 150
+    assert batches == [100, -100, 100, 50]
+
+
 def test_fetch_issues_with_since_uses_server_side_created_filter(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

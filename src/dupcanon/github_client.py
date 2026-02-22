@@ -155,6 +155,7 @@ class GitHubClient:
 
             mapped_rows: list[_T] = []
             pending = 0
+            emitted_count = 0
 
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -179,6 +180,7 @@ class GitHubClient:
                 pending += 1
                 if on_batch_count is not None and pending >= 100:
                     on_batch_count(pending)
+                    emitted_count += pending
                     pending = 0
 
             stderr = ""
@@ -189,6 +191,7 @@ class GitHubClient:
             if return_code == 0:
                 if on_batch_count is not None and pending > 0:
                     on_batch_count(pending)
+                    emitted_count += pending
                 return mapped_rows
 
             status_code = _parse_http_status(stderr)
@@ -200,7 +203,11 @@ class GitHubClient:
             error = GitHubApiError(message, status_code=status_code)
             last_error = error
 
-            if attempt >= self.max_attempts or not _should_retry(status_code):
+            should_retry = attempt < self.max_attempts and _should_retry(status_code)
+            if should_retry and on_batch_count is not None and emitted_count:
+                on_batch_count(-emitted_count)
+
+            if not should_retry:
                 raise error
 
             time.sleep(retry_delay_seconds(attempt))
@@ -244,6 +251,7 @@ class GitHubClient:
 
             mapped_rows: list[_T] = []
             pending = 0
+            emitted_count = 0
 
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -268,6 +276,7 @@ class GitHubClient:
                 pending += 1
                 if on_batch_count is not None and pending >= 100:
                     on_batch_count(pending)
+                    emitted_count += pending
                     pending = 0
 
             stderr = ""
@@ -278,6 +287,7 @@ class GitHubClient:
             if return_code == 0:
                 if on_batch_count is not None and pending > 0:
                     on_batch_count(pending)
+                    emitted_count += pending
                 return mapped_rows
 
             status_code = _parse_http_status(stderr)
@@ -289,7 +299,11 @@ class GitHubClient:
             error = GitHubApiError(message, status_code=status_code)
             last_error = error
 
-            if attempt >= self.max_attempts or not _should_retry(status_code):
+            should_retry = attempt < self.max_attempts and _should_retry(status_code)
+            if should_retry and on_batch_count is not None and emitted_count:
+                on_batch_count(-emitted_count)
+
+            if not should_retry:
                 raise error
 
             time.sleep(retry_delay_seconds(attempt))

@@ -45,12 +45,17 @@ Two paths share one data model and one safety model.
 
 1. **Online entrypoint:** `detect-new` for newly opened issues/PRs
 2. `sync` / `refresh`: ingest issues + PRs into Postgres
-3. `embed`: title/body embeddings in pgvector
-4. `candidates`: persisted nearest-neighbor candidate sets
-5. `judge`: LLM chooses duplicate target inside the candidate set
-6. deterministic gates veto risky decisions
-7. `canonicalize`: compute canonical representatives
-8. `plan-close` -> reviewed `apply-close --yes`
+3. `analyze-intent`: extract intent cards for intent-first modeling (default)
+4. `embed`: intent-card embeddings in pgvector (raw title/body when `--source raw`)
+5. `candidates`: persisted nearest-neighbor candidate sets
+6. `judge`: LLM chooses duplicate target inside the candidate set
+7. deterministic gates veto risky decisions
+8. `canonicalize`: compute canonical representatives
+9. `plan-close` -> reviewed `apply-close --yes`
+
+<Note>
+If you prefer raw embeddings, skip `analyze-intent` and pass `--source raw` to `embed`, `candidates`, `judge`, and `detect-new`.
+</Note>
 
 <Note>
 All key artifacts are persisted for replay, audit, and threshold tuning.
@@ -190,8 +195,9 @@ Goal is practical operations, not perfect AI: keep cost low enough for continuou
 
 Implemented commands:
 
-- `init`, `sync`, `refresh`, `embed`, `candidates`, `judge`
-- `judge-audit`, `report-audit`, `detect-new`
+- `init`, `sync`, `refresh`, `analyze-intent`, `embed`
+- `candidates`, `judge`, `judge-audit`, `report-audit`
+- `detect-new`, `search`
 - `canonicalize`, `maintainers`, `plan-close`, `apply-close`
 
 ## What’s missing next

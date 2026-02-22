@@ -9,7 +9,8 @@ import uuid
 from collections.abc import Callable
 from typing import Any, cast
 
-from dupcanon.llm_retry import retry_delay_seconds, validate_max_attempts
+from dupcanon.llm_retry import retry_with_backoff, validate_max_attempts
+from dupcanon.thinking import normalize_thinking_level
 
 
 class OpenAICodexJudgeError(RuntimeError):
@@ -38,17 +39,7 @@ class OpenAICodexJudgeClient:
         # Kept for parity with other judge clients; authentication is handled by `pi`.
         self.api_key = api_key
         self.model = model.strip()
-        self.thinking_level = thinking_level.strip().lower() if thinking_level else None
-        if self.thinking_level is not None and self.thinking_level not in {
-            "off",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-        }:
-            msg = "thinking_level must be one of: off, minimal, low, medium, high, xhigh"
-            raise ValueError(msg)
+        self.thinking_level = normalize_thinking_level(thinking_level, label="thinking_level")
         validate_max_attempts(max_attempts)
         if timeout_seconds <= 0:
             msg = "timeout_seconds must be > 0"
@@ -61,40 +52,34 @@ class OpenAICodexJudgeClient:
         self.debug_sink = debug_sink
 
     def judge(self, *, system_prompt: str, user_prompt: str) -> str:
-        last_error: OpenAICodexJudgeError | None = None
         prompt = _build_rpc_prompt(system_prompt=system_prompt, user_prompt=user_prompt)
 
-        for attempt in range(1, self.max_attempts + 1):
-            try:
-                response_text = _invoke_pi_rpc(
-                    pi_command=self.pi_command,
-                    model=self.model,
-                    thinking_level=self.thinking_level,
-                    prompt=prompt,
-                    timeout_seconds=self.timeout_seconds,
-                    debug=self.debug,
-                    debug_sink=self.debug_sink,
-                )
-                json_text = _extract_json_text(response_text)
-                if json_text:
-                    return json_text
-                msg = "judge model returned empty text"
-                raise OpenAICodexJudgeError(msg)
-            except OpenAICodexJudgeError as exc:
-                last_error = exc
-                if attempt >= self.max_attempts or not _should_retry(exc.retryable):
-                    raise
-            except Exception as exc:  # noqa: BLE001
-                err = OpenAICodexJudgeError(str(exc))
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
+        def _attempt() -> str:
+            response_text = _invoke_pi_rpc(
+                pi_command=self.pi_command,
+                model=self.model,
+                thinking_level=self.thinking_level,
+                prompt=prompt,
+                timeout_seconds=self.timeout_seconds,
+                debug=self.debug,
+                debug_sink=self.debug_sink,
+            )
+            json_text = _extract_json_text(response_text)
+            if json_text:
+                return json_text
+            msg = "judge model returned empty text"
+            raise OpenAICodexJudgeError(msg)
 
-            time.sleep(retry_delay_seconds(attempt))
+        def _map_error(exc: Exception) -> tuple[bool, OpenAICodexJudgeError]:
+            if isinstance(exc, OpenAICodexJudgeError):
+                return _should_retry(exc.retryable), exc
+            return True, OpenAICodexJudgeError(str(exc))
 
-        if last_error is not None:
-            raise last_error
-        raise OpenAICodexJudgeError("unreachable judge retry state")
+        return retry_with_backoff(
+            max_attempts=self.max_attempts,
+            attempt=_attempt,
+            on_error=_map_error,
+        )
 
 
 def _build_rpc_prompt(*, system_prompt: str, user_prompt: str) -> str:

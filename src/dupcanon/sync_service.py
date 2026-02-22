@@ -150,11 +150,11 @@ def run_sync(
             fetched_total=issues_count + prs_count,
         )
 
-        def update_fetch_progress(description: str, *, advance: int = 0) -> None:
+        def update_fetch_progress(description: str) -> None:
             fetch_progress.update(
                 fetch_task,
                 description=description,
-                advance=advance,
+                completed=issues_count + prs_count,
                 issues=issues_count,
                 prs=prs_count,
                 fetched_total=issues_count + prs_count,
@@ -166,7 +166,10 @@ def run_sync(
             def on_issues_page(page_added: int) -> None:
                 nonlocal issues_count
                 issues_count += page_added
-                update_fetch_progress("Fetching issues from GitHub...", advance=page_added)
+                if page_added < 0:
+                    update_fetch_progress("Fetching issues from GitHub...")
+                    return
+                update_fetch_progress("Fetching issues from GitHub...")
                 logger.info(
                     "sync.fetch.issues.page",
                     stage="fetch",
@@ -185,6 +188,8 @@ def run_sync(
                 on_page_count=on_issues_page,
             )
             items.extend(issues)
+            issues_count = len(issues)
+            update_fetch_progress("Fetching issues from GitHub...")
             logger.info(
                 "sync.fetch.issues.complete",
                 stage="fetch",
@@ -198,7 +203,10 @@ def run_sync(
             def on_prs_page(page_added: int) -> None:
                 nonlocal prs_count
                 prs_count += page_added
-                update_fetch_progress("Fetching pull requests from GitHub...", advance=page_added)
+                if page_added < 0:
+                    update_fetch_progress("Fetching pull requests from GitHub...")
+                    return
+                update_fetch_progress("Fetching pull requests from GitHub...")
                 logger.info(
                     "sync.fetch.prs.page",
                     stage="fetch",
@@ -217,6 +225,8 @@ def run_sync(
                 on_page_count=on_prs_page,
             )
             items.extend(prs)
+            prs_count = len(prs)
+            update_fetch_progress("Fetching pull requests from GitHub...")
             logger.info(
                 "sync.fetch.prs.complete",
                 stage="fetch",

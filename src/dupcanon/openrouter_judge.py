@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from openrouter import OpenRouter
 from openrouter.errors import NoResponseError, OpenRouterError
 
-from dupcanon.llm_retry import retry_delay_seconds, should_retry_http_status, validate_max_attempts
+from dupcanon.llm_retry import retry_with_backoff, should_retry_http_status, validate_max_attempts
+from dupcanon.llm_text import extract_text_from_content
+from dupcanon.thinking import normalize_reasoning_effort
 
 
 class OpenRouterJudgeError(RuntimeError):
@@ -19,9 +20,6 @@ def _should_retry(status_code: int | None) -> bool:
     return should_retry_http_status(status_code)
 
 
-_ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
-
-
 class OpenRouterJudgeClient:
     def __init__(
         self,
@@ -31,13 +29,7 @@ class OpenRouterJudgeClient:
         reasoning_effort: str | None = None,
         max_attempts: int = 5,
     ) -> None:
-        normalized_reasoning = reasoning_effort.strip().lower() if reasoning_effort else None
-        if (
-            normalized_reasoning is not None
-            and normalized_reasoning not in _ALLOWED_REASONING_EFFORTS
-        ):
-            msg = "reasoning_effort must be one of: none, minimal, low, medium, high, xhigh"
-            raise ValueError(msg)
+        normalized_reasoning = normalize_reasoning_effort(reasoning_effort)
         validate_max_attempts(max_attempts)
 
         self.client = OpenRouter(api_key=api_key)
@@ -46,51 +38,43 @@ class OpenRouterJudgeClient:
         self.max_attempts = max_attempts
 
     def judge(self, *, system_prompt: str, user_prompt: str) -> str:
-        last_error: OpenRouterJudgeError | None = None
+        def _attempt() -> str:
+            request: dict[str, Any] = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 1,
+                "response_format": {"type": "json_object"},
+                "stream": False,
+            }
+            if self.reasoning_effort is not None:
+                request["reasoning"] = {"effort": self.reasoning_effort}
 
-        for attempt in range(1, self.max_attempts + 1):
-            try:
-                request: dict[str, Any] = {
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "temperature": 1,
-                    "response_format": {"type": "json_object"},
-                    "stream": False,
-                }
-                if self.reasoning_effort is not None:
-                    request["reasoning"] = {"effort": self.reasoning_effort}
+            response = self.client.chat.send(**request)
+            text = _extract_text(response)
+            if text:
+                return text
+            msg = "judge model returned empty text"
+            raise OpenRouterJudgeError(msg)
 
-                response = self.client.chat.send(**request)
-                text = _extract_text(response)
-                if text:
-                    return text
-                msg = "judge model returned empty text"
-                raise OpenRouterJudgeError(msg)
-            except OpenRouterError as exc:
+        def _map_error(exc: Exception) -> tuple[bool, OpenRouterJudgeError]:
+            if isinstance(exc, OpenRouterJudgeError):
+                return True, exc
+            if isinstance(exc, OpenRouterError):
                 status_code = _status_code(exc)
                 err = OpenRouterJudgeError(str(exc), status_code=status_code)
-                last_error = err
-                if attempt >= self.max_attempts or not _should_retry(status_code):
-                    raise err from exc
-            except NoResponseError as exc:
-                err = OpenRouterJudgeError(str(exc))
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
-            except Exception as exc:  # noqa: BLE001
-                err = OpenRouterJudgeError(str(exc))
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
+                return _should_retry(status_code), err
+            if isinstance(exc, NoResponseError):
+                return True, OpenRouterJudgeError(str(exc))
+            return True, OpenRouterJudgeError(str(exc))
 
-            time.sleep(retry_delay_seconds(attempt))
-
-        if last_error is not None:
-            raise last_error
-        raise OpenRouterJudgeError("unreachable judge retry state")
+        return retry_with_backoff(
+            max_attempts=self.max_attempts,
+            attempt=_attempt,
+            on_error=_map_error,
+        )
 
 
 def _extract_text(response: Any) -> str:
@@ -99,31 +83,9 @@ def _extract_text(response: Any) -> str:
         if choices and len(choices) > 0:
             message = getattr(choices[0], "message", None)
             content = getattr(message, "content", None)
-            return _extract_content(content)
+            return extract_text_from_content(content)
     except Exception:  # noqa: BLE001
         return ""
-
-    return ""
-
-
-def _extract_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content.strip()
-
-    if isinstance(content, list):
-        chunks: list[str] = []
-        for part in content:
-            text = getattr(part, "text", None)
-            if isinstance(text, str):
-                chunks.append(text)
-                continue
-
-            if isinstance(part, dict):
-                value = part.get("text")
-                if isinstance(value, str):
-                    chunks.append(value)
-
-        return "".join(chunks).strip()
 
     return ""
 

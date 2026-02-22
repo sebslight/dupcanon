@@ -91,17 +91,40 @@ This is what makes downstream retrieval/judging reproducible and freshness-aware
 
 ---
 
-## Layer B — Embedding substrate (`embed`)
+## Layer B — Intent extraction (`analyze-intent`)
 
 ### Inputs
 
 - `items` rows for selected repo/type
+
+### Processing
+
+- LLM extracts intent cards from title/body (and PR context when available)
+- Upsert into `intent_cards` with schema/prompt version
+- With `--only-changed`, items whose intent hash is unchanged are skipped
+
+### Why this matters
+
+Intent cards are the default representation for `embed`, `candidates`, `judge`, and `detect-new`.
+
+<Note>
+If you want raw embeddings, skip `analyze-intent` and use `--source raw` downstream.
+</Note>
+
+---
+
+## Layer C — Embedding substrate (`embed`)
+
+### Inputs
+
+- `intent_cards` rows for selected repo/type (default) or `items` when `--source raw`
 - provider/model config
 
 ### Text used for embeddings
 
-- title + body, normalized and truncated
-- current limits in code:
+- intent-card text by default
+- raw mode uses title + body, normalized and truncated
+- current raw limits in code:
   - title excerpt: 300 chars
   - body excerpt: 7700 chars
   - combined cap: 8000 chars
@@ -121,11 +144,11 @@ This is what makes downstream retrieval/judging reproducible and freshness-aware
 
 ---
 
-## Layer C — Retrieval snapshot (`candidates`)
+## Layer D — Retrieval snapshot (`candidates`)
 
 ### Inputs
 
-- source items + embeddings
+- source items + intent_embeddings/embeddings
 - retrieval params (`k`, `min_score`, `include_states`)
 
 ### Candidate query semantics
@@ -151,7 +174,7 @@ This means every judge run has an explicit retrieval snapshot to audit against.
 
 ---
 
-## Layer D — Semantic judgment + deterministic policy (`judge`)
+## Layer E — Semantic judgment + deterministic policy (`judge`)
 
 ### Inputs
 
@@ -206,7 +229,7 @@ Each evaluated set writes a `judge_decisions` record with:
 
 ---
 
-## Layer E — Canonical resolution (`canonicalize`)
+## Layer F — Canonical resolution (`canonicalize`)
 
 ### Inputs
 
@@ -230,7 +253,7 @@ Each evaluated set writes a `judge_decisions` record with:
 
 ---
 
-## Layer F — Governed action planning (`plan-close`)
+## Layer G — Governed action planning (`plan-close`)
 
 ### Inputs
 
@@ -266,7 +289,7 @@ Otherwise action is `skip` with explicit reason:
 
 ---
 
-## Layer G — Controlled mutation (`apply-close`)
+## Layer H — Controlled mutation (`apply-close`)
 
 ### Gate
 
@@ -443,6 +466,8 @@ This is the real-time operational signal.
 ```bash
 # 1) keep corpus fresh
 uv run dupcanon refresh --repo <org/repo> --refresh-known
+uv run dupcanon analyze-intent --repo <org/repo> --type issue --only-changed
+uv run dupcanon analyze-intent --repo <org/repo> --type pr --only-changed
 uv run dupcanon embed --repo <org/repo> --type issue --only-changed
 uv run dupcanon embed --repo <org/repo> --type pr --only-changed
 

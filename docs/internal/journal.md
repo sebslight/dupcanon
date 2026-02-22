@@ -1770,3 +1770,55 @@ Validation
 - `uv run ruff check src tests`
 - `uv run pyright`
 - `uv run pytest` (338 passed)
+
+### 2026-02-19 — Entry 66 (LLM client refactors)
+
+Refactored LLM/embedding clients to reduce duplication and improve consistency.
+
+What we did
+- Added `retry_with_backoff` helper in `src/dupcanon/llm_retry.py` and migrated OpenAI/Gemini/OpenRouter judge + embeddings + Codex RPC judge to use it.
+- Centralized reasoning-effort validation in `src/dupcanon/thinking.py` (`normalize_reasoning_effort`) and reused it in OpenAI/OpenRouter judges; normalized Codex thinking validation via `normalize_thinking_level`.
+- Added `src/dupcanon/llm_text.py` and shared response text extraction between OpenAI and OpenRouter judges.
+- Simplified judge runtime client caching with a `JudgeClientCache` dataclass and `_build_judge_client` helper.
+
+Validation
+- Not run (not requested).
+
+What comes next
+- Run `uv run ruff check src tests`, `uv run pyright`, `uv run pytest`.
+
+### 2026-02-19 — Entry 67 (sync fetch counts on retries)
+
+Fixed inflated fetch counts in `sync` when GitHub pagination retries.
+
+What we did
+- Roll back streamed batch counts in `GitHubClient` when a paginated `gh api` attempt fails and is retried.
+- Updated sync fetch progress to use absolute totals and ignore negative batch deltas.
+- Reconciled final issue/PR counts with the lengths returned by GitHub before logging/completing the fetch stage.
+
+Validation
+- Not run (not requested).
+
+### 2026-02-19 — Entry 68 (Mintlify docs refresh)
+
+Aligned the public docs in `docs/` with the latest intent-first and search updates.
+
+What we did
+- Added a new Mintlify page for semantic search (`docs/search.mdx`) and wired it into navigation.
+- Updated the overview, get-started, architecture, and evaluation docs to include `analyze-intent`, intent embeddings, and the read-only `search` command.
+- Refreshed diagrams and sequences to show intent cards/embeddings and search flows.
+
+Validation
+- Not run (docs-only changes).
+
+### 2026-02-21 — Entry 69 (LLM retry typing + regression tests)
+
+What we did
+- Updated `retry_with_backoff` to use Python 3.12 type-parameter syntax (ruff UP047 fix).
+- Added regression coverage for paginated GitHub retry rollbacks in `tests/test_github_client.py`.
+- Added `tests/test_llm_text.py` for shared LLM response text extraction.
+
+Validation
+- `uv run ruff check src tests`
+- `uv run pyright`
+- `uv run pytest` (343 passed)

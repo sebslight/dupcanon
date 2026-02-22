@@ -32,6 +32,7 @@ flowchart LR
 
   subgraph CLI[dupcanon CLI]
     SY[sync/refresh]
+    AI[analyze-intent]
     EM[embed]
     CA[candidates]
     JU[judge]
@@ -39,12 +40,15 @@ flowchart LR
     PL[plan-close]
     AP[apply-close]
     DN[detect-new]
+    SE[search]
   end
 
   subgraph DB[Supabase Postgres + pgvector]
     R[(repos)]
     I[(items)]
+    IC[(intent_cards)]
     E[(embeddings)]
+    IE[(intent_embeddings)]
     CS[(candidate_sets + members)]
     JD[(judge_decisions)]
     CR[(close_runs + close_run_items)]
@@ -53,11 +57,18 @@ flowchart LR
   GH --> SY
   SY --> R
   SY --> I
+  I --> AI
+  AI --> JP
+  JP --> AI
+  AI --> IC
   I --> EM
+  IC --> EM
   EM --> EP
   EP --> EM
   EM --> E
+  EM --> IE
   E --> CA
+  IE --> CA
   I --> CA
   CA --> CS
   CS --> JU
@@ -80,9 +91,15 @@ flowchart LR
   GH --> DN
   DN --> R
   DN --> I
+  DN --> IC
+  DN --> IE
   DN --> E
   DN -.->|stale source only| EP
   DN --> JP
+
+  SE --> I
+  SE --> E
+  SE --> IE
 
   CLI --> LF
 ```
@@ -96,7 +113,8 @@ The batch path processes a repo corpus and produces reviewed close actions.
 
 ```mermaid
 flowchart TD
-  A[sync / refresh] --> B[embed --only-changed]
+  A[sync / refresh] --> AI[analyze-intent]
+  AI --> B[embed --only-changed]
   B --> C[candidates --include open]
   C --> D[judge]
   D --> F[plan-close]
@@ -114,6 +132,10 @@ flowchart TD
 For a batch of issues/PRs, each stage iterates over many source items. Artifacts are persisted after each stage so runs are restartable and auditable.
 </Note>
 
+<Note>
+If you prefer raw embeddings, skip `analyze-intent` and add `--source raw` to `embed`, `candidates`, and `judge`.
+</Note>
+
 ```mermaid
 sequenceDiagram
   autonumber
@@ -128,11 +150,17 @@ sequenceDiagram
   GH-->>CLI: issue/pr payloads
   CLI->>DB: upsert items + content_version
 
+  Op->>CLI: analyze-intent
+  CLI->>DB: list items needing intent extraction
+  CLI->>LLM: intent card extraction
+  LLM-->>CLI: intent cards
+  CLI->>DB: upsert intent_cards
+
   Op->>CLI: embed --only-changed
   CLI->>DB: list items needing embedding
   CLI->>LLM: embedding requests
   LLM-->>CLI: vectors
-  CLI->>DB: upsert embeddings
+  CLI->>DB: upsert embeddings / intent_embeddings
 
   Op->>CLI: candidates
   loop per source item
@@ -234,12 +262,14 @@ Default `--source` is now `intent` for source-aware commands. When `--source raw
 | `maintainers` | `--repo` | GitHub collaborators/permissions | none | maintainer list for policy checks |
 | `sync` | repo + type/state/since | GitHub issues/PRs | `repos` (upsert), `items` (upsert + content hash/version) | corpus ingest |
 | `refresh` | repo + type | GitHub + existing `items` | `items` (discover new; optional metadata refresh) | incremental freshness |
-| `embed` | repo + type | `items` needing vectors | `intent_embeddings` (default) / `embeddings` (raw) | semantic retrieval substrate |
+| `analyze-intent` | repo + type + state/only-changed | `items` | `intent_cards` | intent extraction substrate |
+| `embed` | repo + type | `intent_cards` (default) / `items` (raw) | `intent_embeddings` (default) / `embeddings` (raw) | semantic retrieval substrate |
 | `candidates` | repo + type + k/min_score | `items`, `intent_embeddings`/`embeddings` | `candidate_sets`, `candidate_set_members` (plus stale marking) | reproducible retrieval snapshot |
 | `judge` | repo + type + provider/model | `candidate_sets` + source/candidate item context | `judge_decisions` (`accepted/rejected/skipped`) | accepted-edge graph source |
 | `judge-audit` | sampled candidate sets | candidate sets + same judge runtime (cheap/strong lanes) | `judge_audit_runs`, `judge_audit_run_items` | evaluation + disagreement analysis |
 | `report-audit` | audit run id | `judge_audit_runs`, `judge_audit_run_items` | none | reporting/simulation only |
 | `detect-new` | single item number | GitHub item + DB corpus intent/raw embeddings | `repos` (upsert), `items` (source upsert), `intent_cards` + `intent_embeddings` (intent default), `embeddings` (raw fallback) | online JSON verdict |
+| `search` | repo + query/similar-to | `items`, `intent_embeddings`/`embeddings` | none | read-only semantic discovery |
 | `canonicalize` | repo + type | accepted edges + item metadata + maintainer list | none (stats output) | canonical cluster computation |
 | `plan-close` | repo + type + min_close + target_policy | accepted edges + item metadata + maintainer list | `close_runs(mode=plan)`, `close_run_items` (unless dry-run) | reviewable close plan |
 | `apply-close` | `close_run_id` + `--yes` | close plan rows + GitHub | `close_runs(mode=apply)`, `close_run_items` apply results | executed mutations |
@@ -258,22 +288,28 @@ flowchart LR
   SY[sync/refresh] --> REPOS[(repos)]
   SY --> ITEMS[(items)]
 
-  EM[embed] --> ITEMS
-  EM --> EMBS[(embeddings)]
+  ITEMS --> AI[analyze-intent]
+  AI --> ICARDS[(intent_cards)]
 
-  CA[candidates] --> ITEMS
-  CA --> EMBS
+  ITEMS --> EM[embed]
+  ICARDS --> EM
+  EM --> EMBS[(embeddings)]
+  EM --> IEMBS[(intent_embeddings)]
+
+  ITEMS --> CA[candidates]
+  EMBS --> CA
+  IEMBS --> CA
   CA --> CSETS[(candidate_sets + members)]
 
-  JU[judge] --> CSETS
-  JU --> ITEMS
+  CSETS --> JU[judge]
+  ITEMS --> JU
   JU --> JDEC[(judge_decisions)]
 
-  PL[plan-close] --> JDEC
-  PL --> ITEMS
+  JDEC --> PL[plan-close]
+  ITEMS --> PL
   PL --> CRUN[(close_runs + close_run_items)]
 
-  AP[apply-close] --> CRUN
+  CRUN --> AP[apply-close]
 ```
 
   </Tab>
@@ -284,10 +320,16 @@ flowchart LR
 flowchart LR
   DET[detect-new] --> REPOS[(repos)]
   DET --> ITEMS[(items)]
+  DET --> ICARDS[(intent_cards)]
+  DET --> IEMBS[(intent_embeddings)]
   DET --> EMBS[(embeddings)]
   DET -.->|stale source only| EP[Embedding provider]
   DET --> JP[Judge provider]
   DET --> GH[GitHub API]
+
+  SEARCH[search] --> ITEMS
+  SEARCH --> EMBS
+  SEARCH --> IEMBS
 
   AUD[judge-audit] --> CSETS[(candidate_sets + members)]
   AUD --> ARUN[(judge_audit_runs + items)]
@@ -326,7 +368,7 @@ flowchart LR
 
 The core linkage is shared state and shared decision runtime:
 
-1. **Shared corpus state** (`items` + `embeddings`) feeds both batch and online paths.
+1. **Shared corpus state** (`items`, `intent_cards`, `intent_embeddings`/`embeddings`) feeds both batch and online paths.
 2. **Shared duplicate reasoning runtime** powers `judge`, `judge-audit`, and `detect-new`.
 3. **Accepted-edge graph** in `judge_decisions` is the bridge from detection to canonicalization and close planning.
 4. **Close governance state** (`close_runs`) gives auditable review/apply separation.

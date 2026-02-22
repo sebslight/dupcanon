@@ -1,0 +1,76 @@
+---
+title: Semantic search
+description: Read-only semantic search over issues and PRs, with optional include/exclude constraints.
+---
+
+<Info>
+`dupcanon search` is retrieval-only. It does **not** write to the database, create candidate sets, or trigger close actions.
+</Info>
+
+## What it does
+
+- Runs a one-shot semantic search over a repo’s issues/PRs.
+- Supports query-driven or anchor-driven retrieval (`--query` or `--similar-to`).
+- Adds optional include/exclude semantic constraints with configurable behavior.
+- Defaults to intent embeddings and falls back to raw embeddings when intent data is missing.
+
+## Quick start
+
+```bash
+# simple natural-language query
+uv run dupcanon search --repo openclaw/openclaw --query "oauth error" --type issue
+
+# anchor-driven search
+uv run dupcanon search --repo openclaw/openclaw --similar-to 1234 --type issue
+```
+
+## Include/exclude constraints
+
+Use `--include` and `--exclude` to bias or filter the results.
+
+```bash
+uv run dupcanon search \
+  --repo openclaw/openclaw \
+  --query "websocket failure" \
+  --include "auth" \
+  --exclude "android" \
+  --include-mode boost \
+  --include-weight 0.15
+```
+
+**Include modes**:
+
+- `boost` (default): soft rerank by `score + include_weight * include_score`
+- `filter`: hard gate requiring `include_score >= include_threshold`
+
+**Threshold defaults**:
+
+- `--min-score`: `0.30`
+- `--include-threshold`: `0.20`
+- `--exclude-threshold`: `0.20`
+
+## Debugging constraints
+
+Enable per-hit constraint diagnostics:
+
+```bash
+uv run dupcanon search \
+  --repo openclaw/openclaw \
+  --query "oauth error" \
+  --include "token" \
+  --debug-constraints
+```
+
+When enabled, results show `IncMax` / `ExcMax` scores and the JSON output includes `constraint_debug`.
+
+## Output formats
+
+- Default: Rich table with ranks, scores, and URLs
+- `--json`: full JSON payload to stdout
+- `--show-body-snippet`: include a truncated body snippet in the table
+
+## Source selection
+
+- Default source is `intent` (`--source intent`).
+- If intent embeddings are missing, the command falls back to raw embeddings and reports `source_fallback_reason` in the output.
+- To force raw mode: `--source raw`.

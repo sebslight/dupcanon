@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from threading import local
 from typing import Any, Literal
 
@@ -99,6 +100,43 @@ THREAD_LOCAL_JUDGE_CACHE = local()
 
 MIN_ACCEPTED_CANDIDATE_SCORE_GAP = 0.015
 
+JudgeClient = (
+    GeminiJudgeClient
+    | OpenAIJudgeClient
+    | OpenRouterJudgeClient
+    | OpenAICodexJudgeClient
+)
+
+
+@dataclass(frozen=True)
+class JudgeClientCache:
+    client: JudgeClient
+    provider: str
+    model: str
+    api_key: str
+    thinking_level: str | None
+    codex_debug: bool
+    codex_debug_sink: Any | None
+
+    def matches(
+        self,
+        *,
+        provider: str,
+        model: str,
+        api_key: str,
+        thinking_level: str | None,
+        codex_debug: bool,
+        codex_debug_sink: Any | None,
+    ) -> bool:
+        return (
+            self.provider == provider
+            and self.model == model
+            and self.api_key == api_key
+            and self.thinking_level == thinking_level
+            and self.codex_debug == codex_debug
+            and self.codex_debug_sink is codex_debug_sink
+        )
+
 
 def looks_too_vague(*, source_title: str, source_body: str | None) -> bool:
     title = normalize_text(source_title)
@@ -132,6 +170,50 @@ def looks_too_vague(*, source_title: str, source_body: str | None) -> bool:
     return char_count < _MIN_SOURCE_CHARS or word_count < _MIN_SOURCE_WORDS
 
 
+def _build_judge_client(
+    *,
+    provider: str,
+    api_key: str,
+    model: str,
+    thinking_level: str | None,
+    codex_debug: bool,
+    codex_debug_sink: Any | None,
+) -> JudgeClient:
+    if provider == "gemini":
+        return GeminiJudgeClient(
+            api_key=api_key,
+            model=model,
+            thinking_level=thinking_level,
+        )
+    if provider == "openai":
+        return OpenAIJudgeClient(
+            api_key=api_key,
+            model=model,
+            reasoning_effort=to_openai_reasoning_effort(
+                normalize_thinking_level(thinking_level)
+            ),
+        )
+    if provider == "openrouter":
+        return OpenRouterJudgeClient(
+            api_key=api_key,
+            model=model,
+            reasoning_effort=to_openai_reasoning_effort(
+                normalize_thinking_level(thinking_level)
+            ),
+        )
+    if provider == "openai-codex":
+        return OpenAICodexJudgeClient(
+            api_key=api_key,
+            model=model,
+            thinking_level=thinking_level,
+            debug=codex_debug,
+            debug_sink=codex_debug_sink,
+        )
+
+    msg = f"unsupported judge provider: {provider}"
+    raise ValueError(msg)
+
+
 def get_thread_local_judge_client(
     *,
     provider: str,
@@ -140,70 +222,36 @@ def get_thread_local_judge_client(
     thinking_level: str | None = None,
     codex_debug: bool = False,
     codex_debug_sink: Any | None = None,
-) -> GeminiJudgeClient | OpenAIJudgeClient | OpenRouterJudgeClient | OpenAICodexJudgeClient:
-    client = getattr(THREAD_LOCAL_JUDGE_CACHE, "judge_client", None)
-    current_provider = getattr(THREAD_LOCAL_JUDGE_CACHE, "judge_provider", None)
-    current_model = getattr(THREAD_LOCAL_JUDGE_CACHE, "judge_model", None)
-    current_key = getattr(THREAD_LOCAL_JUDGE_CACHE, "judge_api_key", None)
-    current_thinking = getattr(THREAD_LOCAL_JUDGE_CACHE, "judge_thinking_level", None)
-    current_codex_debug = getattr(THREAD_LOCAL_JUDGE_CACHE, "judge_codex_debug", None)
-    current_codex_debug_sink = getattr(THREAD_LOCAL_JUDGE_CACHE, "judge_codex_debug_sink", None)
-
-    if (
-        (
-            isinstance(client, GeminiJudgeClient)
-            or isinstance(client, OpenAIJudgeClient)
-            or isinstance(client, OpenRouterJudgeClient)
-            or isinstance(client, OpenAICodexJudgeClient)
-        )
-        and current_provider == provider
-        and current_model == model
-        and current_key == api_key
-        and current_thinking == thinking_level
-        and current_codex_debug == codex_debug
-        and current_codex_debug_sink is codex_debug_sink
+) -> JudgeClient:
+    cache = getattr(THREAD_LOCAL_JUDGE_CACHE, "judge_cache", None)
+    if isinstance(cache, JudgeClientCache) and cache.matches(
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        thinking_level=thinking_level,
+        codex_debug=codex_debug,
+        codex_debug_sink=codex_debug_sink,
     ):
-        return client
+        return cache.client
 
-    if provider == "gemini":
-        next_client: (
-            GeminiJudgeClient | OpenAIJudgeClient | OpenRouterJudgeClient | OpenAICodexJudgeClient
-        ) = GeminiJudgeClient(
-            api_key=api_key,
-            model=model,
-            thinking_level=thinking_level,
-        )
-    elif provider == "openai":
-        next_client = OpenAIJudgeClient(
-            api_key=api_key,
-            model=model,
-            reasoning_effort=to_openai_reasoning_effort(normalize_thinking_level(thinking_level)),
-        )
-    elif provider == "openrouter":
-        next_client = OpenRouterJudgeClient(
-            api_key=api_key,
-            model=model,
-            reasoning_effort=to_openai_reasoning_effort(normalize_thinking_level(thinking_level)),
-        )
-    elif provider == "openai-codex":
-        next_client = OpenAICodexJudgeClient(
-            api_key=api_key,
-            model=model,
-            thinking_level=thinking_level,
-            debug=codex_debug,
-            debug_sink=codex_debug_sink,
-        )
-    else:
-        msg = f"unsupported judge provider: {provider}"
-        raise ValueError(msg)
+    next_client = _build_judge_client(
+        provider=provider,
+        api_key=api_key,
+        model=model,
+        thinking_level=thinking_level,
+        codex_debug=codex_debug,
+        codex_debug_sink=codex_debug_sink,
+    )
 
-    THREAD_LOCAL_JUDGE_CACHE.judge_client = next_client
-    THREAD_LOCAL_JUDGE_CACHE.judge_provider = provider
-    THREAD_LOCAL_JUDGE_CACHE.judge_model = model
-    THREAD_LOCAL_JUDGE_CACHE.judge_api_key = api_key
-    THREAD_LOCAL_JUDGE_CACHE.judge_thinking_level = thinking_level
-    THREAD_LOCAL_JUDGE_CACHE.judge_codex_debug = codex_debug
-    THREAD_LOCAL_JUDGE_CACHE.judge_codex_debug_sink = codex_debug_sink
+    THREAD_LOCAL_JUDGE_CACHE.judge_cache = JudgeClientCache(
+        client=next_client,
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        thinking_level=thinking_level,
+        codex_debug=codex_debug,
+        codex_debug_sink=codex_debug_sink,
+    )
     return next_client
 
 

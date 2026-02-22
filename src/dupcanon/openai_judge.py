@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
 
-from dupcanon.llm_retry import retry_delay_seconds, should_retry_http_status, validate_max_attempts
+from dupcanon.llm_retry import retry_with_backoff, should_retry_http_status, validate_max_attempts
+from dupcanon.llm_text import extract_text_from_content
+from dupcanon.thinking import normalize_reasoning_effort
 
 
 class OpenAIJudgeError(RuntimeError):
@@ -16,9 +17,6 @@ class OpenAIJudgeError(RuntimeError):
 
 def _should_retry(status_code: int | None) -> bool:
     return should_retry_http_status(status_code)
-
-
-_ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 
 def _build_responses_input(*, system_prompt: str, user_prompt: str) -> list[dict[str, Any]]:
@@ -43,13 +41,7 @@ class OpenAIJudgeClient:
         reasoning_effort: str | None = None,
         max_attempts: int = 5,
     ) -> None:
-        normalized_reasoning = reasoning_effort.strip().lower() if reasoning_effort else None
-        if (
-            normalized_reasoning is not None
-            and normalized_reasoning not in _ALLOWED_REASONING_EFFORTS
-        ):
-            msg = "reasoning_effort must be one of: none, minimal, low, medium, high, xhigh"
-            raise ValueError(msg)
+        normalized_reasoning = normalize_reasoning_effort(reasoning_effort)
         validate_max_attempts(max_attempts)
 
         self.client = OpenAI(api_key=api_key)
@@ -91,55 +83,44 @@ class OpenAIJudgeClient:
         user_prompt: str,
         format_payload: dict[str, Any],
     ) -> str:
-        last_error: OpenAIJudgeError | None = None
+        def _attempt() -> str:
+            request: dict[str, Any] = {
+                "model": self.model,
+                "input": _build_responses_input(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                ),
+                "temperature": 1,
+                "text": {"format": format_payload},
+            }
+            if self.reasoning_effort is not None:
+                request["reasoning"] = {"effort": self.reasoning_effort}
 
-        for attempt in range(1, self.max_attempts + 1):
-            try:
-                request: dict[str, Any] = {
-                    "model": self.model,
-                    "input": _build_responses_input(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                    ),
-                    "temperature": 1,
-                    "text": {"format": format_payload},
-                }
-                if self.reasoning_effort is not None:
-                    request["reasoning"] = {"effort": self.reasoning_effort}
+            response = self.client.responses.create(**request)
+            text = _extract_response_text(response)
+            if text:
+                return text
+            msg = "judge model returned empty text"
+            raise OpenAIJudgeError(msg)
 
-                response = self.client.responses.create(**request)
-                text = _extract_response_text(response)
-                if text:
-                    return text
-                msg = "judge model returned empty text"
-                raise OpenAIJudgeError(msg)
-            except RateLimitError as exc:
-                err = OpenAIJudgeError(str(exc), status_code=429)
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
-            except APIStatusError as exc:
+        def _map_error(exc: Exception) -> tuple[bool, OpenAIJudgeError]:
+            if isinstance(exc, OpenAIJudgeError):
+                return True, exc
+            if isinstance(exc, RateLimitError):
+                return True, OpenAIJudgeError(str(exc), status_code=429)
+            if isinstance(exc, APIStatusError):
                 status_code = _status_code(exc)
                 err = OpenAIJudgeError(str(exc), status_code=status_code)
-                last_error = err
-                if attempt >= self.max_attempts or not _should_retry(status_code):
-                    raise err from exc
-            except (APIConnectionError, APITimeoutError) as exc:
-                err = OpenAIJudgeError(str(exc))
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
-            except Exception as exc:  # noqa: BLE001
-                err = OpenAIJudgeError(str(exc))
-                last_error = err
-                if attempt >= self.max_attempts:
-                    raise err from exc
+                return _should_retry(status_code), err
+            if isinstance(exc, (APIConnectionError, APITimeoutError)):
+                return True, OpenAIJudgeError(str(exc))
+            return True, OpenAIJudgeError(str(exc))
 
-            time.sleep(retry_delay_seconds(attempt))
-
-        if last_error is not None:
-            raise last_error
-        raise OpenAIJudgeError("unreachable judge retry state")
+        return retry_with_backoff(
+            max_attempts=self.max_attempts,
+            attempt=_attempt,
+            on_error=_map_error,
+        )
 
 
 
@@ -155,19 +136,9 @@ def _extract_response_text(response: Any) -> str:
             content = getattr(item, "content", None)
             if content is None and isinstance(item, dict):
                 content = item.get("content")
-            if not isinstance(content, list):
-                continue
-
-            for part in content:
-                text = getattr(part, "text", None)
-                if isinstance(text, str) and text.strip():
-                    chunks.append(text)
-                    continue
-
-                if isinstance(part, dict):
-                    value = part.get("text")
-                    if isinstance(value, str) and value.strip():
-                        chunks.append(value)
+            text = extract_text_from_content(content)
+            if text:
+                chunks.append(text)
 
         if chunks:
             return "".join(chunks).strip()
