@@ -113,6 +113,7 @@ Before considering work complete:
 - `uv run pyright`
 - `uv run pytest`
 - Update docs/spec if behavior or defaults changed
+- Update `dupcanon llm` how-to output in `src/dupcanon/cli.py` when CLI behavior, defaults, guardrails, or workflows change
 - Add/update a journal entry in `docs/internal/journal.md` after each completed phase or meaningful block of work, including:
   - what was done
   - validation performed (if any)

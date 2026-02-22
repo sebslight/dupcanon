@@ -1822,3 +1822,14 @@ Validation
 - `uv run ruff check src tests`
 - `uv run pyright`
 - `uv run pytest` (343 passed)
+
+### 2026-02-22 — Entry 70 (LLM CLI reference + docs)
+
+What we did
+- Added `dupcanon llm` JSON output with compact defaults plus `--full` for verbose metadata.
+- Added a built-in how-to section with workflows, guardrails, and example command sequences.
+- Updated Mintlify docs (`docs/index.mdx`, `docs/get-started.mdx`, `docs/architecture.mdx`) to document `llm`.
+- Updated `AGENTS.md` to keep the LLM reference output in sync with CLI changes.
+
+Validation
+- `uv run dupcanon llm`

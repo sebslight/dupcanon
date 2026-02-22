@@ -3,12 +3,19 @@ from __future__ import annotations
 import json
 import shutil
 import uuid
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import click
 import typer
+from pydantic_core import PydanticUndefined
 from rich.console import Console
 from rich.table import Table
+from typer.main import get_command
+
+from dupcanon import __version__
 
 from dupcanon.apply_close_service import run_apply_close
 from dupcanon.artifacts import write_artifact
@@ -481,6 +488,315 @@ def _persist_command_failure_artifact(
     return str(artifact_path) if artifact_path is not None else None
 
 
+def _jsonify_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _jsonify_value(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonify_value(item) for item in value]
+    return str(value)
+
+
+def _click_type_info(param_type: click.ParamType, *, full: bool) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "name": type(param_type).__name__,
+    }
+    if full:
+        info["repr"] = repr(param_type)
+    if isinstance(param_type, click.Choice):
+        info["choices"] = list(param_type.choices)
+        info["case_sensitive"] = param_type.case_sensitive
+    if isinstance(param_type, click.IntRange):
+        info["min"] = param_type.min
+        info["max"] = param_type.max
+        if full:
+            info["clamp"] = param_type.clamp
+    if isinstance(param_type, click.FloatRange):
+        info["min"] = param_type.min
+        info["max"] = param_type.max
+        if full:
+            info["clamp"] = param_type.clamp
+    if isinstance(param_type, click.Tuple):
+        info["tuple_types"] = [_click_type_info(inner, full=full) for inner in param_type.types]
+    if isinstance(param_type, click.Path):
+        path_type = getattr(param_type, "path_type", None)
+        if path_type is None:
+            path_type = getattr(param_type, "type", None)
+        info.update(
+            {
+                "exists": param_type.exists,
+                "file_okay": param_type.file_okay,
+                "dir_okay": param_type.dir_okay,
+                "path_type": str(path_type) if path_type is not None else None,
+            }
+        )
+        if full:
+            info.update(
+                {
+                    "readable": param_type.readable,
+                    "writable": param_type.writable,
+                    "executable": param_type.executable,
+                    "resolve_path": param_type.resolve_path,
+                    "allow_dash": param_type.allow_dash,
+                }
+            )
+    return info
+
+
+def _serialize_click_param(param: click.Parameter, *, full: bool) -> dict[str, Any]:
+    default_value = _jsonify_value(param.default)
+    has_default = param.default is not None or not param.required
+
+    data: dict[str, Any] = {
+        "name": param.name,
+        "param_type": param.param_type_name,
+        "required": param.required,
+        "has_default": has_default,
+        "default": default_value,
+        "nargs": param.nargs,
+        "multiple": param.multiple,
+        "type": _click_type_info(param.type, full=full),
+    }
+
+    if isinstance(param, click.Option):
+        data.update(
+            {
+                "opts": list(param.opts),
+                "secondary_opts": list(param.secondary_opts),
+                "help": param.help,
+                "is_flag": param.is_flag,
+                "is_bool_flag": param.is_bool_flag,
+                "flag_value": _jsonify_value(param.flag_value) if param.is_flag else None,
+            }
+        )
+        if full:
+            data.update(
+                {
+                    "count": param.count,
+                    "prompt": param.prompt,
+                    "envvar": param.envvar,
+                    "show_default": param.show_default,
+                    "show_envvar": param.show_envvar,
+                    "hidden": param.hidden,
+                    "expose_value": param.expose_value,
+                }
+            )
+
+    if isinstance(param, click.Argument):
+        data.update(
+            {
+                "metavar": param.metavar,
+                "nargs": param.nargs,
+            }
+        )
+
+    return data
+
+
+def _build_command_tree(
+    command: click.Command,
+    *,
+    root_name: str,
+    path: list[str] | None = None,
+    full: bool = False,
+) -> dict[str, Any]:
+    if path is None:
+        path = []
+
+    full_command = " ".join([root_name, *path]) if path else root_name
+    ctx = click.Context(command, info_name=full_command)
+
+    command_info: dict[str, Any] = {
+        "name": command.name or root_name,
+        "command_path": [root_name, *path],
+        "full_command": full_command,
+        "help": command.help,
+        "short_help": command.short_help,
+        "usage": command.get_usage(ctx).strip(),
+        "parameters": [_serialize_click_param(param, full=full) for param in command.params],
+        "subcommands": [],
+    }
+
+    if full:
+        command_info.update(
+            {
+                "help_text": command.get_help(ctx),
+                "epilog": command.epilog,
+                "hidden": command.hidden,
+                "deprecated": getattr(command, "deprecated", None),
+                "callback": (
+                    f"{command.callback.__module__}:{command.callback.__name__}"
+                    if command.callback is not None
+                    else None
+                ),
+            }
+        )
+
+    if isinstance(command, click.Group):
+        subcommands: list[dict[str, Any]] = []
+        for sub_name in command.list_commands(ctx):
+            sub_command = command.get_command(ctx, sub_name)
+            if sub_command is None:
+                continue
+            subcommands.append(
+                _build_command_tree(
+                    sub_command,
+                    root_name=root_name,
+                    path=[*path, sub_name],
+                    full=full,
+                )
+            )
+        command_info["subcommands"] = subcommands
+
+    return command_info
+
+
+def _settings_reference(*, full: bool) -> list[dict[str, Any]]:
+    settings_info: list[dict[str, Any]] = []
+    for name, field in Settings.model_fields.items():
+        alias = field.validation_alias
+        env: str | list[str] | None
+        if alias is None:
+            env = None
+        elif hasattr(alias, "choices"):
+            env = [str(choice) for choice in alias.choices]
+        else:
+            env = str(alias)
+
+        default: Any | None = None
+        if field.default is not PydanticUndefined:
+            default = _jsonify_value(field.default)
+
+        entry: dict[str, Any] = {
+            "name": name,
+            "env": env,
+            "default": default,
+        }
+        if full:
+            entry.update(
+                {
+                    "type": str(field.annotation),
+                    "required": field.is_required(),
+                }
+            )
+        settings_info.append(entry)
+
+    return settings_info
+
+
+def _llm_howto(*, full: bool) -> dict[str, Any]:
+    repo_placeholder = "<org>/<repo>"
+    howto: dict[str, Any] = {
+        "summary": (
+            "dupcanon is a DB-first duplicate canonicalization CLI for GitHub issues/PRs. "
+            "Use the batch pipeline for many items, and detect-new for a single new item."
+        ),
+        "workflows": [
+            {
+                "name": "batch-canonicalization",
+                "goal": "Canonicalize duplicates across a repo with auditability and guardrails.",
+                "steps": [
+                    "init (optional): validate runtime/env",
+                    "sync or refresh: ingest/update issues/PRs",
+                    "analyze-intent (optional): extract intent cards",
+                    "embed: generate embeddings (default intent)",
+                    "candidates: retrieve nearest neighbors",
+                    "judge: LLM duplicate decisions",
+                    "canonicalize: choose canonical items per cluster",
+                    "plan-close: propose closes with guardrails",
+                    "apply-close: execute reviewed plan with --yes",
+                ],
+            },
+            {
+                "name": "online-detect",
+                "goal": "Classify a single new issue/PR as duplicate/maybe/not-duplicate.",
+                "steps": ["detect-new --repo ... --type issue|pr --number N"],
+            },
+            {
+                "name": "search",
+                "goal": "One-shot semantic search over issues/PRs (read-only).",
+                "steps": [
+                    "search --query \"...\" OR search --similar-to <number>",
+                    "optional: --include/--exclude constraints",
+                ],
+            },
+        ],
+        "guardrails": [
+            "apply-close requires a reviewed close_run from plan-close plus --yes",
+            "judge acceptance defaults: min_edge>=0.85, target must be open, score gap>=0.015",
+            "plan-close default min_close=0.90 with target-policy=canonical-only",
+            "intent representation is default; use --source raw for rollback/A-B",
+        ],
+        "examples": [
+            {
+                "description": "Batch pipeline (issues)",
+                "commands": [
+                    f"uv run dupcanon sync --repo {repo_placeholder} --since 3d",
+                    f"uv run dupcanon refresh --repo {repo_placeholder} --refresh-known",
+                    f"uv run dupcanon embed --repo {repo_placeholder} --type issue --only-changed",
+                    f"uv run dupcanon candidates --repo {repo_placeholder} --type issue --include open",
+                    f"uv run dupcanon judge --repo {repo_placeholder} --type issue",
+                    f"uv run dupcanon canonicalize --repo {repo_placeholder} --type issue",
+                    f"uv run dupcanon plan-close --repo {repo_placeholder} --type issue --dry-run",
+                ],
+            },
+            {
+                "description": "Apply close after review",
+                "commands": [
+                    f"uv run dupcanon plan-close --repo {repo_placeholder} --type issue",
+                    "uv run dupcanon apply-close --close-run <id> --yes",
+                ],
+            },
+            {
+                "description": "Online detect-new",
+                "commands": [
+                    (
+                        f"uv run dupcanon detect-new --repo {repo_placeholder} "
+                        "--type issue --number 123 --json-out .local/artifacts/detect-new-123.json"
+                    )
+                ],
+            },
+            {
+                "description": "Search",
+                "commands": [
+                    (
+                        f"uv run dupcanon search --repo {repo_placeholder} "
+                        "--query \"cron scheduler regressions\" --type all"
+                    )
+                ],
+            },
+        ],
+        "docs": {
+            "public": [
+                "docs/index.mdx",
+                "docs/get-started.mdx",
+                "docs/architecture.mdx",
+                "docs/evaluation.mdx",
+            ],
+            "internal": [
+                "docs/internal/duplicate_triage_cli_python_spec_design_doc_v_1.md",
+                "docs/internal/operator_runbook_v1.md",
+                "docs/internal/online_duplicate_detection_pipeline_design_doc_v1.md",
+            ],
+        },
+    }
+
+    if full:
+        howto["notes"] = [
+            "Default embedding provider is OpenAI text-embedding-3-large (3072 dims).",
+            "Default judge provider is openai-codex via pi RPC (gpt-5.1-codex-mini).",
+        ]
+
+    return howto
+
+
 def _format_audit_lane(
     *,
     status: str,
@@ -934,6 +1250,35 @@ def init() -> None:
         status="ok",
         checks=checks,
     )
+
+
+@app.command()
+def llm(
+    full: bool = typer.Option(
+        False,
+        "--full/--no-full",
+        help="Include full Click help/type metadata",
+    ),
+) -> None:
+    """Emit a machine-readable CLI reference for LLM agents."""
+    _, run_id, _ = _bootstrap("llm")
+
+    cli_name = "dupcanon"
+    root_command = get_command(app)
+    reference = _build_command_tree(root_command, root_name=cli_name, full=full)
+
+    payload = {
+        "cli_name": cli_name,
+        "version": __version__,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id,
+        "full": full,
+        "root_command": reference,
+        "settings": _settings_reference(full=full),
+        "how_to": _llm_howto(full=full),
+    }
+
+    print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
 
 
 @app.command()
